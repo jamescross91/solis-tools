@@ -1,8 +1,10 @@
 # solis-tools
 
-`solis_poll.py` is a lightweight, nmon-inspired terminal monitor for a Solis inverter exposed over Modbus TCP. It uses a persistent native Python Modbus connection, avoiding the process and connection overhead of the original `mbpoll` shell loop.
+`solis_poll.py` is a lightweight, nmon-inspired, real-time terminal monitor for a Solis inverter exposed over Modbus TCP. It uses a persistent native Python Modbus connection, avoiding the process and connection overhead of the original `mbpoll` shell loop.
 
 It only reads input registers; it never writes to the inverter.
+
+I built this because I got fed up with the Solis Cloud 5 minute + lag when monitoring the inverter.
 
 ## Requirements
 
