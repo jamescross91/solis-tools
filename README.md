@@ -16,10 +16,12 @@ PV monitoring is **off by default**, so installations without panels do not read
 
 ## Install with Homebrew
 
-On macOS or Linux, install the latest stable release from the project tap:
+On macOS or Linux, add this repository as a Homebrew tap, then install the
+latest stable release:
 
 ```sh
-brew install jamescross91/tap/solis-tools
+brew tap jamescross91/solis-tools https://github.com/jamescross91/solis-tools
+brew install jamescross91/solis-tools/solis-tools
 ```
 
 Then run:

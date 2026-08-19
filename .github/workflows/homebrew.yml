@@ -1,0 +1,25 @@
+name: Homebrew
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+      - name: Register repository as a tap
+        run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
+      - name: Audit formula
+        run: brew audit --strict --online jamescross91/solis-tools/solis-tools
+      - name: Install formula
+        run: brew install --build-from-source jamescross91/solis-tools/solis-tools
+      - name: Test formula
+        run: brew test jamescross91/solis-tools/solis-tools
