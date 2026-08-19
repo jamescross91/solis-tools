@@ -47,6 +47,7 @@ struct StreamContractValidation {
         precondition(envelope.schemaVersion == 1)
         precondition(envelope.reading.houseLoadKw == 1.58)
         precondition(envelope.reading.batterySocPercent == 93)
+        precondition(envelope.reading.gridImportPositiveKw == 0.5)
         precondition(HistoryMetric.battery.value(from: envelope.reading) == 1.72)
         precondition(StreamDecoder.date(from: envelope.timestamp) != nil)
         print("Stream contract validated")
