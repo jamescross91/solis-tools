@@ -12,6 +12,11 @@ struct DashboardView: View {
     @AppStorage("inverterMaxKw") private var inverterMaxKw = 10.0
     @AppStorage("gridMaxKw") private var gridMaxKw = 23.0
     @AppStorage("pvEnabled") private var pvEnabled = false
+    @AppStorage("menuBarHouseLoad") private var showHouseLoad = true
+    @AppStorage("menuBarBattery") private var showBattery = true
+    @AppStorage("menuBarGrid") private var showGrid = true
+    @AppStorage("menuBarTemperature") private var showTemperature = false
+    @AppStorage("menuBarPV") private var showPV = false
 
     @State private var showingSettings = false
     @State private var selectedMetric: HistoryMetric = .house
@@ -109,7 +114,7 @@ struct DashboardView: View {
             )
             MetricCard(
                 title: "Grid",
-                value: String(format: "%.2f kW", abs(reading.gridKw)),
+                value: String(format: "%+.2f kW", reading.gridImportPositiveKw),
                 detail: reading.gridStatus,
                 symbol: "bolt.horizontal.fill",
                 colour: reading.gridStatus == "Exporting" ? .cyan : .orange
@@ -275,6 +280,19 @@ struct DashboardView: View {
                 Text("kW").foregroundStyle(.secondary)
             }
             Toggle("Enable PV registers", isOn: $pvEnabled)
+
+            Divider()
+            Text("Menu bar metrics")
+                .font(.headline)
+            Toggle("House load", isOn: $showHouseLoad)
+            Toggle("Battery state of charge", isOn: $showBattery)
+            Toggle("Grid flow", isOn: $showGrid)
+            Toggle("Inverter temperature", isOn: $showTemperature)
+            Toggle("PV generation", isOn: $showPV)
+                .disabled(!pvEnabled)
+            Text("Choose the live values shown without opening the dashboard.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             HStack {
                 Button("Save and connect") {

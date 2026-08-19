@@ -33,11 +33,6 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         }
     }
 
-    var menuTitle: String {
-        guard let reading = latest?.reading else { return "Solis" }
-        return String(format: "%.2f kW", reading.houseLoadKw)
-    }
-
     var menuSymbol: String {
         if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
             return "exclamationmark.triangle.fill"
@@ -47,6 +42,29 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         case .connecting: return "arrow.triangle.2.circlepath"
         case .degraded, .failed: return "wifi.exclamationmark"
         case .stopped: return "bolt.house"
+        }
+    }
+
+    var hasMenuAlert: Bool {
+        if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
+            return true
+        }
+        switch state {
+        case .degraded, .failed: return true
+        case .stopped, .connecting, .connected: return false
+        }
+    }
+
+    var menuStatusLabel: String {
+        if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
+            return "Solis inverter fault"
+        }
+        switch state {
+        case .degraded: return "Solis connection degraded"
+        case .failed: return "Solis connection failed"
+        case .stopped: return "Solis stopped"
+        case .connecting: return "Solis connecting"
+        case .connected: return "Solis connected"
         }
     }
 
