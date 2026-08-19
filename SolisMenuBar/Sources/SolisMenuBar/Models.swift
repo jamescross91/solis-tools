@@ -33,6 +33,9 @@ struct InverterReading: Decodable, Sendable {
     let pvKw: Double?
     let pvTodayKwh: Double?
     let alarms: [InverterAlarm]
+
+    /// Grid power with the display convention used by the menu bar: imports are positive and exports are negative.
+    var gridImportPositiveKw: Double { -gridKw }
 }
 
 struct InverterAlarm: Decodable, Identifiable, Sendable {
