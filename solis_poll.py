@@ -9,12 +9,15 @@ import logging
 import shutil
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NoReturn
 
 
 MIN_PYTHON = (3, 9)
+HISTORY_SECONDS = 6 * 60 * 60
+SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 
 def fail(message: str, code: int = 2) -> NoReturn:
@@ -157,16 +160,102 @@ def bar(value: float, maximum: float, width: int, palette: Palette, colour: str)
     return palette.apply(colour, text)
 
 
-def render(reading: Reading, args: argparse.Namespace, palette: Palette, error: str | None) -> str:
+def battery_flow(reading: Reading) -> float:
+    """Return signed battery power: positive discharge, negative charge."""
+    if reading.battery_status == "Discharging":
+        return reading.battery_kw
+    if reading.battery_status == "Charging":
+        return -reading.battery_kw
+    return 0.0
+
+
+def sparkline(values: list[float], width: int) -> tuple[str, float, float]:
+    """Downsample all retained history into a fixed-width Unicode line graph."""
+    if not values:
+        return " " * width, 0.0, 0.0
+
+    low = min(values)
+    high = max(values)
+    if len(values) == 1:
+        sampled = values * width
+    elif len(values) < width:
+        sampled = []
+        for column in range(width):
+            position = column * (len(values) - 1) / (width - 1)
+            left = int(position)
+            right = min(left + 1, len(values) - 1)
+            fraction = position - left
+            sampled.append(values[left] + (values[right] - values[left]) * fraction)
+    else:
+        sampled = []
+        for column in range(width):
+            start = column * len(values) // width
+            end = max(start + 1, (column + 1) * len(values) // width)
+            bucket = values[start:end]
+            sampled.append(sum(bucket) / len(bucket))
+
+    if high == low:
+        graph = SPARK_LEVELS[len(SPARK_LEVELS) // 2] * len(sampled)
+    else:
+        graph = "".join(
+            SPARK_LEVELS[
+                min(
+                    len(SPARK_LEVELS) - 1,
+                    round((value - low) / (high - low) * (len(SPARK_LEVELS) - 1)),
+                )
+            ]
+            for value in sampled
+        )
+    return graph, low, high
+
+
+def format_duration(seconds: float) -> str:
+    elapsed = max(0, int(seconds))
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+
+
+def history_window_label(started_at: float, now: float) -> str:
+    elapsed = now - started_at
+    if elapsed < HISTORY_SECONDS:
+        return f"since launch {format_duration(elapsed)}"
+    return f"last {format_duration(HISTORY_SECONDS)}"
+
+
+def history_row(
+    label: str,
+    values: list[float],
+    width: int,
+    unit: str,
+    palette: Palette,
+    colour: str,
+    decimals: int = 1,
+) -> str:
+    graph, low, high = sparkline(values, width)
+    limits = f"{low:.{decimals}f}…{high:.{decimals}f} {unit}"
+    return f" {label:<10} {palette.apply(colour, graph)}  {limits}"
+
+
+def render(
+    reading: Reading,
+    args: argparse.Namespace,
+    palette: Palette,
+    error: str | None,
+    history: deque[tuple[float, Reading]],
+    started_at: float,
+) -> str:
     columns = shutil.get_terminal_size(fallback=(90, 24)).columns
     chart_width = max(12, min(42, columns - 47))
-    scale = args.power_scale
+    history_width = max(12, min(48, columns - 37))
     line = "─" * max(30, min(columns - 1, 88))
     timestamp = datetime.now().strftime("%H:%M:%S")
+    now = time.monotonic()
 
     battery_colour = "1;32" if reading.battery_status == "Discharging" else "1;34"
     grid_colour = "1;36" if reading.grid_status == "Exporting" else "1;33"
     grid_display = abs(reading.grid_kw)
+    history_readings = [item for _, item in history]
 
     rows = [
         f"{palette.title('SOLIS LIVE')}  {palette.dim(f'{args.host}:{args.port}  slave {args.slave}')}  {palette.dim(timestamp)}",
@@ -174,11 +263,21 @@ def render(reading: Reading, args: argparse.Namespace, palette: Palette, error: 
         f" Grid voltage   {reading.voltage:6.1f} V   {bar(reading.voltage, 260, chart_width, palette, '1;36')}",
         f" Battery SoC    {reading.state_of_charge:6d} %   {bar(reading.state_of_charge, 100, chart_width, palette, '1;32')}",
         line,
-        f" House load     {reading.house_load_kw:6.2f} kW  {bar(reading.house_load_kw, scale, chart_width, palette, '1;35')}",
-        f" Battery        {reading.battery_kw:6.2f} kW  {bar(reading.battery_kw, scale, chart_width, palette, battery_colour)} {palette.good(reading.battery_status) if reading.battery_status != 'Idle' else palette.dim('Idle')}",
-        f" Grid           {grid_display:6.2f} kW  {bar(grid_display, scale, chart_width, palette, grid_colour)} {palette.apply(grid_colour, reading.grid_status) if reading.grid_status != 'Idle' else palette.dim('Idle')}",
+        f" House load     {reading.house_load_kw:6.2f} kW  {bar(reading.house_load_kw, args.inverter_max_kw, chart_width, palette, '1;35')}",
+        f" Battery        {reading.battery_kw:6.2f} kW  {bar(reading.battery_kw, args.inverter_max_kw, chart_width, palette, battery_colour)} {palette.good(reading.battery_status) if reading.battery_status != 'Idle' else palette.dim('Idle')}",
+        f" Grid           {grid_display:6.2f} kW  {bar(grid_display, args.grid_max_kw, chart_width, palette, grid_colour)} {palette.apply(grid_colour, reading.grid_status) if reading.grid_status != 'Idle' else palette.dim('Idle')}",
         line,
-        palette.dim(f"Power bars are 0–{scale:g} kW.  Refresh: {args.interval:g}s.  Ctrl-C to quit."),
+        f" {palette.title('HISTORY')}  {palette.dim(f'{history_window_label(started_at, now)} · rolling 6h maximum')}",
+        history_row("Voltage", [item.voltage for item in history_readings], history_width, "V", palette, "1;36"),
+        history_row("SoC", [float(item.state_of_charge) for item in history_readings], history_width, "%", palette, "1;32", 0),
+        history_row("House load", [item.house_load_kw for item in history_readings], history_width, "kW", palette, "1;35", 2),
+        history_row("Battery", [battery_flow(item) for item in history_readings], history_width, "kW", palette, "1;34", 2),
+        history_row("Grid", [item.grid_kw for item in history_readings], history_width, "kW", palette, "1;33", 2),
+        line,
+        palette.dim(
+            f"Bars: inverter {args.inverter_max_kw:g} kW · grid {args.grid_max_kw:g} kW. "
+            f"Refresh: {args.interval:g}s. Ctrl-C to quit."
+        ),
     ]
     if error:
         rows.append(palette.warn(f" Last poll failed: {error}"))
@@ -212,7 +311,18 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Modbus request timeout in seconds (default: 3)",
     )
-    parser.add_argument("--power-scale", type=float, default=10, help="full-scale kW value for power bars")
+    parser.add_argument(
+        "--inverter-max-kw",
+        type=float,
+        default=10,
+        help="inverter full-scale value for house/battery bars (default: 10)",
+    )
+    parser.add_argument(
+        "--grid-max-kw",
+        type=float,
+        default=23,
+        help="grid full-scale value for the grid bar (default: 23)",
+    )
     parser.add_argument("--once", action="store_true", help="print one plain-text reading and exit")
     parser.add_argument("--no-colour", action="store_true", help="disable ANSI colours")
     args = parser.parse_args()
@@ -224,8 +334,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--port must be between 1 and 65535")
     if args.slave < 0 or args.slave > 255:
         parser.error("--slave must be between 0 and 255")
-    if args.interval <= 0 or args.power_scale <= 0:
-        parser.error("--interval and --power-scale must be greater than zero")
+    if args.interval <= 0 or args.inverter_max_kw <= 0 or args.grid_max_kw <= 0:
+        parser.error("--interval, --inverter-max-kw and --grid-max-kw must be greater than zero")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
     return args
@@ -238,6 +348,8 @@ def main() -> int:
     client = SolisClient(args.host, args.port, args.slave, args.timeout)
     last_reading: Reading | None = None
     last_error: str | None = None
+    history: deque[tuple[float, Reading]] = deque()
+    started_at = time.monotonic()
 
     try:
         client.connect()
@@ -247,6 +359,11 @@ def main() -> int:
             try:
                 last_reading = client.poll()
                 last_error = None
+                sampled_at = time.monotonic()
+                history.append((sampled_at, last_reading))
+                cutoff = sampled_at - HISTORY_SECONDS
+                while history and history[0][0] < cutoff:
+                    history.popleft()
             except (ConnectionError, OSError, client.modbus_exception) as exc:
                 last_error = str(exc)
                 # Reconnect after a router or inverter restart without stopping the monitor.
@@ -262,9 +379,16 @@ def main() -> int:
                 print_once(last_reading)
                 return 0
             if dashboard:
-                print("\033[H\033[2J" + render(last_reading, args, palette, last_error), flush=True)
+                print(
+                    "\033[H\033[2J"
+                    + render(last_reading, args, palette, last_error, history, started_at),
+                    flush=True,
+                )
             else:
-                print(render(last_reading, args, palette, last_error), flush=True)
+                print(
+                    render(last_reading, args, palette, last_error, history, started_at),
+                    flush=True,
+                )
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 130

@@ -28,7 +28,7 @@ The inverter data-logger IP is deliberately mandatory:
 ./solis_poll.py --host 192.168.1.57
 ```
 
-The defaults are port `502`, slave ID `1`, a 0.5-second refresh, and a three-second Modbus timeout:
+The defaults are port `502`, slave ID `1`, a 0.5-second refresh, a three-second Modbus timeout, 10 kW inverter capacity, and 23 kW grid capacity:
 
 ```sh
 ./solis_poll.py --host 192.168.1.57 --port 502 --slave 1 --interval 1
@@ -40,14 +40,33 @@ Use `--once` for a plain-text, script-friendly health check:
 ./solis_poll.py --host 192.168.1.57 --once --timeout 5
 ```
 
+Set the bar-chart capacities to match the installation:
+
+```sh
+./solis_poll.py --host 192.168.1.57 --inverter-max-kw 10 --grid-max-kw 23
+```
+
 Other useful display options:
 
 ```sh
-./solis_poll.py --host 192.168.1.57 --power-scale 5  # full power bar = 5 kW
-./solis_poll.py --host 192.168.1.57 --no-colour      # disable ANSI colours
+./solis_poll.py --host 192.168.1.57 --no-colour  # disable ANSI colours
 ```
 
-In an interactive terminal, the monitor redraws a compact coloured dashboard with voltage and state-of-charge gauges, plus power bars for house load, battery and grid flow. Press `Ctrl-C` to stop.
+In an interactive terminal, the monitor redraws a coloured dashboard with voltage and state-of-charge gauges, plus power bars for house load, battery and grid flow. Press `Ctrl-C` to stop.
+
+## History graphs
+
+The dashboard keeps successful readings in memory from launch and renders a rolling line graph for every metric:
+
+- grid voltage
+- battery state of charge
+- house load
+- battery flow
+- grid flow
+
+History is capped at six hours. Once the monitor has run longer than that, the oldest readings are discarded automatically. The graphs downsample the retained readings to the available terminal width, while the labels show the observed minimum and maximum.
+
+Battery history is positive when discharging and negative when charging. Grid history is positive when exporting and negative when importing. History is not written to disk and starts afresh each time the tool launches.
 
 ## Register assumptions
 
