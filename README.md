@@ -4,6 +4,7 @@
 
 It provides:
 
+- a native macOS menu-bar dashboard with live metrics and selectable charts
 - live voltage, temperature, battery, house-load and grid-flow gauges
 - inverter state plus decoded inverter and BMS fault indicators
 - connection latency, last-sample age, failure and reconnect counters
@@ -29,6 +30,22 @@ Then run:
 ```sh
 solis-poll --host 192.168.1.57
 ```
+
+On macOS 13 or later, the same package also installs the native menu-bar app:
+
+```sh
+solis-menubar
+```
+
+Open its menu-bar item, enter the inverter data-logger IP, and select **Save and
+connect**. The app shows house load in the menu bar and provides battery, grid,
+temperature, voltage, alarms, connection health and selectable six-hour charts
+in its popover. Its connection settings are stored in the current macOS user's
+preferences. PV remains disabled unless enabled in the app settings.
+
+The menu-bar app is built locally by Homebrew from the release source, so it
+does not require a separately downloaded or unsigned application bundle. Linux
+installations continue to install the terminal monitor only.
 
 Homebrew installs Python and PyModbus in an isolated environment. Upgrade or remove it with:
 
@@ -82,6 +99,13 @@ Use `--once` for a plain-text, script-friendly health check:
 ```
 
 Use `--no-colour` to disable ANSI colours. Press `Ctrl-C` to stop the live dashboard.
+
+Use `--stream-json` to emit a versioned JSON object after every poll. This is
+the integration interface used by the menu-bar app:
+
+```sh
+./solis_poll.py --host 192.168.1.57 --stream-json
+```
 
 ## Optional PV monitoring
 
@@ -172,6 +196,13 @@ python3 -m unittest -v
 ```
 
 Tests cover status and fault decoding, BMS bit reporting, history recording/restoration, chart generation and simulated Modbus responses with PV both enabled and disabled.
+
+Build and validate the macOS app with:
+
+```sh
+swift build --disable-sandbox --package-path SolisMenuBar
+./scripts/build_menubar_app.sh release
+```
 
 ## Troubleshooting
 

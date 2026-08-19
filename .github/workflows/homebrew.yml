@@ -6,6 +6,34 @@ on:
   pull_request:
 
 jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest -v
+
+  menubar:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build Swift menu-bar app
+        run: ./scripts/build_menubar_app.sh release
+      - name: Validate JSON stream contract
+        run: |
+          swiftc -parse-as-library \
+            SolisMenuBar/Sources/SolisMenuBar/Models.swift \
+            SolisMenuBar/Validation/StreamContractValidation.swift \
+            -o /tmp/solis-stream-contract
+          /tmp/solis-stream-contract
+      - name: Verify app bundle
+        run: |
+          codesign --verify --deep --strict build/menubar/SolisMenuBar.app
+          plutil -lint build/menubar/SolisMenuBar.app/Contents/Info.plist
+
   test:
     strategy:
       matrix:

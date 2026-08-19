@@ -19,7 +19,7 @@ from typing import IO, Any, NoReturn
 
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HISTORY_SECONDS = 6 * 60 * 60
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
@@ -796,6 +796,80 @@ def print_once(reading: Reading, device: DeviceInfo, health: ConnectionHealth) -
     print(f"poll_latency_ms={health.latency_ms:.1f}")
 
 
+def stream_payload(
+    reading: Reading,
+    device: DeviceInfo,
+    health: ConnectionHealth,
+    error: str | None,
+    timestamp: datetime,
+) -> dict[str, Any]:
+    """Return the versioned JSON contract consumed by the menu-bar app."""
+    sampled_at = timestamp.isoformat(timespec="milliseconds")
+    age = None
+    if health.last_success_at is not None:
+        age = max(0.0, timestamp.timestamp() - health.last_success_at)
+    return {
+        "schema_version": 1,
+        "timestamp": sampled_at,
+        "device": {
+            "model_code": device.model_code,
+            "dsp_version": device.dsp_version,
+            "hmi_version": device.hmi_version,
+            "protocol_version": device.protocol_version,
+            "type_definition": device.type_definition,
+            "profile_validated": device.profile_validated,
+        },
+        "reading": {
+            "grid_voltage_v": reading.voltage,
+            "inverter_temperature_c": reading.inverter_temperature_c,
+            "inverter_status_code": reading.inverter_status_code,
+            "inverter_status": reading.inverter_status,
+            "battery_soc_percent": reading.state_of_charge,
+            "house_load_kw": reading.house_load_kw,
+            "battery_kw": reading.battery_kw,
+            "battery_flow_kw": battery_flow(reading),
+            "battery_status": reading.battery_status,
+            "grid_kw": reading.grid_kw,
+            "grid_status": reading.grid_status,
+            "pv_kw": reading.pv_kw,
+            "pv_today_kwh": reading.pv_today_kwh,
+            "alarms": [
+                {
+                    "code": alarm.code,
+                    "message": alarm.message,
+                    "severity": alarm.severity,
+                }
+                for alarm in reading.alarms
+            ],
+        },
+        "health": {
+            "last_sample_age_s": round(age, 3) if age is not None else None,
+            "latency_ms": round(health.latency_ms, 1),
+            "successful_polls": health.successful_polls,
+            "total_failures": health.total_failures,
+            "consecutive_failures": health.consecutive_failures,
+            "reconnects": health.reconnects,
+        },
+        "error": error,
+    }
+
+
+def print_stream_json(
+    reading: Reading,
+    device: DeviceInfo,
+    health: ConnectionHealth,
+    error: str | None,
+) -> None:
+    payload = stream_payload(
+        reading,
+        device,
+        health,
+        error,
+        datetime.now().astimezone(),
+    )
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -810,7 +884,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pv", action="store_true", help="enable PV power, daily energy and history (default: off)")
     parser.add_argument("--csv", type=Path, help="append readings to CSV and restore its last six hours")
     parser.add_argument("--jsonl", type=Path, help="append readings to JSONL and restore its last six hours")
-    parser.add_argument("--once", action="store_true", help="print one plain-text reading and exit")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--once", action="store_true", help="print one plain-text reading and exit")
+    output.add_argument(
+        "--stream-json",
+        action="store_true",
+        help="write one JSON object per sample for integrations",
+    )
     parser.add_argument("--no-colour", action="store_true", help="disable ANSI colours")
     args = parser.parse_args()
     try:
@@ -829,7 +909,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    dashboard = sys.stdout.isatty() and not args.once
+    dashboard = sys.stdout.isatty() and not args.once and not args.stream_json
     palette = Palette(dashboard and not args.no_colour)
     client = SolisClient(args.host, args.port, args.slave, args.timeout)
     recorder: Recorder | None = None
@@ -882,6 +962,10 @@ def main() -> int:
             if args.once:
                 print_once(last_reading, device, health)
                 return 0
+            if args.stream_json:
+                print_stream_json(last_reading, device, health, last_error)
+                time.sleep(args.interval)
+                continue
             output = render(
                 last_reading, device, health, args, palette, last_error, history, started_at
             )

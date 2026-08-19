@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from solis_poll import (
     decode_inverter_faults,
     decode_inverter_status,
     sparkline,
+    stream_payload,
 )
 
 
@@ -54,7 +56,7 @@ class DecoderTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), "solis_poll.py 0.1.0")
+        self.assertEqual(result.stdout.strip(), "solis_poll.py 0.2.0")
 
     def test_inverter_status_labels_normal_and_unknown_alarm(self):
         self.assertEqual(decode_inverter_status(3), "Generating")
@@ -76,6 +78,36 @@ class DecoderTests(unittest.TestCase):
         graph, low, high = sparkline([1.0, 2.0, 3.0], 12)
         self.assertEqual(len(graph), 12)
         self.assertEqual((low, high), (1.0, 3.0))
+
+    def test_stream_payload_is_versioned_and_json_serializable(self):
+        reading = Reading(
+            voltage=250.0,
+            inverter_temperature_c=30.0,
+            inverter_status_code=3,
+            inverter_status="Generating",
+            state_of_charge=93,
+            house_load_kw=1.58,
+            battery_kw=1.72,
+            battery_status="Discharging",
+            grid_kw=-0.5,
+            grid_status="Importing",
+            alarms=(Alarm("1015", "NO-Grid", "fault"),),
+        )
+        device = DeviceInfo(20, 101, 202, 301, 2001, True)
+        health = ConnectionHealth(last_success_at=1_700_000_000.0, latency_ms=12.34)
+        payload = stream_payload(
+            reading,
+            device,
+            health,
+            None,
+            datetime.fromtimestamp(1_700_000_001.0).astimezone(),
+        )
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["reading"]["battery_flow_kw"], 1.72)
+        self.assertEqual(payload["reading"]["alarms"][0]["severity"], "fault")
+        self.assertEqual(payload["health"]["last_sample_age_s"], 1.0)
+        json.dumps(payload)
 
 
 class ModbusPollingTests(unittest.TestCase):
