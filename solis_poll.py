@@ -19,7 +19,7 @@ from typing import IO, Any, NoReturn
 
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HISTORY_SECONDS = 6 * 60 * 60
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 

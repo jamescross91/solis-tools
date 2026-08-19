@@ -3,7 +3,7 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
-version="${1:-0.2.0}"
+version="${1:-0.3.0}"
 ref="${2:-v$version}"
 output_root="$project_root/build/release"
 output_path="$output_root/solis-tools-$version.tar.gz"
