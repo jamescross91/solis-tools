@@ -15,6 +15,16 @@ It provides:
 
 PV monitoring is **off by default**, so installations without panels do not read or display PV registers.
 
+## Screenshots
+
+### Terminal dashboard
+
+![Solis Live terminal dashboard](docs/images/solis-live-terminal.png)
+
+### macOS menu-bar app
+
+<img src="docs/images/solis-menubar.png" alt="Solis Live macOS menu-bar dashboard" width="418">
+
 ## Install with Homebrew
 
 On macOS or Linux, add this repository as a Homebrew tap, then install the
