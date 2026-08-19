@@ -53,10 +53,12 @@ solis-menubar
 ```
 
 Open its menu-bar item, enter the inverter data-logger IP, and select **Save and
-connect**. The app shows house load in the menu bar and provides battery, grid,
-temperature, voltage, alarms, connection health and selectable six-hour charts
-in its popover. Its connection settings are stored in the current macOS user's
-preferences. PV remains disabled unless enabled in the app settings.
+connect**. Select which compact house-load, battery state-of-charge, grid-flow,
+temperature and PV metrics appear in the menu bar from Settings; PV generation
+is available when PV is enabled. The popover provides battery, grid,
+temperature, voltage, alarms, connection health and selectable six-hour charts.
+Its connection settings are stored in the current macOS user's preferences. PV
+remains disabled unless enabled in the app settings.
 
 The menu-bar app is built locally by Homebrew from the release source, so it
 does not require a separately downloaded or unsigned application bundle. Linux
