@@ -1,5 +1,10 @@
 # solis-tools
 
+[![CI](https://github.com/jamescross91/solis-tools/actions/workflows/homebrew.yml/badge.svg)](https://github.com/jamescross91/solis-tools/actions/workflows/homebrew.yml)
+[![CodeQL](https://github.com/jamescross91/solis-tools/actions/workflows/codeql.yml/badge.svg)](https://github.com/jamescross91/solis-tools/actions/workflows/codeql.yml)
+[![GitHub release](https://img.shields.io/github/v/release/jamescross91/solis-tools)](https://github.com/jamescross91/solis-tools/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+
 `solis-poll` is a lightweight, nmon-inspired terminal monitor for a Solis hybrid inverter exposed over Modbus TCP. It uses a persistent native Python connection and only reads input registers; it never writes to the inverter.
 
 It provides:
@@ -213,6 +218,15 @@ Build and validate the macOS app with:
 swift build --disable-sandbox --package-path SolisMenuBar
 ./scripts/build_menubar_app.sh release
 ```
+
+## Contributing, support and security
+
+Contributions are welcome through pull requests. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and required
+checks, [SUPPORT.md](SUPPORT.md) for help, and [SECURITY.md](SECURITY.md) for
+private vulnerability reporting. Project decisions and maintainer
+responsibilities are documented in [GOVERNANCE.md](GOVERNANCE.md) and
+[MAINTAINERS.md](MAINTAINERS.md).
 
 ## Troubleshooting
 

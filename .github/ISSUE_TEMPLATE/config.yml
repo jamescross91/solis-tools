@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions
+    url: https://github.com/jamescross91/solis-tools/discussions
+    about: Ask installation and configuration questions in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/jamescross91/solis-tools/security/advisories/new
+    about: Report security concerns privately.
