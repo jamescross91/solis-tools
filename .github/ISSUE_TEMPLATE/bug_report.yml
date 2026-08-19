@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible problem with the CLI or menu-bar app
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove private IP addresses and sensitive network details from logs.
+        Security vulnerabilities must use private vulnerability reporting instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output from `solis-poll --version` or `solis-menubar --version`.
+      placeholder: solis-poll 0.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Terminal monitor
+        - macOS menu-bar app
+        - Homebrew installation
+        - Register decoding
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, Solis model and firmware/protocol code where known.
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Run ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste sanitized terminal output or screenshots if useful.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed private IP addresses and other sensitive information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
