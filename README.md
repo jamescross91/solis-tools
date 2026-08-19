@@ -61,14 +61,14 @@ In an interactive terminal, the monitor redraws a coloured dashboard with voltag
 The dashboard keeps successful readings in memory from launch and renders a rolling line graph for every metric:
 
 - grid voltage
-- battery state of charge
+- inverter temperature
 - house load
 - battery flow
 - grid flow
 
 History is capped at six hours. Once the monitor has run longer than that, the oldest readings are discarded automatically. The graphs downsample the retained readings to the available terminal width, while the labels show the observed minimum and maximum.
 
-Battery history is positive when discharging and negative when charging. Grid history is positive when exporting and negative when importing. History is not written to disk and starts afresh each time the tool launches.
+Battery history is positive when discharging and negative when charging. Grid history is positive when exporting and negative when importing. History is not written to disk and starts afresh each time the tool launches. Battery SoC remains visible as a live gauge but is deliberately excluded from history.
 
 ## Register assumptions
 
@@ -77,6 +77,7 @@ The monitor reads the same **input registers** as the working `mbpoll -t 3` shel
 | Reference(s) | Value used |
 | --- | --- |
 | `33074` | Grid voltage, scaled by 10 |
+| `33094` | Inverter temperature, signed and scaled by 10 (raw PDU address `33093`) |
 | `33136` | Battery operating state |
 | `33140` | Battery state of charge (%) |
 | `33148` | House load, scaled by 1000 |

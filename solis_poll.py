@@ -49,6 +49,7 @@ def load_modbus_client():
 @dataclass(frozen=True)
 class Reading:
     voltage: float
+    inverter_temperature_c: float
     state_of_charge: int
     house_load_kw: float
     battery_kw: float
@@ -96,9 +97,14 @@ class SolisClient:
         value = (high << 16) | low
         return value - 0x1_0000_0000 if value >= 0x8000_0000 else value
 
+    @staticmethod
+    def _signed_16(value: int) -> int:
+        return value - 0x1_0000 if value >= 0x8000 else value
+
     def poll(self) -> Reading:
         # These input-register references match the former mbpoll commands.
         voltage = self._registers(33074, 1)[0] / 10
+        inverter_temperature_c = self._signed_16(self._registers(33094, 1)[0]) / 10
         status = self._registers(33136, 16)
         grid = self._registers(33264, 2)
 
@@ -120,6 +126,7 @@ class SolisClient:
 
         return Reading(
             voltage=voltage,
+            inverter_temperature_c=inverter_temperature_c,
             state_of_charge=state_of_charge,
             house_load_kw=house_load_kw,
             battery_kw=battery_kw,
@@ -232,6 +239,8 @@ def history_row(
     colour: str,
     decimals: int = 1,
 ) -> str:
+    if not values:
+        return f" {label:<10} {' ' * width}  unavailable"
     graph, low, high = sparkline(values, width)
     limits = f"{low:.{decimals}f}…{high:.{decimals}f} {unit}"
     return f" {label:<10} {palette.apply(colour, graph)}  {limits}"
@@ -256,11 +265,13 @@ def render(
     grid_colour = "1;36" if reading.grid_status == "Exporting" else "1;33"
     grid_display = abs(reading.grid_kw)
     history_readings = [item for _, item in history]
+    inverter_temperature = f"{reading.inverter_temperature_c:6.1f} °C"
 
     rows = [
         f"{palette.title('SOLIS LIVE')}  {palette.dim(f'{args.host}:{args.port}  slave {args.slave}')}  {palette.dim(timestamp)}",
         line,
         f" Grid voltage   {reading.voltage:6.1f} V   {bar(reading.voltage, 260, chart_width, palette, '1;36')}",
+        f" Inverter temp  {inverter_temperature}   {bar(reading.inverter_temperature_c, 100, chart_width, palette, '1;33')}",
         f" Battery SoC    {reading.state_of_charge:6d} %   {bar(reading.state_of_charge, 100, chart_width, palette, '1;32')}",
         line,
         f" House load     {reading.house_load_kw:6.2f} kW  {bar(reading.house_load_kw, args.inverter_max_kw, chart_width, palette, '1;35')}",
@@ -269,7 +280,7 @@ def render(
         line,
         f" {palette.title('HISTORY')}  {palette.dim(f'{history_window_label(started_at, now)} · rolling 6h maximum')}",
         history_row("Voltage", [item.voltage for item in history_readings], history_width, "V", palette, "1;36"),
-        history_row("SoC", [float(item.state_of_charge) for item in history_readings], history_width, "%", palette, "1;32", 0),
+        history_row("Inv temp", [item.inverter_temperature_c for item in history_readings], history_width, "°C", palette, "1;33"),
         history_row("House load", [item.house_load_kw for item in history_readings], history_width, "kW", palette, "1;35", 2),
         history_row("Battery", [battery_flow(item) for item in history_readings], history_width, "kW", palette, "1;34", 2),
         history_row("Grid", [item.grid_kw for item in history_readings], history_width, "kW", palette, "1;33", 2),
@@ -287,6 +298,7 @@ def render(
 def print_once(reading: Reading) -> None:
     """Machine-friendly single snapshot for scripts and diagnostics."""
     print(f"grid_voltage_v={reading.voltage:.1f}")
+    print(f"inverter_temperature_c={reading.inverter_temperature_c:.1f}")
     print(f"battery_soc_percent={reading.state_of_charge}")
     print(f"house_load_kw={reading.house_load_kw:.2f}")
     print(f"battery_status={reading.battery_status}")
