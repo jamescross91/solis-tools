@@ -28,7 +28,14 @@ class SolisTools < Formula
     (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
     (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
     system "codesign", "--force", "--deep", "--sign", "-", app
-    bin.install_symlink app/"Contents/MacOS/SolisMenuBar" => "solis-menubar"
+    (bin/"solis-menubar").write <<~SH
+      #!/bin/bash
+      if [[ "$1" == "--version" ]]; then
+        exec "#{app}/Contents/MacOS/SolisMenuBar" --version
+      fi
+      exec /usr/bin/open "#{app}"
+    SH
+    (bin/"solis-menubar").chmod 0755
   end
 
   test do
