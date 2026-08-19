@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "58368e4e0c6ca944442da7d552ed2037e791977cd568894901bdc8401ff061d7"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.2.0/solis-tools-0.2.0.tar.gz"
+  sha256 "74d18869cd99b3249bebd74113aee8a77967cbc2fe5111a09e6e97246eb5fbd5"
   license "GPL-3.0-only"
 
   depends_on "python@3.14"
@@ -16,10 +16,27 @@ class SolisTools < Formula
 
   def install
     virtualenv_install_with_resources
+    return unless OS.mac?
+
+    system "swift", "build", "--disable-sandbox", "--configuration", "release",
+           "--package-path", "SolisMenuBar"
+    swift_bin = Utils.safe_popen_read(
+      "swift", "build", "--disable-sandbox", "--configuration", "release",
+      "--package-path", "SolisMenuBar", "--show-bin-path"
+    ).strip
+    app = prefix/"SolisMenuBar.app"
+    (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
+    (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
+    system "codesign", "--force", "--deep", "--sign", "-", app
+    bin.install_symlink app/"Contents/MacOS/SolisMenuBar" => "solis-menubar"
   end
 
   test do
     assert_match "solis-poll #{version}", shell_output("#{bin}/solis-poll --version")
     assert_match "--host HOST", shell_output("#{bin}/solis-poll --help")
+    return unless OS.mac?
+
+    assert_path_exists prefix/"SolisMenuBar.app/Contents/Info.plist"
+    assert_match "solis-menubar #{version}", shell_output("#{bin}/solis-menubar --version")
   end
 end
