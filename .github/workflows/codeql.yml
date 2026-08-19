@@ -38,14 +38,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
+        uses: github/codeql-action/init@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
       - name: Build Swift application
         if: matrix.language == 'swift'
-        run: swift build --disable-sandbox --configuration release --package-path SolisMenuBar
+        run: swift build --disable-sandbox --package-path SolisMenuBar
       - name: Analyse
-        uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
+        uses: github/codeql-action/analyze@988661ebb5e81487b3fb31b2185d2856c0a10679 # v4
         with:
           category: /language:${{ matrix.language }}
