@@ -1,6 +1,6 @@
 # solis-tools
 
-`solis_poll.py` is a lightweight, nmon-inspired terminal monitor for a Solis hybrid inverter exposed over Modbus TCP. It uses a persistent native Python connection and only reads input registers; it never writes to the inverter.
+`solis-poll` is a lightweight, nmon-inspired terminal monitor for a Solis hybrid inverter exposed over Modbus TCP. It uses a persistent native Python connection and only reads input registers; it never writes to the inverter.
 
 It provides:
 
@@ -14,7 +14,28 @@ It provides:
 
 PV monitoring is **off by default**, so installations without panels do not read or display PV registers.
 
-## Requirements
+## Install with Homebrew
+
+On macOS or Linux, install the latest stable release from the project tap:
+
+```sh
+brew install jamescross91/tap/solis-tools
+```
+
+Then run:
+
+```sh
+solis-poll --host 192.168.1.57
+```
+
+Homebrew installs Python and PyModbus in an isolated environment. Upgrade or remove it with:
+
+```sh
+brew upgrade solis-tools
+brew uninstall solis-tools
+```
+
+## Install from source
 
 - Python 3.10 or later
 - PyModbus 3.10–3.x
@@ -33,7 +54,7 @@ The monitor checks the Python version and imports PyModbus before connecting. If
 
 ## Run
 
-The inverter data-logger IP is deliberately mandatory:
+The inverter data-logger IP is deliberately mandatory. When running from a source checkout:
 
 ```sh
 ./solis_poll.py --host 192.168.1.57

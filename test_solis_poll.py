@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -45,6 +47,15 @@ def fake_solis(responses):
 
 
 class DecoderTests(unittest.TestCase):
+    def test_version_is_available_without_connecting(self):
+        result = subprocess.run(
+            [sys.executable, "solis_poll.py", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "solis_poll.py 0.1.0")
+
     def test_inverter_status_labels_normal_and_unknown_alarm(self):
         self.assertEqual(decode_inverter_status(3), "Generating")
         self.assertEqual(decode_inverter_status(0x1015), "NO-Grid")

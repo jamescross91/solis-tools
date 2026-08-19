@@ -19,6 +19,7 @@ from typing import IO, Any, NoReturn
 
 
 MIN_PYTHON = (3, 10)
+VERSION = "0.1.0"
 HISTORY_SECONDS = 6 * 60 * 60
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
@@ -797,6 +798,7 @@ def print_once(reading: Reading, device: DeviceInfo, health: ConnectionHealth) -
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--host", required=True, help="inverter data-logger IP address (required)")
     parser.add_argument("--port", type=int, default=502, help="Modbus TCP port (default: 502)")
     parser.add_argument("--slave", type=int, default=1, help="Modbus slave/unit ID (default: 1)")

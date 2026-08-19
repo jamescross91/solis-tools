@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solis-tools"
+version = "0.1.0"
+description = "Nmon-inspired terminal monitor for Solis hybrid inverters"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "James Cross" }]
+keywords = ["solis", "inverter", "modbus", "energy", "terminal"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Monitoring",
+]
+dependencies = ["pymodbus>=3.10,<4"]
+
+[project.urls]
+Homepage = "https://github.com/jamescross91/solis-tools"
+Issues = "https://github.com/jamescross91/solis-tools/issues"
+
+[project.scripts]
+solis-poll = "solis_poll:main"
+
+[tool.setuptools]
+py-modules = ["solis_poll"]
