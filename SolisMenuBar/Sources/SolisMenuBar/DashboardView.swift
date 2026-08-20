@@ -84,7 +84,7 @@ struct DashboardView: View {
             Label(sample.reading.inverterStatus, systemImage: "waveform.path.ecg")
                 .font(.subheadline.weight(.semibold))
             Spacer()
-            Text("Model \(sample.device.modelCode)")
+            Text(verbatim: "Model \(sample.device.modelCode)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -142,6 +142,8 @@ struct DashboardView: View {
         HistoryChartView(
             history: monitor.history,
             pvEnabled: pvEnabled,
+            inverterMaxKw: inverterMaxKw,
+            gridMaxKw: gridMaxKw,
             selectedMetric: $selectedMetric
         )
     }
@@ -168,10 +170,18 @@ struct DashboardView: View {
         HStack {
             Label(String(format: "%.0f ms", sample.health.latencyMs), systemImage: "network")
             Spacer()
-            Text("Failures \(sample.health.totalFailures) · reconnects \(sample.health.reconnects)")
+            Text(verbatim: connectionSummary(sample.health))
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+
+    private func connectionSummary(_ health: ConnectionDetails) -> String {
+        var summary = "Failures \(health.totalFailures) · reconnects \(health.reconnects)"
+        if let rejected = health.rejectedSamples, rejected > 0 {
+            summary += " · rejected \(rejected)"
+        }
+        return summary
     }
 
     private var waiting: some View {
@@ -223,6 +233,12 @@ struct DashboardView: View {
                 .font(.headline)
             LabeledContent("Refresh") {
                 TextField("1.0", value: $pollInterval, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Text("seconds").foregroundStyle(.secondary)
+            }
+            LabeledContent("Status refresh") {
+                TextField("10", value: $slowInterval, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 70)
                 Text("seconds").foregroundStyle(.secondary)
@@ -282,6 +298,8 @@ struct DashboardView: View {
             }
             Spacer()
             Button("Quit") {
+                // Otherwise the poller outlives the app until its next write fails.
+                monitor.stop()
                 NSApplication.shared.terminate(nil)
             }
             .buttonStyle(.plain)
@@ -319,24 +337,18 @@ struct DashboardView: View {
     }
 
     private func connect() {
-        monitor.start(
-            configuration: MonitorConfiguration(
-                host: host.trimmingCharacters(in: .whitespacesAndNewlines),
-                port: port,
-                slave: slave,
-                interval: max(0.5, pollInterval),
-                slowInterval: max(1, slowInterval),
-                inverterMaxKw: max(0.1, inverterMaxKw),
-                gridMaxKw: max(0.1, gridMaxKw),
-                pvEnabled: pvEnabled
-            )
-        )
+        // @AppStorage has already written these, so read them back the same way
+        // the launch path does rather than assembling a second copy here.
+        guard let configuration = MonitorConfiguration.stored() else { return }
+        monitor.start(configuration: configuration)
     }
 }
 
 private struct HistoryChartView: View {
     let history: [HistoryPoint]
     let pvEnabled: Bool
+    let inverterMaxKw: Double
+    let gridMaxKw: Double
     @Binding var selectedMetric: HistoryMetric
 
     var body: some View {
@@ -349,7 +361,7 @@ private struct HistoryChartView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            Picker("Metric", selection: $selectedMetric) {
+            Picker("Metric", selection: metricSelection) {
                 ForEach(availableMetrics) { metric in
                     Text(metric.rawValue).tag(metric)
                 }
@@ -368,18 +380,19 @@ private struct HistoryChartView: View {
                 Chart(chartPoints) { point in
                     LineMark(
                         x: .value("Time", point.date),
-                        y: .value(selectedMetric.unit, point.value)
+                        y: .value(metric.unit, point.value)
                     )
                     .interpolationMethod(.catmullRom)
                     .foregroundStyle(metricColour)
                     RuleMark(y: .value("Zero", 0))
                         .foregroundStyle(.secondary.opacity(0.25))
                 }
-                .chartYAxisLabel(selectedMetric.unit)
+                .chartYScale(domain: yDomain)
+                .chartYAxisLabel(metric.unit)
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine()
-                        AxisValueLabel(format: .dateTime.hour().minute())
+                        AxisValueLabel(format: axisTimeFormat)
                     }
                 }
                 .frame(height: 155)
@@ -391,6 +404,18 @@ private struct HistoryChartView: View {
         pvEnabled ? HistoryMetric.allCases : HistoryMetric.allCases.filter { $0 != .pv }
     }
 
+    /// The selection, falling back when it is no longer offered.
+    ///
+    /// Turning PV off left the stored selection on a metric the Picker no longer
+    /// listed, which rendered it blank and emptied the chart.
+    private var metric: HistoryMetric {
+        availableMetrics.contains(selectedMetric) ? selectedMetric : .house
+    }
+
+    private var metricSelection: Binding<HistoryMetric> {
+        Binding(get: { metric }, set: { selectedMetric = $0 })
+    }
+
     private struct ChartPoint: Identifiable {
         let id: UUID
         let date: Date
@@ -399,13 +424,39 @@ private struct HistoryChartView: View {
 
     private var chartPoints: [ChartPoint] {
         history.compactMap { point in
-            guard let value = selectedMetric.value(from: point.reading) else { return nil }
+            guard let value = metric.value(from: point.reading) else { return nil }
             return ChartPoint(id: point.id, date: point.date, value: value)
         }
     }
 
+    /// The configured full scale, widened when a reading exceeds it so a spike is
+    /// never clipped out of view.
+    private var yDomain: ClosedRange<Double> {
+        let values = chartPoints.map(\.value)
+        let low = min(values.min() ?? 0, 0)
+        let high = max(values.max() ?? 1, low + 0.1)
+        guard let configured = metric.configuredRange(
+            inverterMaxKw: inverterMaxKw,
+            gridMaxKw: gridMaxKw
+        ) else {
+            return low...high
+        }
+        return min(configured.lowerBound, low)...max(configured.upperBound, high)
+    }
+
+    /// Hours and minutes repeat every tick until the window is minutes wide, so
+    /// short spans need seconds to distinguish one tick from the next.
+    private var axisTimeFormat: Date.FormatStyle {
+        guard let first = chartPoints.first?.date, let last = chartPoints.last?.date else {
+            return .dateTime.hour().minute()
+        }
+        return last.timeIntervalSince(first) < 600
+            ? .dateTime.hour().minute().second()
+            : .dateTime.hour().minute()
+    }
+
     private var metricColour: Color {
-        switch selectedMetric {
+        switch metric {
         case .house: .purple
         case .battery: .blue
         case .grid: .orange

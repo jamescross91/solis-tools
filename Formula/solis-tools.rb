@@ -9,6 +9,11 @@ class SolisTools < Formula
 
   depends_on "python@3.14"
 
+  # The menu-bar app is built from source during install.
+  on_macos do
+    depends_on xcode: :build
+  end
+
   resource "pymodbus" do
     url "https://files.pythonhosted.org/packages/e5/b8/03dace16e0e5d1c3eb16e8b9bcce9885f5e8a38db34345ec375cd70ed2e2/pymodbus-3.15.0.tar.gz"
     sha256 "4c5f715128bfeba59f4c9fb3542b0c32a8afd4b90081111e39c12f7af0c89aae"
@@ -27,7 +32,7 @@ class SolisTools < Formula
     app = prefix/"SolisMenuBar.app"
     (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
     (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
-    system "codesign", "--force", "--deep", "--sign", "-", app
+    system "codesign", "--force", "--sign", "-", app
     (bin/"solis-menubar").write <<~SH
       #!/bin/bash
       if [[ "$1" == "--version" ]]; then

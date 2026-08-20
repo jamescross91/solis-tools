@@ -10,5 +10,6 @@ let package = Package(
     ],
     targets: [
         .executableTarget(name: "SolisMenuBar"),
+        .testTarget(name: "SolisMenuBarTests", dependencies: ["SolisMenuBar"]),
     ]
 )

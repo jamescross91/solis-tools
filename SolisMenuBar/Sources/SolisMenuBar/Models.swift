@@ -1,5 +1,18 @@
 import Foundation
 
+enum StreamError: LocalizedError {
+    case unsupportedSchema(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .unsupportedSchema(version):
+            let supported = StreamDecoder.supportedSchemaVersion
+            return "solis-poll emits stream schema \(version) but this app reads schema "
+                + "\(supported). Upgrade solis-tools with Homebrew."
+        }
+    }
+}
+
 struct StreamEnvelope: Decodable, Sendable {
     let schemaVersion: Int
     let timestamp: String
@@ -53,6 +66,7 @@ struct ConnectionDetails: Decodable, Sendable {
     let totalFailures: Int
     let consecutiveFailures: Int
     let reconnects: Int
+    let rejectedSamples: Int?
 }
 
 struct HistoryPoint: Identifiable, Sendable {
@@ -96,6 +110,26 @@ struct MonitorConfiguration: Equatable, Sendable {
     var inverterMaxKw: Double
     var gridMaxKw: Double
     var pvEnabled: Bool
+
+    /// Read the settings the dashboard stores, or nil if no host is set yet.
+    ///
+    /// The keys match DashboardView's @AppStorage so the launch path and the
+    /// settings form cannot drift apart.
+    static func stored(_ defaults: UserDefaults = .standard) -> MonitorConfiguration? {
+        let host = (defaults.string(forKey: "host") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return nil }
+        return MonitorConfiguration(
+            host: host,
+            port: defaults.object(forKey: "port") as? Int ?? 502,
+            slave: defaults.object(forKey: "slave") as? Int ?? 1,
+            interval: max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 1),
+            slowInterval: max(1, defaults.object(forKey: "slowInterval") as? Double ?? 10),
+            inverterMaxKw: max(0.1, defaults.object(forKey: "inverterMaxKw") as? Double ?? 10),
+            gridMaxKw: max(0.1, defaults.object(forKey: "gridMaxKw") as? Double ?? 23),
+            pvEnabled: defaults.bool(forKey: "pvEnabled")
+        )
+    }
 }
 
 enum HistoryMetric: String, CaseIterable, Identifiable {
@@ -116,11 +150,26 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Full-scale range this metric should show, from the configured maxima.
+    ///
+    /// Swift Charts otherwise fits the axis to whatever is on screen, so a
+    /// quarter-kilowatt wobble filled the plot and looked like an event.
+    func configuredRange(inverterMaxKw: Double, gridMaxKw: Double) -> ClosedRange<Double>? {
+        switch self {
+        case .house, .pv: 0...inverterMaxKw
+        case .battery: -inverterMaxKw...inverterMaxKw
+        case .grid: -gridMaxKw...gridMaxKw
+        case .voltage, .temperature: nil
+        }
+    }
+
     func value(from reading: InverterReading) -> Double? {
         switch self {
         case .house: reading.houseLoadKw
         case .battery: reading.batteryFlowKw
-        case .grid: reading.gridKw
+        // Imports positive, matching the Grid card rather than the poller's
+        // export-positive convention.
+        case .grid: reading.gridImportPositiveKw
         case .voltage: reading.gridVoltageV
         case .temperature: reading.inverterTemperatureC
         case .pv: reading.pvKw
@@ -129,10 +178,19 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
 }
 
 enum StreamDecoder {
+    /// Stream schema this build knows how to read. solis_poll.py emits the same
+    /// number; a newer poller means the app is out of date, not that the line
+    /// is corrupt, and the two need telling apart in the UI.
+    static let supportedSchemaVersion = 1
+
     static func decode(_ data: Data) throws -> StreamEnvelope {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(StreamEnvelope.self, from: data)
+        let envelope = try decoder.decode(StreamEnvelope.self, from: data)
+        guard envelope.schemaVersion == supportedSchemaVersion else {
+            throw StreamError.unsupportedSchema(envelope.schemaVersion)
+        }
+        return envelope
     }
 
     static func date(from value: String) -> Date? {

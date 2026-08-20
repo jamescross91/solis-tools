@@ -1,6 +1,6 @@
 # solis-tools
 
-[![CI](https://github.com/jamescross91/solis-tools/actions/workflows/homebrew.yml/badge.svg)](https://github.com/jamescross91/solis-tools/actions/workflows/homebrew.yml)
+[![CI](https://github.com/jamescross91/solis-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/jamescross91/solis-tools/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/jamescross91/solis-tools/actions/workflows/codeql.yml/badge.svg)](https://github.com/jamescross91/solis-tools/actions/workflows/codeql.yml)
 [![GitHub release](https://img.shields.io/github/v/release/jamescross91/solis-tools)](https://github.com/jamescross91/solis-tools/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
@@ -95,7 +95,9 @@ The monitor checks the Python version and imports PyModbus before connecting. If
 
 ## Run
 
-The inverter data-logger IP is deliberately mandatory. When running from a source checkout:
+The inverter data logger's address is deliberately mandatory. It may be an IP
+address or a hostname, including an mDNS name such as `inverter.local`. When
+running from a source checkout:
 
 ```sh
 ./solis_poll.py --host 192.168.1.57
@@ -120,7 +122,9 @@ Use `--once` for a plain-text, script-friendly health check:
 ./solis_poll.py --host 192.168.1.57 --once --timeout 5
 ```
 
-Use `--no-colour` to disable ANSI colours. Press `Ctrl-C` to stop the live dashboard.
+Use `--no-colour` to disable ANSI colours. Press `Ctrl-C` to stop the live
+dashboard. The dashboard sizes itself to the terminal and needs at least 60
+columns.
 
 Use `--stream-json` to emit a versioned JSON object after every poll. This is
 the integration interface used by the menu-bar app:
@@ -148,13 +152,32 @@ Append every successful sample to CSV or JSONL:
 ./solis_poll.py --host 192.168.1.57 --jsonl readings.jsonl
 ```
 
-Both flags may be used together. Files are appended and flushed after each successful sample. On startup, the monitor restores up to the last six hours from the CSV file, or from JSONL when CSV is not configured. This lets the line graphs survive restarts while keeping their six-hour limit.
+Both flags may be used together. Files are appended and flushed after each successful sample. On startup, the monitor restores up to the last six hours from the CSV file, or from JSONL when CSV is not configured. This lets the line graphs survive restarts while keeping their six-hour limit. Only the tail of the file is read, so startup does not slow down as the recording grows.
+
+Recordings are append-only and are never rotated or truncated. At the default
+0.5-second interval a CSV grows by roughly 17 MB a day and a JSONL by roughly
+58 MB. Raise `--interval`, or rotate the files yourself, for a long-running
+capture.
+
+New recording files are created readable only by their owner, because a
+half-second power trace shows when a house is empty and what is running in it.
+An existing file keeps whatever permissions it already has.
 
 The parent directory must already exist. A missing or unwritable directory produces a clear error and the monitor exits.
 
 ## Status, alarms and connection health
 
-The header shows the inverter's model and software/protocol codes. The monitor checks the Solis type-definition register where available, rejects a positively identified string-inverter layout, and sanity-checks every decoded value to catch incompatible maps or corrupt responses.
+The header shows the inverter's model and software/protocol codes. The monitor
+checks the Solis type-definition register where available and rejects a
+positively identified string-inverter layout. Pass `--skip-profile-check` to
+continue anyway if your hybrid inverter is misidentified; decoded values may then
+be meaningless, so check them against the inverter's own display.
+
+Every decoded value is range-checked. Before the first successful poll a value
+outside its physical range means the register map is wrong, and the monitor stops
+and says so. Afterwards the map is proven, so an impossible value is a corrupt
+response: that sample is discarded, the previous reading is retained, and the
+count appears in the connection line as `rejected`.
 
 The status area shows normal states such as `Waiting`, `Generating` and `Off-grid`. Active fault bits from inverter registers `33116–33120` are decoded to Solis alarm names and codes. BMS fault bit meanings vary between low- and high-voltage battery models, so active BMS bits are reported by exact register and bit rather than given a potentially incorrect description.
 
@@ -164,6 +187,7 @@ Connection health includes:
 - round-trip poll latency
 - total and consecutive failures
 - successful reconnect count
+- samples discarded as physically impossible
 
 After a transient communication failure, the dashboard retains the last good reading and reconnects automatically.
 
@@ -186,7 +210,7 @@ Power-flow registers are read every `--interval` seconds. Temperature, inverter 
 
 ## Register assumptions
 
-The monitor uses the Solis hybrid ESINV-33000 **input-register** map. The `mbpoll` references used by the original shell script are 1-based; raw Modbus PDU addresses are zero-based. The Python client preserves that conversion internally.
+The monitor uses the Solis hybrid ESINV-33000 **input-register** map. The `mbpoll` references used by the original shell prototype were 1-based; raw Modbus PDU addresses are zero-based. The Python client preserves that conversion internally.
 
 | Raw PDU address(es) | 1-based reference(s) | Value used |
 | --- | --- | --- |
@@ -209,22 +233,48 @@ Inverter firmware can change register availability. Check the map against the ex
 
 Register names, scales and alarms were cross-checked against the [Solis Modbus sensor documentation](https://solis-modbus.readthedocs.io/en/latest/sensors.html), the published [Solis hybrid protocol](https://www.scss.tcd.ie/Brian.Coghlan/Elios4you/RS485_MODBUS-Hybrid-BACoghlan-201811228-1854.pdf) and the MIT-licensed [community register map](https://github.com/szlaskidaniel/solar-inverter-modbus-registers).
 
-## Tests
+## Development and tests
 
-Run the standard-library test suite with:
-
-```sh
-python3 -m unittest -v
-```
-
-Tests cover status and fault decoding, BMS bit reporting, history recording/restoration, chart generation and simulated Modbus responses with PV both enabled and disabled.
-
-Build and validate the macOS app with:
+`make` creates a virtual environment and runs every check CI runs — lint,
+formatting, types, version consistency and the test suite. `make help` lists the
+individual targets.
 
 ```sh
-swift build --disable-sandbox --package-path SolisMenuBar
-./scripts/build_menubar_app.sh release
+make
+make swift   # macOS: swift test for the menu-bar package
+make app     # macOS: build the .app bundle
 ```
+
+`test_solis_poll.py` covers status and fault decoding, BMS bit reporting,
+recording and restoration, and chart generation against a fake client.
+`test_end_to_end.py` runs the real CLI as a subprocess against
+`fake_inverter.py`, covering the poll loop, reconnection, the corrupt-sample
+path and recording.
+
+### Running without an inverter
+
+`fake_inverter.py` answers Modbus read-input-register requests from a register
+bank, so the monitor and the menu-bar app both run with no hardware:
+
+```sh
+make demo                                                # dashboard against a fake inverter
+python3 fake_inverter.py --port 5020 --drop-after 10      # forces a reconnect
+python3 fake_inverter.py --port 5020 --corrupt-after 8    # a bad register mid-run
+python3 fake_inverter.py --port 5020 --string-inverter    # the wrong register family
+```
+
+Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — module layout, register
+  addressing, the subprocess boundary
+- [docs/stream-contract.md](docs/stream-contract.md) — the `--stream-json`
+  payload and how to change it
+- [docs/releasing.md](docs/releasing.md) — the release runbook
+- [CLAUDE.md](CLAUDE.md) — conventions and traps, for contributors and coding
+  agents
+- [CHANGELOG.md](CHANGELOG.md) — user-visible changes
 
 ## Contributing, support and security
 
@@ -240,6 +290,8 @@ responsibilities are documented in [GOVERNANCE.md](GOVERNANCE.md) and
 - **`pymodbus is not installed`** — activate the intended virtual environment and run `python3 -m pip install -r requirements.txt`.
 - **Unsupported register map** — this tool supports Solis hybrid ESINV-33000 registers. Confirm the inverter model and firmware map.
 - **No route from VS Code, but an external terminal works** — enable **Visual Studio Code** under **System Settings → Privacy & Security → Local Network**, then fully quit and reopen VS Code.
-- **A poll fails** — check the logger IP, port, slave ID and Modbus configuration. The dashboard will reconnect while retaining its last good reading.
+- **A poll fails** — check the logger address, port, slave ID and Modbus configuration. The dashboard will reconnect while retaining its last good reading.
+- **`outside the expected ... range` on startup** — the register map does not match this inverter. Confirm the model, then try `--skip-profile-check` if you believe it is a supported hybrid.
+- **A rising `rejected` count** — the inverter is returning occasional impossible values. Readings are still correct; the bad samples are discarded.
 - **Recording fails** — create the parent directory and verify it is writable.
 - **No colour or redraw** — use an interactive ANSI-capable terminal. Use `--once` for scripts and diagnostics.

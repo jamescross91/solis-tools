@@ -2,7 +2,7 @@ import Combine
 import Foundation
 
 @MainActor
-final class MonitorStore: ObservableObject, @unchecked Sendable {
+final class MonitorStore: ObservableObject {
     enum State: Equatable {
         case stopped
         case connecting
@@ -25,7 +25,11 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
     private var retryTask: Task<Void, Never>?
     private var shouldRun = false
     private var lastSuccessfulPolls = 0
+    private var retryAttempt = 0
     private var historyBuffer = HistoryBuffer()
+
+    private static let maximumBufferedBytes = 1 << 20
+    private static let maximumRetryDelay: TimeInterval = 60
 
     var isRunning: Bool {
         switch state {
@@ -69,6 +73,15 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Start from stored settings if they are complete and nothing is running.
+    ///
+    /// Called when the menu-bar item itself appears, so a configured install
+    /// begins polling at login rather than waiting for its first click.
+    func startIfConfigured() {
+        guard !isRunning, let configuration = MonitorConfiguration.stored() else { return }
+        start(configuration: configuration)
+    }
+
     func start(configuration: MonitorConfiguration) {
         stop(clearReading: false)
         activeConfiguration = configuration
@@ -83,8 +96,8 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminationHandler = nil
-        if process?.isRunning == true {
-            process?.terminate()
+        if let running = process, running.isRunning {
+            running.terminate()
         }
         process = nil
         outputPipe = nil
@@ -106,6 +119,8 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
             state = .failed(
                 "solis-poll was not found. Install or upgrade solis-tools with Homebrew."
             )
+            // A Homebrew upgrade replaces the binary, so this is often temporary.
+            scheduleRetry()
             return
         }
 
@@ -132,7 +147,15 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
             let data = handle.availableData
             guard !data.isEmpty else { return }
             Task { @MainActor [weak self] in
-                self?.errorBuffer.append(data)
+                guard let self else { return }
+                self.errorBuffer.append(data)
+                if self.errorBuffer.count > Self.maximumBufferedBytes {
+                    // Keep the tail: the last thing written before it died is
+                    // what explains why.
+                    self.errorBuffer.removeFirst(
+                        self.errorBuffer.count - Self.maximumBufferedBytes
+                    )
+                }
             }
         }
         process.terminationHandler = { [weak self] terminated in
@@ -160,8 +183,6 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
             "--slave", String(configuration.slave),
             "--interval", String(configuration.interval),
             "--slow-interval", String(configuration.slowInterval),
-            "--inverter-max-kw", String(configuration.inverterMaxKw),
-            "--grid-max-kw", String(configuration.gridMaxKw),
             "--stream-json",
         ]
         if configuration.pvEnabled {
@@ -193,13 +214,27 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
             do {
                 let envelope = try StreamDecoder.decode(Data(line))
                 receive(envelope)
+            } catch let error as StreamError {
+                // A schema the app cannot read will not fix itself; say so
+                // rather than sitting on "degraded" indefinitely. stop() resets
+                // state, so the message has to be set after it.
+                stop()
+                state = .failed(error.localizedDescription)
+                return
             } catch {
                 state = .degraded
             }
         }
+        if outputBuffer.count > Self.maximumBufferedBytes {
+            // A sample line is a few hundred bytes. This much without a newline
+            // means the far end is not speaking the stream protocol.
+            outputBuffer.removeAll(keepingCapacity: false)
+            state = .degraded
+        }
     }
 
     private func receive(_ envelope: StreamEnvelope) {
+        retryAttempt = 0
         latest = envelope
         state = envelope.error == nil ? .connected : .degraded
 
@@ -213,9 +248,14 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
     }
 
     private func processTerminated(status: Int32) {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
         outputPipe = nil
         errorPipe = nil
+        // A partial line from the dead child must not be prepended to the next
+        // one's first line.
+        outputBuffer.removeAll(keepingCapacity: false)
         guard shouldRun else { return }
         let message = String(data: errorBuffer, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -230,8 +270,10 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
     private func scheduleRetry() {
         guard shouldRun, let configuration = activeConfiguration else { return }
         retryTask?.cancel()
+        let delay = min(Self.maximumRetryDelay, pow(2, Double(min(retryAttempt, 6))) * 2)
+        retryAttempt += 1
         retryTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             self?.launch(configuration: configuration)
         }

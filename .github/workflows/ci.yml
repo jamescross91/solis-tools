@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Superseding a pull-request push is the point; superseding a run on main
+  # would cancel the one verifying a merge or a release.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Lint, types and versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Formatting
+        run: ruff format --check .
+      - name: Types
+        run: mypy
+      - name: Version copies agree
+        run: ./scripts/version.py --check
+
+  python:
+    name: Python tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject declares requires-python >=3.10, so the floor is tested too.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        os: [ubuntu-latest]
+        # macOS is the primary platform but the suite only ran on Linux.
+        include:
+          - python-version: "3.14"
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest -v
+
+  pymodbus-floor:
+    name: PyModbus floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      # requirements.txt allows >=3.10,<4 but resolves to the newest release, so
+      # nothing exercised the lower bound the project claims to support.
+      - run: python -m pip install "pymodbus==3.10.*"
+      - run: python -m unittest -v
+
+  package:
+    name: Installed package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      # The Homebrew job installs the published release, so this is the only
+      # check that the pull request's own code survives packaging.
+      - run: python -m pip install .
+      - name: Console script reports the working-tree version
+        run: |
+          expected="$(./scripts/version.py)"
+          solis-poll --version | tee /dev/stderr | grep -qF "solis-poll $expected"
+      - name: Console script runs against a fake inverter
+        run: |
+          python fake_inverter.py --port 5020 &
+          for _ in $(seq 1 20); do
+            solis-poll --host 127.0.0.1 --port 5020 --once --timeout 2 && exit 0
+            sleep 0.5
+          done
+          echo "fake inverter never answered" >&2
+          exit 1
+
+  menubar:
+    name: macOS menu-bar build
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test the Swift package
+        run: swift test --disable-sandbox --package-path SolisMenuBar
+      - name: Build Swift menu-bar app
+        run: ./scripts/build_menubar_app.sh release
+      - name: Verify app bundle
+        run: |
+          codesign --verify --strict build/menubar/SolisMenuBar.app
+          plutil -lint build/menubar/SolisMenuBar.app/Contents/Info.plist
+      - name: Bundle version matches the working tree
+        run: |
+          expected="$(./scripts/version.py)"
+          found="$(plutil -extract CFBundleShortVersionString raw \
+            build/menubar/SolisMenuBar.app/Contents/Info.plist)"
+          test "$found" = "$expected" || {
+            echo "bundle reports $found, expected $expected" >&2
+            exit 1
+          }
+
+  formula:
+    name: Formula style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@8f3d1ec8a696b3b9d9a6c3696b6c73033cab69e4
+      - name: Register repository as a tap
+        run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
+      # Offline checks only: this runs on every pull request, and --online makes
+      # it depend on GitHub and PyPI being reachable.
+      - run: brew style Formula/solis-tools.rb
+      - run: brew audit --strict jamescross91/solis-tools/solis-tools
+
+  test:
+    name: Homebrew (${{ matrix.os }})
+    # The formula installs from the published release tarball, so on a pull
+    # request this would build the last release rather than the branch. It runs
+    # where that is the point: after merge, weekly, and on demand.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@8f3d1ec8a696b3b9d9a6c3696b6c73033cab69e4
+      - name: Register repository as a tap
+        run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
+      - name: Audit formula
+        run: brew audit --strict --online jamescross91/solis-tools/solis-tools
+      - name: Install formula
+        run: brew install --build-from-source jamescross91/solis-tools/solis-tools
+      - name: Test formula
+        run: brew test jamescross91/solis-tools/solis-tools

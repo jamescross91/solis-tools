@@ -1,13 +1,14 @@
+import json
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import json
 from datetime import datetime
 from pathlib import Path
 
 from solis_poll import (
+    VERSION,
     Alarm,
     ConnectionHealth,
     DeviceInfo,
@@ -18,6 +19,7 @@ from solis_poll import (
     decode_bms_faults,
     decode_inverter_faults,
     decode_inverter_status,
+    reading_from_record,
     sparkline,
     stream_payload,
 )
@@ -56,7 +58,7 @@ class DecoderTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), "solis_poll.py 0.3.1")
+        self.assertEqual(result.stdout.strip(), f"solis_poll.py {VERSION}")
 
     def test_inverter_status_labels_normal_and_unknown_alarm(self):
         self.assertEqual(decode_inverter_status(3), "Generating")
@@ -191,9 +193,37 @@ class RecorderTests(unittest.TestCase):
 
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0][1].state_of_charge, 93)
-            self.assertEqual(history[0][1].alarms[0].code, "2011")
+            # Retained samples carry no alarms: the graphs never read them, and
+            # an inverter reporting every fault bit made six hours cost 452 MB.
+            self.assertEqual(history[0][1].alarms, ())
             self.assertIn("grid_voltage_v", csv_path.read_text())
             self.assertIn('"grid_voltage_v":250.0', jsonl_path.read_text())
+
+    def test_recorded_alarms_round_trip_with_their_severity(self):
+        record = {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "grid_voltage_v": 250.0,
+            "inverter_temperature_c": 30.0,
+            "inverter_status_code": 3,
+            "inverter_status": "Generating",
+            "battery_soc_percent": 93,
+            "house_load_kw": 1.58,
+            "battery_kw": 1.72,
+            "battery_status": "Discharging",
+            "grid_kw": -0.5,
+            "grid_status": "Importing",
+            "pv_kw": "",
+            "pv_today_kwh": "",
+            "alarms": "1041 ARC-FAULT; 2011 MET_Comm_FAIL; BMS1.2 active",
+            "latency_ms": 1.0,
+        }
+        restored = reading_from_record(record)
+        # Recordings store only the code and message, so severity has to be
+        # looked back up rather than defaulted to a warning.
+        self.assertEqual(
+            [(alarm.code, alarm.severity) for alarm in restored.alarms],
+            [("1041", "fault"), ("2011", "warning"), ("BMS1.2", "fault")],
+        )
 
     def test_existing_csv_with_wrong_schema_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

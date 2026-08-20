@@ -10,16 +10,6 @@ updates:
     open-pull-requests-limit: 5
     labels: [dependencies, python]
 
-  - package-ecosystem: swift
-    directory: /SolisMenuBar
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:15"
-      timezone: Europe/London
-    open-pull-requests-limit: 5
-    labels: [dependencies, swift]
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
