@@ -1,9 +1,9 @@
+import json
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import json
 from datetime import datetime
 from pathlib import Path
 

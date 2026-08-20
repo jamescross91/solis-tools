@@ -8,6 +8,7 @@ import csv
 import ipaddress
 import json
 import logging
+import re
 import shutil
 import sys
 import time
@@ -17,10 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn
 
-
 MIN_PYTHON = (3, 10)
 VERSION = "0.3.1"
 HISTORY_SECONDS = 6 * 60 * 60
+HISTORY_READ_CHUNK = 1 << 20
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 # ESINV fault registers 33116-33120. Bit numbers run from the least-significant
@@ -191,6 +192,7 @@ class ConnectionHealth:
     total_failures: int = 0
     consecutive_failures: int = 0
     reconnects: int = 0
+    rejected_samples: int = 0
 
     def succeeded(self, completed_at: float, latency_ms: float) -> None:
         self.last_success_at = completed_at
@@ -198,13 +200,25 @@ class ConnectionHealth:
         self.successful_polls += 1
         self.consecutive_failures = 0
 
-    def failed(self) -> None:
+    def failed(self, rejected: bool = False) -> None:
         self.total_failures += 1
         self.consecutive_failures += 1
+        if rejected:
+            self.rejected_samples += 1
 
 
 class UnsupportedProfileError(ConnectionError):
     """The responding device does not use the supported hybrid register map."""
+
+
+class ImplausibleReadingError(ConnectionError):
+    """A decoded value fell outside its physical range for this sample only.
+
+    A corrupt Modbus frame and a genuinely wrong register map both surface here.
+    Only the caller knows which: before the first successful poll it means the
+    map is wrong and the monitor must stop; afterwards it is transient noise and
+    must be retried, or a single bad frame would end an unattended run.
+    """
 
 
 class RecordingError(OSError):
@@ -252,9 +266,8 @@ def decode_bms_faults(words: list[int]) -> tuple[Alarm, ...]:
 
 def checked(value: float, low: float, high: float, name: str) -> float:
     if not low <= value <= high:
-        raise UnsupportedProfileError(
-            f"{name} decoded as {value:g}, outside the expected {low:g}..{high:g} range; "
-            "this inverter may use an unsupported register map"
+        raise ImplausibleReadingError(
+            f"{name} decoded as {value:g}, outside the expected {low:g}..{high:g} range"
         )
     return value
 
@@ -305,7 +318,17 @@ class SolisClient:
     def _signed_16(value: int) -> int:
         return value - 0x1_0000 if value >= 0x8000 else value
 
-    def identify(self) -> DeviceInfo:
+    # Register 35000 packs the inverter family into its high byte: 0x10 is the
+    # string-inverter family and 0x20 the hybrid family this monitor decodes.
+    # The value's leading decimal digits are a second, incompatible reading of
+    # the same 16 bits. Treating either as grounds for rejection hard-failed
+    # 2368 values, all of 1000-1099 and 10000-10999 among them, so only the
+    # packed form can reject; the decimal form may still confirm a match.
+    STRING_INVERTER_FAMILY = 0x10
+    HYBRID_INVERTER_FAMILY = 0x20
+    HYBRID_DECIMAL_PREFIX = 20
+
+    def identify(self, skip_profile_check: bool = False) -> DeviceInfo:
         """Read model metadata and reject a positively identified string map."""
         metadata = self._registers(33001, 4)  # Raw PDU addresses 33000-33003.
         type_definition: int | None = None
@@ -319,21 +342,34 @@ class SolisClient:
 
         profile_validated = False
         if type_definition is not None:
-            high_byte = type_definition >> 8
+            family = type_definition >> 8
             decimal_prefix = int(str(type_definition)[:2]) if type_definition >= 10 else 0
-            if high_byte == 0x10 or decimal_prefix == 10:
+            if family == self.STRING_INVERTER_FAMILY and not skip_profile_check:
                 raise UnsupportedProfileError(
-                    "the inverter reports the Solis string-inverter register family; "
-                    "this monitor currently supports the hybrid ESINV-33000 map"
+                    f"register 35000 reports the Solis string-inverter family "
+                    f"(0x{type_definition:04X}); this monitor supports the hybrid "
+                    "ESINV-33000 map. Re-run with --skip-profile-check to continue anyway."
                 )
-            profile_validated = high_byte == 0x20 or decimal_prefix == 20
+            profile_validated = (
+                family == self.HYBRID_INVERTER_FAMILY
+                or decimal_prefix == self.HYBRID_DECIMAL_PREFIX
+            )
 
-        if not any(metadata) and not profile_validated:
+        if not any(metadata) and not profile_validated and not skip_profile_check:
             raise UnsupportedProfileError(
                 "the Solis hybrid identity block returned only zeroes; "
-                "the ESINV-33000 register map could not be verified"
+                "the ESINV-33000 register map could not be verified. "
+                "Re-run with --skip-profile-check to continue anyway."
             )
-        return DeviceInfo(*metadata, type_definition, profile_validated)
+        model_code, dsp_version, hmi_version, protocol_version = metadata
+        return DeviceInfo(
+            model_code=model_code,
+            dsp_version=dsp_version,
+            hmi_version=hmi_version,
+            protocol_version=protocol_version,
+            type_definition=type_definition,
+            profile_validated=profile_validated,
+        )
 
     def poll_slow(self, pv_enabled: bool) -> SlowMetrics:
         operational = self._registers(33094, 3)  # Raw 33093-33095.
@@ -371,9 +407,7 @@ class SolisClient:
         battery_status = (
             "Idle" if battery_kw < 0.05 else "Discharging" if status[0] == 1 else "Charging"
         )
-        grid_status = (
-            "Exporting" if grid_kw > 0.05 else "Importing" if grid_kw < -0.05 else "Idle"
-        )
+        grid_status = "Exporting" if grid_kw > 0.05 else "Importing" if grid_kw < -0.05 else "Idle"
         pv_kw = None
         if pv_enabled:
             pv_words = self._registers(33058, 2)  # Raw 33057-33058.
@@ -453,8 +487,7 @@ class Recorder:
             header = next(csv.reader(source), [])
         if tuple(header) != cls.CSV_FIELDS:
             raise OSError(
-                f"existing CSV has an incompatible header: {path}; "
-                "choose a new recording file"
+                f"existing CSV has an incompatible header: {path}; choose a new recording file"
             )
 
     @staticmethod
@@ -497,17 +530,74 @@ class Recorder:
             return deque()
         history: deque[tuple[float, Reading]] = deque()
         cutoff = now - HISTORY_SECONDS
+        is_csv = path == self.csv_path
         try:
-            if path == self.csv_path:
-                with path.open(encoding="utf-8", newline="") as source:
-                    self._restore_records(csv.DictReader(source), history, cutoff)
+            lines = self._tail_lines(path, cutoff, is_csv)
+            records: Any
+            if is_csv:
+                records = csv.DictReader(lines, fieldnames=self.CSV_FIELDS)
             else:
-                with path.open(encoding="utf-8") as source:
-                    records = (json.loads(line) for line in source if line.strip())
-                    self._restore_records(records, history, cutoff)
+                records = (json.loads(line) for line in lines)
+            self._restore_records(records, history, cutoff)
         except (OSError, csv.Error, json.JSONDecodeError) as exc:
             raise RecordingError(f"cannot restore history from {path}: {exc}") from exc
         return history
+
+    @classmethod
+    def _tail_lines(cls, path: Path, cutoff: float, is_csv: bool) -> list[str]:
+        """Return the trailing lines that can still hold samples after `cutoff`.
+
+        Recordings are append-only and grow by roughly 17 MB (CSV) or 58 MB
+        (JSONL) a day at the default interval, so reading the whole file to
+        recover six hours makes startup scale with uptime. Walking backwards
+        in chunks keeps the read proportional to the window instead.
+        """
+        position = path.stat().st_size
+        buffer = b""
+        reached_start = False
+        with path.open("rb") as source:
+            while True:
+                if position == 0:
+                    reached_start = True
+                    break
+                step = min(HISTORY_READ_CHUNK, position)
+                position -= step
+                source.seek(position)
+                buffer = source.read(step) + buffer
+                # Until the file start is reached the first line is a fragment,
+                # so the second is the oldest one safe to timestamp.
+                complete = buffer.split(b"\n")[1:]
+                if not complete:
+                    continue
+                oldest = cls._record_timestamp(cls._decode(complete[0]), is_csv)
+                if oldest is not None and oldest < cutoff:
+                    break
+
+        lines = [cls._decode(line) for line in buffer.split(b"\n")]
+        if not reached_start:
+            lines = lines[1:]
+        lines = [line for line in lines if line.strip()]
+        if reached_start and is_csv and lines and lines[0].startswith(f"{cls.CSV_FIELDS[0]},"):
+            lines = lines[1:]
+        return lines
+
+    @staticmethod
+    def _decode(line: bytes) -> str:
+        # csv.writer emits CRLF; splitting on newlines alone leaves the CR.
+        return line.decode("utf-8", "replace").rstrip("\r")
+
+    @staticmethod
+    def _record_timestamp(line: str, is_csv: bool) -> float | None:
+        """Timestamp of one recorded line, or None when it cannot be read."""
+        try:
+            if is_csv:
+                fields = next(csv.reader([line]))
+                value: Any = fields[0]
+            else:
+                value = json.loads(line)["timestamp"]
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (StopIteration, IndexError, KeyError, TypeError, ValueError, csv.Error):
+            return None
 
     @staticmethod
     def _restore_records(
@@ -531,6 +621,20 @@ class Recorder:
             self.jsonl_file = None
 
 
+ALARM_SEVERITIES = {code: severity for code, _, severity in INVERTER_FAULTS.values()}
+
+
+def severity_for_code(code: str) -> str:
+    """Recover an alarm's severity when restoring it from a recording.
+
+    Recordings carry only the code and message, so the severity that drives the
+    fault banner has to be looked back up instead of defaulting to a warning.
+    """
+    if code in ALARM_SEVERITIES:
+        return ALARM_SEVERITIES[code]
+    return "fault" if code.startswith("BMS") else "warning"
+
+
 def optional_float(value: Any) -> float | None:
     return None if value in (None, "") else float(value)
 
@@ -538,7 +642,11 @@ def optional_float(value: Any) -> float | None:
 def reading_from_record(record: dict[str, Any]) -> Reading:
     alarm_text = str(record.get("alarms", ""))
     restored_alarms = tuple(
-        Alarm(part.split(" ", 1)[0], part.split(" ", 1)[1] if " " in part else "", "warning")
+        Alarm(
+            part.split(" ", 1)[0],
+            part.split(" ", 1)[1] if " " in part else "",
+            severity_for_code(part.split(" ", 1)[0]),
+        )
         for part in alarm_text.split("; ")
         if part
     )
@@ -667,6 +775,42 @@ def history_row(
     )
 
 
+def fit(variants: list[str], width: int) -> str:
+    """Return the first variant that fits, else the last one truncated.
+
+    Every other dashboard row is sized from the terminal width; these were not,
+    so at the common 80 columns the status line wrapped and pushed the footer
+    out of the fixed-height redraw.
+    """
+    for variant in variants:
+        if len(variant) <= width:
+            return variant
+    last = variants[-1]
+    return last if width < 2 else last[: width - 1] + "…"
+
+
+def health_variants(age: float, health: ConnectionHealth) -> list[str]:
+    """Connection summaries from most to least verbose."""
+    rejected = f" · rejected {health.rejected_samples}" if health.rejected_samples else ""
+    short_rejected = f" · rej {health.rejected_samples}" if health.rejected_samples else ""
+    return [
+        (
+            f"Connection OK · last sample {age:.1f}s ago · {health.latency_ms:.0f} ms · "
+            f"failures {health.total_failures} ({health.consecutive_failures} consecutive) · "
+            f"reconnects {health.reconnects}{rejected}"
+        ),
+        (
+            f"Connection OK · {age:.1f}s ago · {health.latency_ms:.0f} ms · "
+            f"failures {health.total_failures}/{health.consecutive_failures} · "
+            f"reconnects {health.reconnects}{short_rejected}"
+        ),
+        (
+            f"OK · {age:.0f}s · {health.latency_ms:.0f}ms · "
+            f"fail {health.total_failures} · rec {health.reconnects}{short_rejected}"
+        ),
+    ]
+
+
 def render(
     reading: Reading,
     device: DeviceInfo,
@@ -686,15 +830,22 @@ def render(
     history_readings = [item for _, item in history]
     battery_colour = "1;32" if reading.battery_status == "Discharging" else "1;34"
     grid_colour = "1;36" if reading.grid_status == "Exporting" else "1;33"
-    status_is_bad = reading.inverter_status_code >= 0x1000 and reading.inverter_status_code != 0x1004
+    status_is_bad = (
+        reading.inverter_status_code >= 0x1000 and reading.inverter_status_code != 0x1004
+    )
     status_text = (
         palette.bad(reading.inverter_status)
         if status_is_bad
         else palette.good(reading.inverter_status)
     )
+    target_variants = [
+        f"{args.host}:{args.port}  slave {args.slave}",
+        f"{args.host}:{args.port}",
+    ]
+    target = fit(target_variants, max(8, columns - 24))
     rows = [
-        f"{palette.title('SOLIS LIVE')}  {palette.dim(f'{args.host}:{args.port}  slave {args.slave}')}  {palette.dim(timestamp)}",
-        f" {palette.dim(device.display())}",
+        f"{palette.title('SOLIS LIVE')}  {palette.dim(target)}  {palette.dim(timestamp)}",
+        f" {palette.dim(fit([device.display()], columns - 2))}",
         f" Status         {status_text}  {palette.dim(f'(0x{reading.inverter_status_code:04X})')}",
     ]
     if reading.alarms:
@@ -726,8 +877,22 @@ def render(
             f" Grid           {abs(reading.grid_kw):6.2f} kW  {bar(reading.grid_kw, args.grid_max_kw, chart_width, palette, grid_colour)} {palette.apply(grid_colour, reading.grid_status) if reading.grid_status != 'Idle' else palette.dim('Idle')}",
             line,
             f" {palette.title('HISTORY')}  {palette.dim(f'{history_window_label(history, started_at, now)} · 6h maximum')}",
-            history_row("Voltage", [item.voltage for item in history_readings], history_width, "V", palette, "1;36"),
-            history_row("Inv temp", [item.inverter_temperature_c for item in history_readings], history_width, "°C", palette, "1;33"),
+            history_row(
+                "Voltage",
+                [item.voltage for item in history_readings],
+                history_width,
+                "V",
+                palette,
+                "1;36",
+            ),
+            history_row(
+                "Inv temp",
+                [item.inverter_temperature_c for item in history_readings],
+                history_width,
+                "°C",
+                palette,
+                "1;33",
+            ),
         ]
     )
     if args.pv:
@@ -744,18 +909,38 @@ def render(
         )
     rows.extend(
         [
-            history_row("House load", [item.house_load_kw for item in history_readings], history_width, "kW", palette, "1;35", 2),
-            history_row("Battery", [battery_flow(item) for item in history_readings], history_width, "kW", palette, "1;34", 2),
-            history_row("Grid", [item.grid_kw for item in history_readings], history_width, "kW", palette, "1;33", 2),
+            history_row(
+                "House load",
+                [item.house_load_kw for item in history_readings],
+                history_width,
+                "kW",
+                palette,
+                "1;35",
+                2,
+            ),
+            history_row(
+                "Battery",
+                [battery_flow(item) for item in history_readings],
+                history_width,
+                "kW",
+                palette,
+                "1;34",
+                2,
+            ),
+            history_row(
+                "Grid",
+                [item.grid_kw for item in history_readings],
+                history_width,
+                "kW",
+                palette,
+                "1;33",
+                2,
+            ),
             line,
         ]
     )
     age = now - health.last_success_at if health.last_success_at is not None else 0
-    health_text = (
-        f"Connection OK · last sample {age:.1f}s ago · {health.latency_ms:.0f} ms · "
-        f"failures {health.total_failures} ({health.consecutive_failures} consecutive) · "
-        f"reconnects {health.reconnects}"
-    )
+    health_text = fit(health_variants(age, health), columns - 1)
     rows.append(palette.good(f" {health_text}") if not error else palette.warn(f" {health_text}"))
     recording = []
     if args.csv:
@@ -768,9 +953,10 @@ def render(
     )
     if recording:
         footer += " · recording " + ", ".join(recording)
-    rows.append(palette.dim(f" {footer}. Ctrl-C to quit."))
+    footer_variants = [f"{footer}. Ctrl-C to quit.", footer]
+    rows.append(palette.dim(f" {fit(footer_variants, columns - 1)}"))
     if error:
-        rows.append(palette.warn(f" Last poll failed: {error}"))
+        rows.append(palette.warn(f" {fit([f'Last poll failed: {error}'], columns - 1)}"))
     return "\n".join(rows)
 
 
@@ -792,7 +978,8 @@ def print_once(reading: Reading, device: DeviceInfo, health: ConnectionHealth) -
     print(f"grid_kw={reading.grid_kw:.2f}")
     if reading.pv_kw is not None:
         print(f"pv_kw={reading.pv_kw:.2f}")
-        print(f"pv_today_kwh={reading.pv_today_kwh:.1f}")
+        if reading.pv_today_kwh is not None:
+            print(f"pv_today_kwh={reading.pv_today_kwh:.1f}")
     print(f"poll_latency_ms={health.latency_ms:.1f}")
 
 
@@ -849,6 +1036,7 @@ def stream_payload(
             "total_failures": health.total_failures,
             "consecutive_failures": health.consecutive_failures,
             "reconnects": health.reconnects,
+            "rejected_samples": health.rejected_samples,
         },
         "error": error,
     }
@@ -870,20 +1058,59 @@ def print_stream_json(
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
+HOSTNAME_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+
+def is_valid_host(value: str) -> bool:
+    """Accept an IP literal or a DNS/mDNS hostname, reject URLs and rubbish.
+
+    Data loggers are commonly reached by name on a DHCP network, so an
+    IP-literal-only check turned a routine setup into a lookup exercise.
+    """
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    candidate = value.rstrip(".")
+    if not candidate or len(candidate) > 253:
+        return False
+    return all(HOSTNAME_LABEL.match(label) for label in candidate.split("."))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--host", required=True, help="inverter data-logger IP address (required)")
     parser.add_argument("--port", type=int, default=502, help="Modbus TCP port (default: 502)")
     parser.add_argument("--slave", type=int, default=1, help="Modbus slave/unit ID (default: 1)")
-    parser.add_argument("--interval", type=float, default=0.5, help="fast poll interval in seconds (default: 0.5)")
-    parser.add_argument("--slow-interval", type=float, default=10, help="temperature/status poll interval in seconds (default: 10)")
-    parser.add_argument("--timeout", type=float, default=3, help="Modbus timeout in seconds (default: 3)")
-    parser.add_argument("--inverter-max-kw", type=float, default=10, help="inverter/PV bar full scale (default: 10)")
-    parser.add_argument("--grid-max-kw", type=float, default=23, help="grid bar full scale (default: 23)")
-    parser.add_argument("--pv", action="store_true", help="enable PV power, daily energy and history (default: off)")
-    parser.add_argument("--csv", type=Path, help="append readings to CSV and restore its last six hours")
-    parser.add_argument("--jsonl", type=Path, help="append readings to JSONL and restore its last six hours")
+    parser.add_argument(
+        "--interval", type=float, default=0.5, help="fast poll interval in seconds (default: 0.5)"
+    )
+    parser.add_argument(
+        "--slow-interval",
+        type=float,
+        default=10,
+        help="temperature/status poll interval in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=3, help="Modbus timeout in seconds (default: 3)"
+    )
+    parser.add_argument(
+        "--inverter-max-kw", type=float, default=10, help="inverter/PV bar full scale (default: 10)"
+    )
+    parser.add_argument(
+        "--grid-max-kw", type=float, default=23, help="grid bar full scale (default: 23)"
+    )
+    parser.add_argument(
+        "--pv", action="store_true", help="enable PV power, daily energy and history (default: off)"
+    )
+    parser.add_argument(
+        "--csv", type=Path, help="append readings to CSV and restore its last six hours"
+    )
+    parser.add_argument(
+        "--jsonl", type=Path, help="append readings to JSONL and restore its last six hours"
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--once", action="store_true", help="print one plain-text reading and exit")
     output.add_argument(
@@ -891,17 +1118,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="write one JSON object per sample for integrations",
     )
+    parser.add_argument(
+        "--skip-profile-check",
+        action="store_true",
+        help="continue even when the register map cannot be confirmed (values may be wrong)",
+    )
     parser.add_argument("--no-colour", action="store_true", help="disable ANSI colours")
     args = parser.parse_args()
-    try:
-        ipaddress.ip_address(args.host)
-    except ValueError:
-        parser.error("--host must be a valid inverter data-logger IP address")
+    if not is_valid_host(args.host):
+        parser.error("--host must be an IP address or hostname for the inverter data logger")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
     if not 0 <= args.slave <= 255:
         parser.error("--slave must be between 0 and 255")
-    positive = (args.interval, args.slow_interval, args.timeout, args.inverter_max_kw, args.grid_max_kw)
+    positive = (
+        args.interval,
+        args.slow_interval,
+        args.timeout,
+        args.inverter_max_kw,
+        args.grid_max_kw,
+    )
     if any(value <= 0 for value in positive):
         parser.error("poll intervals, timeout and bar maximums must be greater than zero")
     return args
@@ -925,7 +1161,7 @@ def main() -> int:
         recorder = Recorder(args.csv, args.jsonl)
         history = recorder.load_history(started_at)
         client.connect()
-        device = client.identify()
+        device = client.identify(args.skip_profile_check)
         if dashboard:
             print("\033[?25l", end="")
         while True:
@@ -946,6 +1182,19 @@ def main() -> int:
                 recorder.write(last_reading, health, datetime.now().astimezone())
             except (UnsupportedProfileError, RecordingError):
                 raise
+            except ImplausibleReadingError as exc:
+                # Before the first good sample this means the register map is
+                # wrong, so stop rather than retry a decode that cannot work.
+                # Afterwards the map is proven and this is a corrupt frame:
+                # drop the sample and keep the connection.
+                if health.successful_polls == 0 and not args.skip_profile_check:
+                    raise UnsupportedProfileError(
+                        f"{exc}; this inverter may use an unsupported register map. "
+                        "Re-run with --skip-profile-check to continue anyway."
+                    ) from exc
+                last_error = f"implausible sample discarded: {exc}"
+                health.failed(rejected=True)
+                slow_metrics = None
             except (ConnectionError, OSError, client.modbus_exception) as exc:
                 last_error = str(exc)
                 health.failed()
