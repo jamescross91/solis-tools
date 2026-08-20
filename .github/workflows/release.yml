@@ -1,0 +1,89 @@
+name: Release
+
+# Releases were entirely manual: tag, archive by hand, upload, compute the
+# checksum, paste it into the formula. Nothing verified that the tarball built,
+# that the tag matched solis_poll.VERSION, or that the checksum was right.
+#
+# This builds and verifies the tarball, then publishes it as a draft release
+# with the sha256 the formula needs. Updating the formula stays manual and
+# deliberate, because it must point at an asset that already exists.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag to build
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tarball:
+    name: Build and verify the release tarball
+    runs-on: macos-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve and check the version
+        id: version
+        run: |
+          tag="${{ inputs.ref || github.ref_name }}"
+          version="$(./scripts/version.py)"
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match solis_poll.VERSION ($version)" >&2
+            exit 1
+          fi
+          ./scripts/version.py --check
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build the tarball
+        id: tarball
+        run: |
+          path="$(./scripts/package_release.sh "${{ steps.version.outputs.version }}" \
+            "${{ steps.version.outputs.tag }}" | tail -1)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build from the tarball exactly as Homebrew will
+        run: |
+          workspace="$(mktemp -d)"
+          tar -xzf "${{ steps.tarball.outputs.path }}" -C "$workspace"
+          cd "$workspace/solis-tools-${{ steps.version.outputs.version }}"
+          python3 -m venv .venv
+          ./.venv/bin/pip install --quiet .
+          ./.venv/bin/solis-poll --version
+          swift build --disable-sandbox --configuration release --package-path SolisMenuBar
+
+      - name: Summarise what the formula needs
+        run: |
+          {
+            echo "### solis-tools ${{ steps.version.outputs.version }}"
+            echo
+            echo "Update \`Formula/solis-tools.rb\` with:"
+            echo
+            echo '```ruby'
+            echo '  url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/solis-tools-${{ steps.version.outputs.version }}.tar.gz"'
+            echo '  sha256 "${{ steps.tarball.outputs.sha256 }}"'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "${{ steps.tarball.outputs.path }}" \
+            --repo "${{ github.repository }}" \
+            --draft \
+            --title "solis-tools ${{ steps.version.outputs.version }}" \
+            --notes "sha256 \`${{ steps.tarball.outputs.sha256 }}\`"

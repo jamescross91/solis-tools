@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from solis_poll import (
+    VERSION,
     Alarm,
     ConnectionHealth,
     DeviceInfo,
@@ -56,7 +57,7 @@ class DecoderTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), "solis_poll.py 0.3.1")
+        self.assertEqual(result.stdout.strip(), f"solis_poll.py {VERSION}")
 
     def test_inverter_status_labels_normal_and_unknown_alarm(self):
         self.assertEqual(decode_inverter_status(3), "Generating")

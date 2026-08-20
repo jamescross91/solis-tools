@@ -39,7 +39,6 @@ jobs:
 
   swift:
     name: CodeQL (swift)
-    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:

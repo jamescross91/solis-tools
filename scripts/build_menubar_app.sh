@@ -15,6 +15,6 @@ rm -rf "$app_path"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_path" "$app_path/Contents/MacOS/SolisMenuBar"
 cp "$package_path/Resources/Info.plist" "$app_path/Contents/Info.plist"
-codesign --force --deep --sign - "$app_path"
+codesign --force --sign - "$app_path"
 
 echo "$app_path"

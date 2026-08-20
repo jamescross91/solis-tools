@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solis-tools"
-version = "0.3.1"
+dynamic = ["version"]
 description = "Nmon-inspired terminal monitor for Solis hybrid inverters"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,5 +30,25 @@ Issues = "https://github.com/jamescross91/solis-tools/issues"
 [project.scripts]
 solis-poll = "solis_poll:main"
 
+[project.optional-dependencies]
+dev = ["mypy>=1.11", "ruff>=0.6"]
+
 [tool.setuptools]
 py-modules = ["solis_poll"]
+
+[tool.setuptools.dynamic]
+version = { attr = "solis_poll.VERSION" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E501 is deliberately absent: the dashboard rows are long single f-strings and
+# breaking them up hurts more than it helps.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "C4", "ISC"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["solis_poll.py", "fake_inverter.py", "scripts/version.py"]
+ignore_missing_imports = true

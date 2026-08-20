@@ -27,7 +27,7 @@ class SolisTools < Formula
     app = prefix/"SolisMenuBar.app"
     (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
     (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
-    system "codesign", "--force", "--deep", "--sign", "-", app
+    system "codesign", "--force", "--sign", "-", app
     (bin/"solis-menubar").write <<~SH
       #!/bin/bash
       if [[ "$1" == "--version" ]]; then
