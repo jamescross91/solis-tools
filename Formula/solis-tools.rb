@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.3.0/solis-tools-0.3.0.tar.gz"
-  sha256 "ae7fd0b41d1a77db45ed850ff717322e2a09c12e5b1f3fcee5a91cfba445a5b3"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.3.1/solis-tools-0.3.1.tar.gz"
+  sha256 "736fbfa9a15cb14c1fa038609345c490654e31e3377d7f02e12e26be0651c28b"
   license "GPL-3.0-only"
 
   depends_on "python@3.14"
