@@ -139,51 +139,11 @@ struct DashboardView: View {
     }
 
     private var history: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("History")
-                    .font(.headline)
-                Spacer()
-                Text("Since launch · 6h max")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Picker("Metric", selection: $selectedMetric) {
-                ForEach(availableMetrics) { metric in
-                    Text(metric.rawValue).tag(metric)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-
-            if chartPoints.isEmpty {
-                PlaceholderView(
-                    title: "Waiting for samples",
-                    message: "History appears after the first successful polls.",
-                    symbol: "chart.xyaxis.line"
-                )
-                .frame(height: 145)
-            } else {
-                Chart(chartPoints) { point in
-                    LineMark(
-                        x: .value("Time", point.date),
-                        y: .value(selectedMetric.unit, point.value)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(metricColour)
-                    RuleMark(y: .value("Zero", 0))
-                        .foregroundStyle(.secondary.opacity(0.25))
-                }
-                .chartYAxisLabel(selectedMetric.unit)
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 4)) {
-                        AxisGridLine()
-                        AxisValueLabel(format: .dateTime.hour().minute())
-                    }
-                }
-                .frame(height: 155)
-            }
-        }
+        HistoryChartView(
+            history: monitor.history,
+            pvEnabled: pvEnabled,
+            selectedMetric: $selectedMetric
+        )
     }
 
     @ViewBuilder
@@ -348,34 +308,6 @@ struct DashboardView: View {
         }
     }
 
-    private var availableMetrics: [HistoryMetric] {
-        pvEnabled ? HistoryMetric.allCases : HistoryMetric.allCases.filter { $0 != .pv }
-    }
-
-    private struct ChartPoint: Identifiable {
-        let id: UUID
-        let date: Date
-        let value: Double
-    }
-
-    private var chartPoints: [ChartPoint] {
-        monitor.history.compactMap { point in
-            guard let value = selectedMetric.value(from: point.reading) else { return nil }
-            return ChartPoint(id: point.id, date: point.date, value: value)
-        }
-    }
-
-    private var metricColour: Color {
-        switch selectedMetric {
-        case .house: .purple
-        case .battery: .blue
-        case .grid: .orange
-        case .voltage: .cyan
-        case .temperature: .yellow
-        case .pv: .green
-        }
-    }
-
     private func batterySymbol(_ percent: Int) -> String {
         switch percent {
         case 76...: "battery.100percent"
@@ -399,6 +331,88 @@ struct DashboardView: View {
                 pvEnabled: pvEnabled
             )
         )
+    }
+}
+
+private struct HistoryChartView: View {
+    let history: [HistoryPoint]
+    let pvEnabled: Bool
+    @Binding var selectedMetric: HistoryMetric
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("History")
+                    .font(.headline)
+                Spacer()
+                Text("Since launch · 6h max · 30s samples")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Picker("Metric", selection: $selectedMetric) {
+                ForEach(availableMetrics) { metric in
+                    Text(metric.rawValue).tag(metric)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+
+            if chartPoints.isEmpty {
+                PlaceholderView(
+                    title: "Waiting for samples",
+                    message: "History appears after the first successful polls.",
+                    symbol: "chart.xyaxis.line"
+                )
+                .frame(height: 145)
+            } else {
+                Chart(chartPoints) { point in
+                    LineMark(
+                        x: .value("Time", point.date),
+                        y: .value(selectedMetric.unit, point.value)
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(metricColour)
+                    RuleMark(y: .value("Zero", 0))
+                        .foregroundStyle(.secondary.opacity(0.25))
+                }
+                .chartYAxisLabel(selectedMetric.unit)
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4)) {
+                        AxisGridLine()
+                        AxisValueLabel(format: .dateTime.hour().minute())
+                    }
+                }
+                .frame(height: 155)
+            }
+        }
+    }
+
+    private var availableMetrics: [HistoryMetric] {
+        pvEnabled ? HistoryMetric.allCases : HistoryMetric.allCases.filter { $0 != .pv }
+    }
+
+    private struct ChartPoint: Identifiable {
+        let id: UUID
+        let date: Date
+        let value: Double
+    }
+
+    private var chartPoints: [ChartPoint] {
+        history.compactMap { point in
+            guard let value = selectedMetric.value(from: point.reading) else { return nil }
+            return ChartPoint(id: point.id, date: point.date, value: value)
+        }
+    }
+
+    private var metricColour: Color {
+        switch selectedMetric {
+        case .house: .purple
+        case .battery: .blue
+        case .grid: .orange
+        case .voltage: .cyan
+        case .temperature: .yellow
+        case .pv: .green
+        }
     }
 }
 

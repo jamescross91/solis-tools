@@ -60,6 +60,11 @@ temperature, voltage, alarms, connection health and selectable six-hour charts.
 Its connection settings are stored in the current macOS user's preferences. PV
 remains disabled unless enabled in the app settings.
 
+The menu-bar app retains up to six hours of chart history at a 30-second display
+resolution. This keeps its popover responsive during long-running sessions.
+Chart history is memory-only and is cleared whenever the app is quit and
+restarted, including after an update.
+
 The menu-bar app is built locally by Homebrew from the release source, so it
 does not require a separately downloaded or unsigned application bundle. Linux
 installations continue to install the terminal monitor only.

@@ -50,6 +50,14 @@ struct StreamContractValidation {
         precondition(envelope.reading.gridImportPositiveKw == 0.5)
         precondition(HistoryMetric.battery.value(from: envelope.reading) == 1.72)
         precondition(StreamDecoder.date(from: envelope.timestamp) != nil)
+
+        let sampleDate = Date(timeIntervalSince1970: 1_000)
+        var history = HistoryBuffer()
+        precondition(history.append(HistoryPoint(date: sampleDate, reading: envelope.reading)))
+        precondition(!history.append(HistoryPoint(date: sampleDate.addingTimeInterval(10), reading: envelope.reading)))
+        precondition(history.append(HistoryPoint(date: sampleDate.addingTimeInterval(30), reading: envelope.reading)))
+        precondition(history.append(HistoryPoint(date: sampleDate.addingTimeInterval(HistoryBuffer.retentionInterval + 30), reading: envelope.reading)))
+        precondition(history.points.count == 2)
         print("Stream contract validated")
     }
 }
