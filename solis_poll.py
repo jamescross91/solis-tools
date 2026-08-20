@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import signal
@@ -469,17 +470,31 @@ class Recorder:
                 new_file = not csv_path.exists() or csv_path.stat().st_size == 0
                 if not new_file:
                     self._validate_csv_header(csv_path)
-                self.csv_file = csv_path.open("a", encoding="utf-8", newline="")
+                self.csv_file = open(  # noqa: SIM115 -- closed by close()
+                    csv_path, "a", encoding="utf-8", newline="", opener=self._private_opener
+                )
                 self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self.CSV_FIELDS)
                 if new_file:
                     self.csv_writer.writeheader()
                     self.csv_file.flush()
             if jsonl_path:
                 self._check_parent(jsonl_path)
-                self.jsonl_file = jsonl_path.open("a", encoding="utf-8")
+                self.jsonl_file = open(  # noqa: SIM115 -- closed by close()
+                    jsonl_path, "a", encoding="utf-8", opener=self._private_opener
+                )
         except OSError as exc:
             self.close()
             raise RecordingError(f"cannot open recording file: {exc}") from exc
+
+    @staticmethod
+    def _private_opener(path: str, flags: int) -> int:
+        """Create recordings readable only by their owner.
+
+        A half-second power trace shows when a house is empty and what is
+        running in it. The mode applies at creation, so an existing file keeps
+        whatever the user chose.
+        """
+        return os.open(path, flags, 0o600)
 
     @staticmethod
     def _check_parent(path: Path) -> None:

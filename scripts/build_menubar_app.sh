@@ -9,10 +9,12 @@ output_root="$project_root/build/menubar"
 app_path="$output_root/SolisMenuBar.app"
 
 swift build --disable-sandbox --package-path "$package_path" --configuration "$configuration"
-binary_path="$(swift build --disable-sandbox --package-path "$package_path" --configuration "$configuration" --show-bin-path)/SolisMenuBar"
+bin_path="$(swift build --disable-sandbox --package-path "$package_path" \
+    --configuration "$configuration" --show-bin-path)"
+binary_path="$bin_path/SolisMenuBar"
 
 rm -rf "$app_path"
-mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+mkdir -p "$app_path/Contents/MacOS"
 cp "$binary_path" "$app_path/Contents/MacOS/SolisMenuBar"
 cp "$package_path/Resources/Info.plist" "$app_path/Contents/Info.plist"
 codesign --force --sign - "$app_path"

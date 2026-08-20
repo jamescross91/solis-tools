@@ -8,3 +8,4 @@ SolisMenuBar/.swiftpm/
 .mypy_cache/
 .ruff_cache/
 dist/
+.DS_Store

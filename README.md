@@ -159,6 +159,10 @@ Recordings are append-only and are never rotated or truncated. At the default
 58 MB. Raise `--interval`, or rotate the files yourself, for a long-running
 capture.
 
+New recording files are created readable only by their owner, because a
+half-second power trace shows when a house is empty and what is running in it.
+An existing file keeps whatever permissions it already has.
+
 The parent directory must already exist. A missing or unwritable directory produces a clear error and the monitor exits.
 
 ## Status, alarms and connection health

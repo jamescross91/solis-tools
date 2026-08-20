@@ -43,6 +43,11 @@ versioning](https://semver.org/spec/v2.0.0.html).
 - The menu-bar status-refresh interval was stored and passed to `solis-poll`
   with no control to set it.
 
+### Security
+
+- New recording files are created `0600` rather than `0644`. A half-second power
+  trace shows when a house is empty and what is running in it.
+
 ### Added
 
 - `--skip-profile-check` continues when the register map cannot be confirmed.
