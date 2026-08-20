@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.3.1/solis-tools-0.3.1.tar.gz"
-  sha256 "736fbfa9a15cb14c1fa038609345c490654e31e3377d7f02e12e26be0651c28b"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.4.0/solis-tools-0.4.0.tar.gz"
+  sha256 "c1bc215c105497f00af511c1164c8532863dd17ec4e4e1cd9b0ca1afaa3e16e0"
   license "GPL-3.0-only"
 
   # `brew install --HEAD solis-tools` builds the current main branch, so a change
@@ -48,11 +48,16 @@ class SolisTools < Formula
   end
 
   test do
-    assert_match "solis-poll #{version}", shell_output("#{bin}/solis-poll --version")
+    # `version` is the literal string "HEAD" for a --HEAD install; the actual
+    # reported version there tracks solis_poll.VERSION on that branch, which
+    # this test cannot know in advance, so it checks the shape instead.
+    version_pattern = build.head? ? /\d+\.\d+\.\d+/ : /#{Regexp.escape(version.to_s)}/
+    assert_match(/solis-poll #{version_pattern}/, shell_output("#{bin}/solis-poll --version"))
     assert_match "--host HOST", shell_output("#{bin}/solis-poll --help")
     return unless OS.mac?
 
     assert_path_exists prefix/"SolisMenuBar.app/Contents/Info.plist"
-    assert_match "solis-menubar #{version}", shell_output("#{bin}/solis-menubar --version")
+    assert_match(/solis-menubar #{version_pattern}/,
+                 shell_output("#{bin}/solis-menubar --version"))
   end
 end
