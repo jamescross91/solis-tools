@@ -361,18 +361,13 @@ private struct HistoryChartView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            Picker("Metric", selection: $selectedMetric) {
+            Picker("Metric", selection: metricSelection) {
                 ForEach(availableMetrics) { metric in
                     Text(metric.rawValue).tag(metric)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            .onChange(of: pvEnabled) { _, enabled in
-                if !enabled, selectedMetric == .pv {
-                    selectedMetric = .house
-                }
-            }
 
             if chartPoints.isEmpty {
                 PlaceholderView(
@@ -385,7 +380,7 @@ private struct HistoryChartView: View {
                 Chart(chartPoints) { point in
                     LineMark(
                         x: .value("Time", point.date),
-                        y: .value(selectedMetric.unit, point.value)
+                        y: .value(metric.unit, point.value)
                     )
                     .interpolationMethod(.catmullRom)
                     .foregroundStyle(metricColour)
@@ -393,7 +388,7 @@ private struct HistoryChartView: View {
                         .foregroundStyle(.secondary.opacity(0.25))
                 }
                 .chartYScale(domain: yDomain)
-                .chartYAxisLabel(selectedMetric.unit)
+                .chartYAxisLabel(metric.unit)
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine()
@@ -409,6 +404,18 @@ private struct HistoryChartView: View {
         pvEnabled ? HistoryMetric.allCases : HistoryMetric.allCases.filter { $0 != .pv }
     }
 
+    /// The selection, falling back when it is no longer offered.
+    ///
+    /// Turning PV off left the stored selection on a metric the Picker no longer
+    /// listed, which rendered it blank and emptied the chart.
+    private var metric: HistoryMetric {
+        availableMetrics.contains(selectedMetric) ? selectedMetric : .house
+    }
+
+    private var metricSelection: Binding<HistoryMetric> {
+        Binding(get: { metric }, set: { selectedMetric = $0 })
+    }
+
     private struct ChartPoint: Identifiable {
         let id: UUID
         let date: Date
@@ -417,7 +424,7 @@ private struct HistoryChartView: View {
 
     private var chartPoints: [ChartPoint] {
         history.compactMap { point in
-            guard let value = selectedMetric.value(from: point.reading) else { return nil }
+            guard let value = metric.value(from: point.reading) else { return nil }
             return ChartPoint(id: point.id, date: point.date, value: value)
         }
     }
@@ -428,7 +435,7 @@ private struct HistoryChartView: View {
         let values = chartPoints.map(\.value)
         let low = min(values.min() ?? 0, 0)
         let high = max(values.max() ?? 1, low + 0.1)
-        guard let configured = selectedMetric.configuredRange(
+        guard let configured = metric.configuredRange(
             inverterMaxKw: inverterMaxKw,
             gridMaxKw: gridMaxKw
         ) else {
@@ -449,7 +456,7 @@ private struct HistoryChartView: View {
     }
 
     private var metricColour: Color {
-        switch selectedMetric {
+        switch metric {
         case .house: .purple
         case .battery: .blue
         case .grid: .orange
