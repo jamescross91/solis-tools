@@ -5,6 +5,8 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.4.0
+
 ### Fixed
 
 - A single out-of-range register value no longer ends the process. Range

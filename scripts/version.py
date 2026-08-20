@@ -123,15 +123,39 @@ def write(version: str) -> int:
     return 0
 
 
+BUILD_NUMBER = re.compile(r"<key>CFBundleVersion</key>\s*\n\s*<string>(\d+)</string>")
+PLIST = ROOT / "SolisMenuBar/Resources/Info.plist"
+
+
+def bump_build_number() -> int:
+    """Increment CFBundleVersion, which is a build counter, not the version.
+
+    macOS compares this when deciding whether a bundle has changed, so a release
+    that reuses it can be treated as the same build.
+    """
+    text = PLIST.read_text(encoding="utf-8")
+    match = BUILD_NUMBER.search(text)
+    if match is None:
+        raise SystemExit(f"error: no CFBundleVersion found in {PLIST}")
+    build = str(int(match.group(1)) + 1)
+    start, end = match.span(1)
+    PLIST.write_text(text[:start] + build + text[end:], encoding="utf-8")
+    print(f"updated {PLIST.relative_to(ROOT)} CFBundleVersion -> {build}")
+    return 0
+
+
 def set_version(version: str) -> int:
     if not SEMVER.match(version):
         raise SystemExit(f"error: {version!r} is not MAJOR.MINOR.PATCH")
+    if version == canonical_version():
+        raise SystemExit(f"error: already at {version}")
     text = MODULE.read_text(encoding="utf-8")
     MODULE.write_text(
         re.sub(r'^VERSION = "[^"]+"', f'VERSION = "{version}"', text, count=1, flags=re.MULTILINE),
         encoding="utf-8",
     )
     print(f"updated {MODULE.relative_to(ROOT)} -> {version}")
+    bump_build_number()
     return write(version)
 
 
