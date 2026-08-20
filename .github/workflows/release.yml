@@ -4,9 +4,13 @@ name: Release
 # checksum, paste it into the formula. Nothing verified that the tarball built,
 # that the tag matched solis_poll.VERSION, or that the checksum was right.
 #
-# This builds and verifies the tarball, then publishes it as a draft release
-# with the sha256 the formula needs. Updating the formula stays manual and
-# deliberate, because it must point at an asset that already exists.
+# This builds the tarball, verifies it installs and builds exactly the way
+# Homebrew will, and only then publishes the release. It is published rather than
+# drafted because the asset has to be downloadable before the formula can point
+# at it, and every check that would gate a manual review has already run.
+#
+# Updating the formula stays a separate, deliberate step: its sha256 can only be
+# computed once the asset exists.
 
 on:
   push:
@@ -77,13 +81,27 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish a draft release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
+          notes="$(mktemp)"
+          {
+            echo "Install or upgrade with Homebrew:"
+            echo
+            echo '```sh'
+            echo "brew update && brew upgrade solis-tools"
+            echo '```'
+            echo
+            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$TAG/CHANGELOG.md) for what changed."
+            echo
+            echo "Release asset sha256: \`$SHA256\`"
+          } > "$notes"
+          gh release create "$TAG" \
             "${{ steps.tarball.outputs.path }}" \
             --repo "${{ github.repository }}" \
-            --draft \
-            --title "solis-tools ${{ steps.version.outputs.version }}" \
-            --notes "sha256 \`${{ steps.tarball.outputs.sha256 }}\`"
+            --title "solis-tools $VERSION" \
+            --notes-file "$notes"

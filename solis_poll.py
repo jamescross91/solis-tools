@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import IO, Any, NoReturn
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20

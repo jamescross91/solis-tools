@@ -7,6 +7,10 @@ class SolisTools < Formula
   sha256 "736fbfa9a15cb14c1fa038609345c490654e31e3377d7f02e12e26be0651c28b"
   license "GPL-3.0-only"
 
+  # `brew install --HEAD solis-tools` builds the current main branch, so a change
+  # can be tried before it is tagged and released.
+  head "https://github.com/jamescross91/solis-tools.git", branch: "main"
+
   depends_on "python@3.14"
 
   # The menu-bar app is built from source during install.

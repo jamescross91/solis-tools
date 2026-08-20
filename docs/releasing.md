@@ -36,18 +36,15 @@ The tag triggers `.github/workflows/release.yml`, which:
    everything the formula's install step needs;
 3. extracts it and builds it exactly as Homebrew will — `pip install .` plus
    `swift build --configuration release`;
-4. publishes a **draft** release with the tarball attached;
+4. publishes the release with the tarball attached;
 5. prints the `url` and `sha256` lines for the formula in the job summary.
 
-If step 1 or 3 fails, delete the tag, fix the branch, and tag again. Nothing is
-published until the draft exists.
+If step 1, 2 or 3 fails, nothing is published: delete the tag, fix the branch and
+tag again. The release is published rather than drafted because the asset has to
+be downloadable before the formula can point at it, and the checks that would
+gate a manual review have already run by then.
 
-## 3. Publish the release
-
-Review the draft release on GitHub, paste the changelog section into its notes,
-and publish it. The asset must be public before the formula can point at it.
-
-## 4. Update the formula
+## 3. Update the formula
 
 The formula tracks the last *published* release, which is why
 `scripts/version.py` reports it but never rewrites it. Take the two lines from
@@ -72,7 +69,7 @@ CI job runs on `main` and installs the published tarball on macOS and Linux —
 this is the check that the release actually installs, which is why that job does
 not run on pull requests.
 
-## 5. Verify
+## 4. Verify
 
 ```sh
 brew update && brew upgrade solis-tools
