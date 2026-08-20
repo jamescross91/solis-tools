@@ -84,7 +84,7 @@ struct DashboardView: View {
             Label(sample.reading.inverterStatus, systemImage: "waveform.path.ecg")
                 .font(.subheadline.weight(.semibold))
             Spacer()
-            Text("Model \(sample.device.modelCode)")
+            Text(verbatim: "Model \(sample.device.modelCode)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -168,10 +168,18 @@ struct DashboardView: View {
         HStack {
             Label(String(format: "%.0f ms", sample.health.latencyMs), systemImage: "network")
             Spacer()
-            Text("Failures \(sample.health.totalFailures) · reconnects \(sample.health.reconnects)")
+            Text(verbatim: connectionSummary(sample.health))
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+
+    private func connectionSummary(_ health: ConnectionDetails) -> String {
+        var summary = "Failures \(health.totalFailures) · reconnects \(health.reconnects)"
+        if let rejected = health.rejectedSamples, rejected > 0 {
+            summary += " · rejected \(rejected)"
+        }
+        return summary
     }
 
     private var waiting: some View {
@@ -223,6 +231,12 @@ struct DashboardView: View {
                 .font(.headline)
             LabeledContent("Refresh") {
                 TextField("1.0", value: $pollInterval, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Text("seconds").foregroundStyle(.secondary)
+            }
+            LabeledContent("Status refresh") {
+                TextField("10", value: $slowInterval, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 70)
                 Text("seconds").foregroundStyle(.secondary)
@@ -379,7 +393,7 @@ private struct HistoryChartView: View {
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine()
-                        AxisValueLabel(format: .dateTime.hour().minute())
+                        AxisValueLabel(format: axisTimeFormat)
                     }
                 }
                 .frame(height: 155)
@@ -402,6 +416,17 @@ private struct HistoryChartView: View {
             guard let value = selectedMetric.value(from: point.reading) else { return nil }
             return ChartPoint(id: point.id, date: point.date, value: value)
         }
+    }
+
+    /// Hours and minutes repeat every tick until the window is minutes wide, so
+    /// short spans need seconds to distinguish one tick from the next.
+    private var axisTimeFormat: Date.FormatStyle {
+        guard let first = chartPoints.first?.date, let last = chartPoints.last?.date else {
+            return .dateTime.hour().minute()
+        }
+        return last.timeIntervalSince(first) < 600
+            ? .dateTime.hour().minute().second()
+            : .dateTime.hour().minute()
     }
 
     private var metricColour: Color {

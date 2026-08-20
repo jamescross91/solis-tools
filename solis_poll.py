@@ -22,6 +22,7 @@ MIN_PYTHON = (3, 10)
 VERSION = "0.3.1"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
+STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 # ESINV fault registers 33116-33120. Bit numbers run from the least-significant
@@ -1207,7 +1208,13 @@ def main() -> int:
                     last_error = f"{last_error}; reconnect failed: {reconnect_error}"
 
             if last_reading is None:
-                fail(f"unable to obtain an inverter reading: {last_error}", 1)
+                # The connection and identity block already succeeded, so a
+                # failure here is transient far more often than terminal. Give
+                # it a few attempts before declaring the inverter unreadable.
+                if health.consecutive_failures >= STARTUP_ATTEMPTS:
+                    fail(f"unable to obtain an inverter reading: {last_error}", 1)
+                time.sleep(min(args.interval, 1.0))
+                continue
             if args.once:
                 print_once(last_reading, device, health)
                 return 0

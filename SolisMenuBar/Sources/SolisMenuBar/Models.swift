@@ -1,5 +1,18 @@
 import Foundation
 
+enum StreamError: LocalizedError {
+    case unsupportedSchema(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .unsupportedSchema(version):
+            let supported = StreamDecoder.supportedSchemaVersion
+            return "solis-poll emits stream schema \(version) but this app reads schema "
+                + "\(supported). Upgrade solis-tools with Homebrew."
+        }
+    }
+}
+
 struct StreamEnvelope: Decodable, Sendable {
     let schemaVersion: Int
     let timestamp: String
@@ -53,6 +66,7 @@ struct ConnectionDetails: Decodable, Sendable {
     let totalFailures: Int
     let consecutiveFailures: Int
     let reconnects: Int
+    let rejectedSamples: Int?
 }
 
 struct HistoryPoint: Identifiable, Sendable {
@@ -129,10 +143,19 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
 }
 
 enum StreamDecoder {
+    /// Stream schema this build knows how to read. solis_poll.py emits the same
+    /// number; a newer poller means the app is out of date, not that the line
+    /// is corrupt, and the two need telling apart in the UI.
+    static let supportedSchemaVersion = 1
+
     static func decode(_ data: Data) throws -> StreamEnvelope {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(StreamEnvelope.self, from: data)
+        let envelope = try decoder.decode(StreamEnvelope.self, from: data)
+        guard envelope.schemaVersion == supportedSchemaVersion else {
+            throw StreamError.unsupportedSchema(envelope.schemaVersion)
+        }
+        return envelope
     }
 
     static func date(from value: String) -> Date? {
