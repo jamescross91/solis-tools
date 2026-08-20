@@ -142,6 +142,8 @@ struct DashboardView: View {
         HistoryChartView(
             history: monitor.history,
             pvEnabled: pvEnabled,
+            inverterMaxKw: inverterMaxKw,
+            gridMaxKw: gridMaxKw,
             selectedMetric: $selectedMetric
         )
     }
@@ -296,6 +298,8 @@ struct DashboardView: View {
             }
             Spacer()
             Button("Quit") {
+                // Otherwise the poller outlives the app until its next write fails.
+                monitor.stop()
                 NSApplication.shared.terminate(nil)
             }
             .buttonStyle(.plain)
@@ -333,24 +337,18 @@ struct DashboardView: View {
     }
 
     private func connect() {
-        monitor.start(
-            configuration: MonitorConfiguration(
-                host: host.trimmingCharacters(in: .whitespacesAndNewlines),
-                port: port,
-                slave: slave,
-                interval: max(0.5, pollInterval),
-                slowInterval: max(1, slowInterval),
-                inverterMaxKw: max(0.1, inverterMaxKw),
-                gridMaxKw: max(0.1, gridMaxKw),
-                pvEnabled: pvEnabled
-            )
-        )
+        // @AppStorage has already written these, so read them back the same way
+        // the launch path does rather than assembling a second copy here.
+        guard let configuration = MonitorConfiguration.stored() else { return }
+        monitor.start(configuration: configuration)
     }
 }
 
 private struct HistoryChartView: View {
     let history: [HistoryPoint]
     let pvEnabled: Bool
+    let inverterMaxKw: Double
+    let gridMaxKw: Double
     @Binding var selectedMetric: HistoryMetric
 
     var body: some View {
@@ -370,6 +368,11 @@ private struct HistoryChartView: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+            .onChange(of: pvEnabled) { _, enabled in
+                if !enabled, selectedMetric == .pv {
+                    selectedMetric = .house
+                }
+            }
 
             if chartPoints.isEmpty {
                 PlaceholderView(
@@ -389,6 +392,7 @@ private struct HistoryChartView: View {
                     RuleMark(y: .value("Zero", 0))
                         .foregroundStyle(.secondary.opacity(0.25))
                 }
+                .chartYScale(domain: yDomain)
                 .chartYAxisLabel(selectedMetric.unit)
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
@@ -416,6 +420,21 @@ private struct HistoryChartView: View {
             guard let value = selectedMetric.value(from: point.reading) else { return nil }
             return ChartPoint(id: point.id, date: point.date, value: value)
         }
+    }
+
+    /// The configured full scale, widened when a reading exceeds it so a spike is
+    /// never clipped out of view.
+    private var yDomain: ClosedRange<Double> {
+        let values = chartPoints.map(\.value)
+        let low = min(values.min() ?? 0, 0)
+        let high = max(values.max() ?? 1, low + 0.1)
+        guard let configured = selectedMetric.configuredRange(
+            inverterMaxKw: inverterMaxKw,
+            gridMaxKw: gridMaxKw
+        ) else {
+            return low...high
+        }
+        return min(configured.lowerBound, low)...max(configured.upperBound, high)
     }
 
     /// Hours and minutes repeat every tick until the window is minutes wide, so

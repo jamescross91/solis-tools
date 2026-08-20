@@ -84,6 +84,34 @@ final class StreamContractTests: XCTestCase {
         XCTAssertNil(HistoryMetric.pv.value(from: reading))
     }
 
+    /// The Grid card and the Grid chart plotted the same value with opposite
+    /// signs, because the chart used the poller's export-positive convention.
+    func testGridChartAndGridCardAgreeOnSign() throws {
+        let reading = try StreamDecoder.decode(envelopeJSON()).reading
+        XCTAssertEqual(
+            HistoryMetric.grid.value(from: reading),
+            reading.gridImportPositiveKw
+        )
+    }
+
+    func testConfiguredRangesFollowTheScaleSettings() {
+        XCTAssertEqual(
+            HistoryMetric.house.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
+            0...10
+        )
+        XCTAssertEqual(
+            HistoryMetric.battery.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
+            -10...10
+        )
+        XCTAssertEqual(
+            HistoryMetric.grid.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
+            -23...23
+        )
+        // Voltage and temperature have no configured full scale.
+        XCTAssertNil(HistoryMetric.voltage.configuredRange(inverterMaxKw: 10, gridMaxKw: 23))
+        XCTAssertNil(HistoryMetric.temperature.configuredRange(inverterMaxKw: 10, gridMaxKw: 23))
+    }
+
     func testTimestampsParseWithAndWithoutFractionalSeconds() {
         XCTAssertNotNil(StreamDecoder.date(from: "2026-08-19T16:30:00.123+01:00"))
         XCTAssertNotNil(StreamDecoder.date(from: "2026-08-19T16:30:00+01:00"))
@@ -116,6 +144,57 @@ final class StreamContractTests: XCTestCase {
             }
             XCTAssertEqual(version, 2)
         }
+    }
+}
+
+final class StoredConfigurationTests: XCTestCase {
+    private func defaults(_ values: [String: Any]) -> UserDefaults {
+        let suite = UserDefaults(suiteName: "solis-tests-\(UUID().uuidString)")!
+        for (key, value) in values {
+            suite.set(value, forKey: key)
+        }
+        return suite
+    }
+
+    func testNoHostMeansNothingToStart() {
+        XCTAssertNil(MonitorConfiguration.stored(defaults([:])))
+        XCTAssertNil(MonitorConfiguration.stored(defaults(["host": "   "])))
+    }
+
+    func testStoredSettingsAreReadWithTheDashboardDefaults() throws {
+        let configuration = try XCTUnwrap(
+            MonitorConfiguration.stored(defaults(["host": " 192.168.1.57 "]))
+        )
+        XCTAssertEqual(configuration.host, "192.168.1.57")
+        XCTAssertEqual(configuration.port, 502)
+        XCTAssertEqual(configuration.slave, 1)
+        XCTAssertEqual(configuration.interval, 1)
+        XCTAssertEqual(configuration.slowInterval, 10)
+        XCTAssertEqual(configuration.inverterMaxKw, 10)
+        XCTAssertEqual(configuration.gridMaxKw, 23)
+        XCTAssertFalse(configuration.pvEnabled)
+    }
+
+    /// A too-short interval would make the poller hammer the inverter.
+    func testUnreasonableStoredValuesAreClamped() throws {
+        let configuration = try XCTUnwrap(
+            MonitorConfiguration.stored(
+                defaults([
+                    "host": "inverter.local",
+                    "pollInterval": 0.01,
+                    "slowInterval": 0.0,
+                    "inverterMaxKw": 0.0,
+                    "gridMaxKw": -5.0,
+                    "pvEnabled": true,
+                ])
+            )
+        )
+        XCTAssertEqual(configuration.host, "inverter.local")
+        XCTAssertEqual(configuration.interval, 0.5)
+        XCTAssertEqual(configuration.slowInterval, 1)
+        XCTAssertEqual(configuration.inverterMaxKw, 0.1)
+        XCTAssertEqual(configuration.gridMaxKw, 0.1)
+        XCTAssertTrue(configuration.pvEnabled)
     }
 }
 

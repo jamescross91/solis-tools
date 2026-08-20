@@ -8,12 +8,15 @@ import csv
 import ipaddress
 import json
 import logging
+import math
 import re
 import shutil
+import signal
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn
@@ -22,6 +25,7 @@ MIN_PYTHON = (3, 10)
 VERSION = "0.3.1"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
+HISTORY_READ_LIMIT = 16 << 20
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
@@ -401,7 +405,7 @@ class SolisClient:
         grid_kw = self._signed_32(grid[0], grid[1]) / 1000
         checked(voltage, 0, 300, "grid voltage")
         checked(state_of_charge, 0, 100, "battery state of charge")
-        checked(house_load_kw, 0, 250, "house load")
+        checked(house_load_kw, 0, 70, "house load")
         checked(battery_kw, 0, 250, "battery power")
         checked(grid_kw, -500, 500, "grid power")
 
@@ -538,11 +542,26 @@ class Recorder:
             if is_csv:
                 records = csv.DictReader(lines, fieldnames=self.CSV_FIELDS)
             else:
-                records = (json.loads(line) for line in lines)
+                records = self._json_records(lines)
             self._restore_records(records, history, cutoff)
-        except (OSError, csv.Error, json.JSONDecodeError) as exc:
+        except (OSError, csv.Error) as exc:
             raise RecordingError(f"cannot restore history from {path}: {exc}") from exc
         return history
+
+    @staticmethod
+    def _json_records(lines: list[str]) -> Iterator[dict[str, Any]]:
+        """Yield parseable records, skipping any that are not.
+
+        A recording interrupted mid-write leaves a truncated final line. Raising
+        for it made a power cut during one run stop every run afterwards.
+        """
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield record
 
     @classmethod
     def _tail_lines(cls, path: Path, cutoff: float, is_csv: bool) -> list[str]:
@@ -553,9 +572,11 @@ class Recorder:
         recover six hours makes startup scale with uptime. Walking backwards
         in chunks keeps the read proportional to the window instead.
         """
-        position = path.stat().st_size
+        size = path.stat().st_size
+        position = size
         buffer = b""
         reached_start = False
+        timestamped = False
         with path.open("rb") as source:
             while True:
                 if position == 0:
@@ -568,10 +589,17 @@ class Recorder:
                 # Until the file start is reached the first line is a fragment,
                 # so the second is the oldest one safe to timestamp.
                 complete = buffer.split(b"\n")[1:]
-                if not complete:
-                    continue
-                oldest = cls._record_timestamp(cls._decode(complete[0]), is_csv)
-                if oldest is not None and oldest < cutoff:
+                if complete:
+                    oldest = cls._record_timestamp(cls._decode(complete[0]), is_csv)
+                    if oldest is not None:
+                        timestamped = True
+                        if oldest < cutoff:
+                            break
+                # A file this large with no readable timestamp anywhere in it is
+                # not a recording, and walking to its start defeats the point of
+                # reading backwards. A dense but valid recording keeps going,
+                # because a short interval can legitimately fill the window.
+                if not timestamped and size - position >= HISTORY_READ_LIMIT:
                     break
 
         lines = [cls._decode(line) for line in buffer.split(b"\n")]
@@ -609,7 +637,7 @@ class Recorder:
                 sampled_at = datetime.fromisoformat(str(record["timestamp"])).timestamp()
                 if sampled_at < cutoff:
                     continue
-                history.append((sampled_at, reading_from_record(record)))
+                history.append((sampled_at, for_history(reading_from_record(record))))
             except (KeyError, TypeError, ValueError):
                 continue
 
@@ -696,6 +724,16 @@ class Palette:
 def bar(value: float, maximum: float, width: int, palette: Palette, colour: str) -> str:
     filled = max(0, min(width, round((abs(value) / maximum) * width)))
     return palette.apply(colour, "█" * filled + "·" * (width - filled))
+
+
+def for_history(reading: Reading) -> Reading:
+    """Drop the alarm list before retaining a sample for the graphs.
+
+    The graphs only ever read voltage, temperature, PV, load and the two flows.
+    An inverter reporting every fault bit produced a fresh 80-alarm tuple every
+    poll, and six hours of those cost 452 MB instead of 11 MB.
+    """
+    return reading if not reading.alarms else replace(reading, alarms=())
 
 
 def battery_flow(reading: Reading) -> float:
@@ -790,24 +828,35 @@ def fit(variants: list[str], width: int) -> str:
     return last if width < 2 else last[: width - 1] + "…"
 
 
+def health_state(health: ConnectionHealth) -> str:
+    """Describe the connection from the counters rather than assuming it is up."""
+    if health.consecutive_failures == 0:
+        return "Connection OK"
+    if health.successful_polls == 0:
+        return "No reading yet"
+    return f"Connection failing ({health.consecutive_failures} in a row)"
+
+
 def health_variants(age: float, health: ConnectionHealth) -> list[str]:
     """Connection summaries from most to least verbose."""
     rejected = f" · rejected {health.rejected_samples}" if health.rejected_samples else ""
     short_rejected = f" · rej {health.rejected_samples}" if health.rejected_samples else ""
+    state = health_state(health)
     return [
         (
-            f"Connection OK · last sample {age:.1f}s ago · {health.latency_ms:.0f} ms · "
+            f"{state} · last sample {age:.1f}s ago · {health.latency_ms:.0f} ms · "
             f"failures {health.total_failures} ({health.consecutive_failures} consecutive) · "
             f"reconnects {health.reconnects}{rejected}"
         ),
         (
-            f"Connection OK · {age:.1f}s ago · {health.latency_ms:.0f} ms · "
+            f"{state} · {age:.1f}s ago · {health.latency_ms:.0f} ms · "
             f"failures {health.total_failures}/{health.consecutive_failures} · "
             f"reconnects {health.reconnects}{short_rejected}"
         ),
         (
-            f"OK · {age:.0f}s · {health.latency_ms:.0f}ms · "
-            f"fail {health.total_failures} · rec {health.reconnects}{short_rejected}"
+            f"{'OK' if health.consecutive_failures == 0 else 'FAILING'} · {age:.0f}s · "
+            f"{health.latency_ms:.0f}ms · fail {health.total_failures} · "
+            f"rec {health.reconnects}{short_rejected}"
         ),
     ]
 
@@ -855,7 +904,7 @@ def render(
         banner = palette.bad if has_fault else palette.warn
         label = "ALARMS" if has_fault else "WARNINGS"
         rows.append(
-            f" {banner(label)}{' ' * (14 - len(label))}"
+            f" {banner(label)}{' ' * (15 - len(label))}"
             f"{banner(alarm_text[: max(20, columns - 18)])}"
         )
     rows.extend(
@@ -1139,13 +1188,29 @@ def parse_args() -> argparse.Namespace:
         args.inverter_max_kw,
         args.grid_max_kw,
     )
-    if any(value <= 0 for value in positive):
-        parser.error("poll intervals, timeout and bar maximums must be greater than zero")
+    # NaN compares false against every bound, so `value <= 0` let it through and
+    # the first frame then died formatting a bar.
+    if any(not math.isfinite(value) or value <= 0 for value in positive):
+        parser.error("poll intervals, timeout and bar maximums must be finite and above zero")
+    if args.csv and args.jsonl and args.csv.resolve() == args.jsonl.resolve():
+        parser.error("--csv and --jsonl must name different files")
     return args
+
+
+def _interrupt(signal_number: int, _frame: object) -> NoReturn:
+    """Route a termination signal through the same exit path as Ctrl-C.
+
+    Without this the finally block never ran and the cursor stayed hidden in
+    whatever shell had launched the dashboard.
+    """
+    raise KeyboardInterrupt(signal_number)
 
 
 def main() -> int:
     args = parse_args()
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _interrupt)
     dashboard = sys.stdout.isatty() and not args.once and not args.stream_json
     palette = Palette(dashboard and not args.no_colour)
     client = SolisClient(args.host, args.port, args.slave, args.timeout)
@@ -1160,7 +1225,8 @@ def main() -> int:
 
     try:
         recorder = Recorder(args.csv, args.jsonl)
-        history = recorder.load_history(started_at)
+        if not args.once and not args.stream_json:
+            history = recorder.load_history(started_at)
         client.connect()
         device = client.identify(args.skip_profile_check)
         if dashboard:
@@ -1176,7 +1242,7 @@ def main() -> int:
                 sampled_at = time.time()
                 health.succeeded(sampled_at, (time.perf_counter() - poll_started) * 1000)
                 last_error = None
-                history.append((sampled_at, last_reading))
+                history.append((sampled_at, for_history(last_reading)))
                 cutoff = sampled_at - HISTORY_SECONDS
                 while history and history[0][0] < cutoff:
                     history.popleft()

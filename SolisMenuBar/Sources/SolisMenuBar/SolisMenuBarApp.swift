@@ -16,7 +16,10 @@ struct SolisMenuBarApp: App {
         MenuBarExtra {
             DashboardView(monitor: monitor)
         } label: {
+            // The label is the only view present before the popover is opened,
+            // so this is where polling has to begin.
             MenuBarMetricsView(monitor: monitor)
+                .task { monitor.startIfConfigured() }
         }
         .menuBarExtraStyle(.window)
     }
