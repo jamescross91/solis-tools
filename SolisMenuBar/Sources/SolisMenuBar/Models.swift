@@ -61,6 +61,32 @@ struct HistoryPoint: Identifiable, Sendable {
     let reading: InverterReading
 }
 
+struct HistoryBuffer: Sendable {
+    static let displaySampleInterval: TimeInterval = 30
+    static let retentionInterval: TimeInterval = 6 * 60 * 60
+
+    private(set) var points: [HistoryPoint] = []
+
+    @discardableResult
+    mutating func append(_ point: HistoryPoint) -> Bool {
+        if let last = points.last,
+           point.date.timeIntervalSince(last.date) < Self.displaySampleInterval {
+            return false
+        }
+
+        points.append(point)
+        let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
+        if let firstRetained = points.firstIndex(where: { $0.date >= cutoff }), firstRetained > 0 {
+            points.removeFirst(firstRetained)
+        }
+        return true
+    }
+
+    mutating func removeAll() {
+        points.removeAll(keepingCapacity: true)
+    }
+}
+
 struct MonitorConfiguration: Equatable, Sendable {
     var host: String
     var port: Int

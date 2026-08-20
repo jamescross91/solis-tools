@@ -25,6 +25,7 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
     private var retryTask: Task<Void, Never>?
     private var shouldRun = false
     private var lastSuccessfulPolls = 0
+    private var historyBuffer = HistoryBuffer()
 
     var isRunning: Bool {
         switch state {
@@ -93,7 +94,8 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         state = .stopped
         if clearReading {
             latest = nil
-            history.removeAll()
+            historyBuffer.removeAll()
+            history.removeAll(keepingCapacity: true)
             lastSuccessfulPolls = 0
         }
     }
@@ -204,9 +206,9 @@ final class MonitorStore: ObservableObject, @unchecked Sendable {
         if envelope.health.successfulPolls != lastSuccessfulPolls {
             lastSuccessfulPolls = envelope.health.successfulPolls
             let sampleDate = StreamDecoder.date(from: envelope.timestamp) ?? Date()
-            history.append(HistoryPoint(date: sampleDate, reading: envelope.reading))
-            let cutoff = sampleDate.addingTimeInterval(-6 * 60 * 60)
-            history.removeAll(where: { $0.date < cutoff })
+            if historyBuffer.append(HistoryPoint(date: sampleDate, reading: envelope.reading)) {
+                history = historyBuffer.points
+            }
         }
     }
 
