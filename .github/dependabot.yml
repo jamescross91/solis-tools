@@ -19,3 +19,9 @@ updates:
       timezone: Europe/London
     open-pull-requests-limit: 5
     labels: [dependencies, github-actions]
+    groups:
+      # init and analyze are versioned together as one release of the same
+      # repository; a mismatched pair fails with "CodeQL job status was
+      # configuration error", so they must land in a single PR, not two.
+      codeql-action:
+        patterns: ["github/codeql-action/*"]
