@@ -197,6 +197,14 @@ def gh(*args: str) -> str:
     return subprocess.check_output(["gh", *args], text=True).strip()
 
 
+def synchronise_version(root: Path, requested: str) -> None:
+    # Attaching a candidate repeats preparation at the same version. The
+    # version helper deliberately rejects --set in that case, but --write
+    # still repairs derived copies without incrementing the bundle build.
+    arguments = ["--write"] if version(root) == requested else ["--set", requested]
+    subprocess.run([sys.executable, str(root / "scripts/version.py"), *arguments], check=True)
+
+
 def api_optional(endpoint: str) -> dict | None:
     response = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True)
     if response.returncode:
@@ -295,9 +303,7 @@ def main() -> None:
     if args.command == "prepare":
         if args.value is None or not re.fullmatch(r"\d+\.\d+\.\d+", args.value):
             parser.error("prepare requires X.Y.Z")
-        subprocess.run(
-            [sys.executable, str(ROOT / "scripts/version.py"), "--set", args.value], check=True
-        )
+        synchronise_version(ROOT, args.value)
         if f"\n## {args.value}\n" not in (ROOT / "CHANGELOG.md").read_text():
             raise ValueError("add the release changelog section before preparation")
         path, checksum = build(ROOT)

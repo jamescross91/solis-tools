@@ -77,6 +77,13 @@ class ReleaseTests(unittest.TestCase):
         self.write("README.md", "Changed source\n")
         self.assertNotEqual(before, release.archive(self.root, "0.6.0"))
 
+    def test_repeated_preparation_does_not_try_to_bump_the_same_version(self):
+        with patch.object(release.subprocess, "run") as command:
+            release.synchronise_version(self.root, "0.6.0")
+            self.assertEqual(command.call_args.args[0][-1], "--write")
+            release.synchronise_version(self.root, "0.6.1")
+            self.assertEqual(command.call_args.args[0][-2:], ["--set", "0.6.1"])
+
     def test_archive_retains_executable_modes_and_symlinks(self):
         self.write("script.sh", "#!/bin/sh\n")
         os.chmod(self.root / "script.sh", 0o755)
