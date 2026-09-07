@@ -14,6 +14,9 @@ versioning](https://semver.org/spec/v2.0.0.html).
 - Plot the active export actuator with the correct sign instead of always
   showing the import actuator, and use data-driven scales that no longer flatten
   voltage and temperature against zero.
+- Prevent automatic publication failing when GitHub briefly hides a newly
+  created draft from both release lookup endpoints. The publisher now continues
+  from the validated release object returned by the creation request.
 
 ### Changed
 

@@ -165,6 +165,26 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release, "api_optional", side_effect=[None, [draft]]):
             self.assertEqual(release.release_for_tag("repos/example/project", "v0.6.0"), draft)
 
+    def test_created_draft_uses_creation_response_without_lookup(self):
+        draft = {"tag_name": "v0.6.0", "draft": True, "assets": []}
+        with patch.object(release, "gh", return_value=json.dumps(draft)) as remote:
+            self.assertEqual(
+                release.create_draft_release("repos/example/project", "v0.6.0", "0.6.0", "a" * 64),
+                draft,
+            )
+        arguments = remote.call_args.args
+        self.assertEqual(
+            arguments[:4], ("api", "repos/example/project/releases", "--method", "POST")
+        )
+        self.assertIn("tag_name=v0.6.0", arguments)
+        self.assertIn("draft=true", arguments)
+
+    def test_created_release_response_must_be_the_expected_draft(self):
+        response = {"tag_name": "v0.6.1", "draft": False, "assets": []}
+        with patch.object(release, "gh", return_value=json.dumps(response)):
+            with self.assertRaisesRegex(RuntimeError, "unexpected created release"):
+                release.create_draft_release("repos/example/project", "v0.6.0", "0.6.0", "a" * 64)
+
     def test_publisher_refuses_to_move_existing_tag(self):
         self.prepare_fixture()
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
