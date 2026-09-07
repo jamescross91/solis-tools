@@ -31,19 +31,20 @@ from voltage_control import (
     ControllerJournal,
     DynamicVoltageConfiguration,
     DynamicVoltageController,
+    ExportControlValidation,
     GridTelemetrySample,
     VoltageControlState,
     configuration_dict,
+    export_validation_path,
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
-EXPORT_CONTROL_VALIDATED = False
 
 # ESINV fault registers 33116-33120. Bit numbers run from the least-significant
 # bit of the first register through to the most-significant bit of the fifth.
@@ -2037,6 +2038,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-activation-kw", type=float, default=0.5)
     parser.add_argument("--minimum-write-interval", type=float, default=5.0)
     parser.add_argument("--control-journal", type=Path)
+    parser.add_argument(
+        "--export-control-validation",
+        type=Path,
+        help="use endpoint-specific evidence from this validation record",
+    )
     parser.add_argument("--voltage-history-db", type=Path)
     parser.add_argument("--voltage-history-retention-days", type=int, default=30)
     parser.add_argument(
@@ -2078,15 +2084,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("poll intervals, timeout and bar maximums must be finite and above zero")
     if args.csv and args.jsonl and args.csv.resolve() == args.jsonl.resolve():
         parser.error("--csv and --jsonl must name different files")
-    if args.dynamic_export_control and not EXPORT_CONTROL_VALIDATED:
-        parser.error(
-            "--dynamic-export-control is blocked until holding register 43074 is "
-            "live-validated for this installation"
-        )
+    if args.dynamic_export_control and not args.dynamic_voltage_control:
+        parser.error("--dynamic-export-control requires --dynamic-voltage-control")
     if args.once and args.dynamic_voltage_control:
         parser.error("--dynamic-voltage-control cannot be combined with --once")
     try:
-        dynamic_configuration(args).validate()
+        # Endpoint-specific evidence is available only after constructing the
+        # client identity. This pass validates every other control setting.
+        dynamic_configuration(args, export_control_validated=True).validate()
     except ValueError as exc:
         parser.error(str(exc))
     if not math.isfinite(args.minimum_write_interval) or args.minimum_write_interval < 5:
@@ -2096,12 +2101,16 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def dynamic_configuration(args: argparse.Namespace) -> DynamicVoltageConfiguration:
+def dynamic_configuration(
+    args: argparse.Namespace,
+    *,
+    export_control_validated: bool = False,
+) -> DynamicVoltageConfiguration:
     return DynamicVoltageConfiguration(
         enabled=args.dynamic_voltage_control,
         import_enabled=args.dynamic_import_control,
         export_enabled=args.dynamic_export_control,
-        export_control_validated=EXPORT_CONTROL_VALIDATED,
+        export_control_validated=export_control_validated,
         minimum_voltage_v=args.minimum_voltage,
         maximum_voltage_v=args.maximum_voltage,
         safety_margin_v=args.voltage_safety_margin,
@@ -2167,6 +2176,24 @@ def main() -> int:
         )
         if args.dynamic_voltage_control:
             state_dir = default_control_state_dir()
+            validation_path = args.export_control_validation or export_validation_path(
+                state_dir, client.control_identity
+            )
+            try:
+                validation = ExportControlValidation.load(
+                    validation_path,
+                    client.control_identity,
+                )
+            except ValueError:
+                if args.dynamic_export_control:
+                    raise
+                logging.warning("Ignoring invalid export-control validation at %s", validation_path)
+                validation = None
+            configuration = dynamic_configuration(
+                args,
+                export_control_validated=validation is not None,
+            )
+            configuration.validate()
             if (
                 args.control_journal is None
                 and (state_dir / "voltage-control-journal.json").exists()
@@ -2178,7 +2205,7 @@ def main() -> int:
             device_key = hashlib.sha256(client.control_identity.encode()).hexdigest()[:24]
             voltage_runtime = VoltageControlRuntime(
                 client,
-                dynamic_configuration(args),
+                configuration,
                 args.minimum_write_interval,
                 args.control_journal or state_dir / f"voltage-control-{device_key}.json",
                 args.voltage_history_db or state_dir / "voltage-history.sqlite3",

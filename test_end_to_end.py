@@ -172,6 +172,80 @@ class StreamContractTests(unittest.TestCase):
         self.assertTrue(samples[-1]["device"]["remote_dispatch_supported"])
         self.assertEqual(samples[-1]["device"]["remote_dispatch_version"], 1)
 
+    def test_dynamic_export_requires_matching_live_validation_and_restores(self):
+        import tempfile
+
+        bank = hybrid_bank()
+        bank[33251] = 2600
+        bank[33263] = 0
+        bank[33264] = 4_000
+        bank[43074] = 50
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter:
+                identity = f"127.0.0.1:{inverter.port}/1"
+                validation = Path(directory) / "export-validation.json"
+                validation.write_text(
+                    json.dumps(
+                        {
+                            "device_identity": identity,
+                            "validated_at": "2026-09-07T12:00:00+01:00",
+                            "baseline_raw": 50,
+                            "test_raw": 30,
+                            "restored_raw": 50,
+                            "observed_before_kw": 4.638,
+                            "observed_limited_kw": 2.938,
+                            "schema_version": 1,
+                            "register_address": 43074,
+                            "watts_per_raw_unit": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                samples = stream_samples(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--interval",
+                    "0.05",
+                    "--dynamic-voltage-control",
+                    "--dynamic-export-control",
+                    "--export-control-validation",
+                    str(validation),
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                    wanted=3,
+                )
+                writes = list(inverter.writes)
+                restored = inverter.bank[43074]
+
+        self.assertTrue(samples[-1]["voltage_control"]["export_write_validated"])
+        self.assertIn((43074, 30), writes)
+        self.assertEqual(writes[-1], (43074, 50))
+        self.assertEqual(restored, 50)
+
+    def test_dynamic_export_fails_closed_without_validation(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter() as inverter:
+                result = run_monitor(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--dynamic-voltage-control",
+                    "--dynamic-export-control",
+                    "--export-control-validation",
+                    str(Path(directory) / "missing.json"),
+                )
+                writes = list(inverter.writes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("blocked until this installation is validated", result.stderr)
+        self.assertEqual(writes, [])
+
 
 class TransientFaultTests(unittest.TestCase):
     def test_a_corrupt_frame_mid_run_does_not_end_the_process(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import time
@@ -14,10 +15,12 @@ from voltage_control import (
     ControllerJournal,
     DynamicVoltageConfiguration,
     DynamicVoltageController,
+    ExportControlValidation,
     GridTelemetrySample,
     OperatingStateDetector,
     VoltageControlState,
     VoltageFilter,
+    export_validation_path,
 )
 
 
@@ -42,6 +45,62 @@ class ConfigurationTests(unittest.TestCase):
             maximum_export_w=12_000, site_export_permission_w=10_000
         )
         self.assertEqual(configuration.effective_maximum_export_w, 10_000)
+
+
+class ExportControlValidationTests(unittest.TestCase):
+    def evidence(self, **changes: object) -> dict[str, object]:
+        value: dict[str, object] = {
+            "device_identity": "inverter.local:502/1",
+            "validated_at": "2026-09-07T12:00:00+01:00",
+            "baseline_raw": 50,
+            "test_raw": 30,
+            "restored_raw": 50,
+            "observed_before_kw": 4.638,
+            "observed_limited_kw": 2.938,
+            "schema_version": 1,
+            "register_address": 43074,
+            "watts_per_raw_unit": 100,
+        }
+        value.update(changes)
+        return value
+
+    def test_matching_restored_evidence_enables_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validation.json"
+            path.write_text(json.dumps(self.evidence()), encoding="utf-8")
+            validation = ExportControlValidation.load(path, "inverter.local:502/1")
+        self.assertIsNotNone(validation)
+        self.assertEqual(validation.test_raw, 30)
+
+    def test_missing_evidence_keeps_export_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            validation = ExportControlValidation.load(
+                Path(directory) / "missing.json", "inverter.local:502/1"
+            )
+        self.assertIsNone(validation)
+
+    def test_mismatched_endpoint_and_unrestored_baseline_fail_closed(self):
+        for evidence, message in (
+            (self.evidence(), "does not match"),
+            (self.evidence(restored_raw=30), "restoration"),
+        ):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "validation.json"
+                path.write_text(json.dumps(evidence), encoding="utf-8")
+                identity = (
+                    "other-inverter.local:502/1"
+                    if message == "does not match"
+                    else "inverter.local:502/1"
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    ExportControlValidation.load(path, identity)
+
+    def test_evidence_path_is_stable_and_scoped_to_endpoint(self):
+        state = Path("state")
+        first = export_validation_path(state, "inverter.local:502/1")
+        second = export_validation_path(state, "other-inverter.local:502/1")
+        self.assertEqual(first, export_validation_path(state, "inverter.local:502/1"))
+        self.assertNotEqual(first, second)
 
 
 class FilterAndStateTests(unittest.TestCase):

@@ -68,15 +68,19 @@ temperature, voltage, alarms, connection health and selectable charts.
 Its connection settings are stored in the current macOS user's preferences. PV
 remains disabled unless enabled in the app settings.
 
-Dynamic Grid Voltage Control is also off by default. Enabling it authorises the
-poller to adjust only raw holding-register PDU address `43488`. The controller
+Dynamic Grid Voltage Control is also off by default. Enabling import regulation
+authorises the poller to adjust only raw holding-register PDU address `43488`.
+The controller
 captures the live limit, verifies each FC06 write with FC03, suppresses duplicate
 writes and ownership-checks before restoring the baseline when regulation ends,
 on disable, or on orderly quit, provided telemetry is fresh and recovered.
 Control-setting changes, including disabling control, take effect when **Save
 and connect** is selected; changing a toggle alone does not stop the running
-poller. Export control is visible but locked until this installation's
-`43074` response is validated live.
+poller. Export control becomes selectable only after the connected endpoint's
+`43074` response has been validated live and the poller has loaded matching
+evidence. First enable dynamic control and select **Save and connect**; reopen
+Settings after a reading arrives to enable export regulation. Changing host,
+port or Modbus unit makes the evidence inapplicable and locks the setting.
 
 The menu-bar app retains up to 24 hours of chart history at a 30-second display
 resolution, plus the last 30 minutes of voltage-control data at native polling
@@ -167,11 +171,12 @@ This adds current PV generation, today's generated energy and a PV history graph
 
 ## Dynamic Grid Voltage Control
 
-The feature maximises grid charging power while meter/PCC voltage remains above
-the configured lower boundary. It is a closed loop, not a voltage-to-power
-lookup table. Import regulation activates only after both sustained grid import
-and the existing battery-direction signal report grid charging. Ordinary house
-import remains in standby.
+The feature maximises grid charging power above the configured lower voltage
+boundary and can constrain export below the configured upper boundary. It is a
+closed loop, not a voltage-to-power lookup table. Import regulation activates
+only after both sustained grid import and the existing battery-direction signal
+report grid charging. Export regulation requires sustained export and matching
+installation evidence. Ordinary house import remains in standby.
 
 The default working floor is `215.0 V + 1.5 V`, with a `0.75 V` deadband.
 Increases are cautious (200 W), reductions are faster (500 W or 1 kW near the
@@ -195,8 +200,10 @@ solis-poll --host 192.168.1.57 --interval 2 \
 Do not run a second poller or Modbus client concurrently: the tested logger
 supports only one active Modbus TCP session. The controller journal, minute
 aggregates and sparse events are private files under the platform state or
-Application Support directory. Export writes remain compile-time gated even if
-`--dynamic-export-control` is supplied.
+Application Support directory. `--dynamic-export-control` is rejected unless
+the endpoint-specific validation record proves register scaling, physical
+limiting and baseline restoration. Missing, malformed or mismatched evidence
+cannot authorise a write.
 
 Control journals are scoped to the configured host, port and Modbus unit. Use a
 consistent endpoint spelling: aliases for the same logger are not recognised as
@@ -233,12 +240,13 @@ changed by capturing its baseline.
 | `--meter-voltage` | Off in CLI | Read PCC voltage without authorising writes |
 | `--dynamic-voltage-control` | Off | Master control opt-in; also reads PCC voltage |
 | `--dynamic-import-control` / `--no-dynamic-import-control` | On beneath master | Allow/block import regulation |
-| `--dynamic-export-control` | Off, gated | Rejected while installation validation is locked |
+| `--dynamic-export-control` | Off, gated per endpoint | Allow export regulation only with matching live-validation evidence |
+| `--export-control-validation` | Endpoint-hashed JSON in state directory | Override the validation-evidence path; identity checks still apply |
 | `--minimum-voltage` / `--maximum-voltage` | 215 / 258 V | Raw emergency boundaries |
 | `--voltage-safety-margin` | 1.5 V | Working targets inside boundaries |
 | `--voltage-deadband` | 0.75 V | Holding band around working targets |
 | `--maximum-import-kw` | 14 kW | Normal import ceiling |
-| `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling, currently gated |
+| `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling |
 | `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
 | `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |
 | `--near-limit-reduction-w` / `--emergency-reduction-w` | 1,000 / 2,000 W | Faster safety reductions |
@@ -272,9 +280,10 @@ Legacy unscoped journals cannot establish which inverter they belong to. Before
 archiving one, independently verify that its recorded baseline is restored on
 the correct inverter and no controller remains active. Do not manually assign an
 identity to an unverified journal. Inverter flash-write endurance remains
-unconfirmed: retain the write-rate guard and inspect write counts. Export control
-must remain locked until its scaling and physical response are validated for
-the installation. Local tests exercise simulated hardware only.
+unconfirmed: retain the write-rate guard and inspect write counts. The export
+validation record is scoped to the exact normalised host, port and Modbus unit;
+revalidate after an endpoint or inverter change. Automated tests exercise
+simulated hardware and never create evidence for physical installations.
 
 ## Recording and restored history
 
@@ -369,7 +378,7 @@ input-register helper's 1-based call convention.
 | Raw holding PDU address | Read/write | Scale | Policy |
 | --- | --- | --- | --- |
 | `43488` | FC03 / FC06 | 100 W per unit | Typed import actuator; explicit opt-in |
-| `43074` | FC03 / FC06 | 100 W per unit | Typed export actuator; writes blocked pending live validation |
+| `43074` | FC03 / FC06 | 100 W per unit | Typed export actuator; matching endpoint validation required |
 
 No other holding-register write is permitted. In particular, Remote Dispatch,
 Flexible Export and operating-mode registers are outside the whitelist.

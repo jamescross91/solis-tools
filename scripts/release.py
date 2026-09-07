@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "jamescross91/solis-tools"
@@ -155,11 +156,15 @@ def binary_formula(formula: str, metadata: dict) -> str:
         "  end\n"
         "  # END PREBUILT MACOS"
     )
-    pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
-    formula = re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
+    formula = source_only_formula(formula)
     # Resource-scoped platform blocks leave no empty resource on Linux and
     # follow Homebrew's required nesting for one-resource platform conditions.
     return formula.replace("  def install\n", block + "\n\n  def install\n", 1)
+
+
+def source_only_formula(formula: str) -> str:
+    pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
+    return re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
 
 
 def download_binary(
@@ -206,13 +211,25 @@ def synchronise_version(root: Path, requested: str) -> None:
     subprocess.run([sys.executable, str(root / "scripts/version.py"), *arguments], check=True)
 
 
-def api_optional(endpoint: str) -> dict | None:
+def api_optional(endpoint: str) -> Any | None:
     response = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True)
     if response.returncode:
         if "HTTP 404" in response.stderr:
             return None
         raise RuntimeError(response.stderr)
     return json.loads(response.stdout)
+
+
+def release_for_tag(endpoint: str, tag: str) -> dict | None:
+    release = api_optional(f"{endpoint}/releases/tags/{tag}")
+    if release is not None:
+        return release
+    # GitHub's by-tag endpoint can return 404 for a draft immediately after
+    # creation. The release list includes drafts and makes retries idempotent.
+    releases = api_optional(f"{endpoint}/releases?per_page=100") or []
+    if not isinstance(releases, list):
+        raise RuntimeError("GitHub release list returned an unexpected response")
+    return next((item for item in releases if item.get("tag_name") == tag), None)
 
 
 def publish(root: Path, ref: str) -> None:
@@ -235,7 +252,7 @@ def publish(root: Path, ref: str) -> None:
         gh("api", f"{endpoint}/git/refs", "-f", f"ref=refs/tags/{tag}", "-f", f"sha={commit}")
     elif existing_tag["object"]["type"] != "commit" or existing_tag["object"]["sha"] != commit:
         raise ValueError("release tag already exists at a different object; never retag a release")
-    release = api_optional(f"{endpoint}/releases/tags/{tag}")
+    release = release_for_tag(endpoint, tag)
     if release is None:
         gh(
             "release",
@@ -250,8 +267,9 @@ def publish(root: Path, ref: str) -> None:
             "--notes",
             f"Install or upgrade with Homebrew after publication.\n\nSee https://github.com/{REPOSITORY}/blob/{tag}/CHANGELOG.md for changes and upgrade precautions.\n\nArchive SHA-256: {checksum}",
         )
-        release = api_optional(f"{endpoint}/releases/tags/{tag}")
-    assert release is not None
+        release = release_for_tag(endpoint, tag)
+    if release is None:
+        raise RuntimeError("created draft release could not be retrieved")
     for asset_path, expected in ((path, checksum), (binary_path, metadata["sha256"])):
         asset = next((item for item in release["assets"] if item["name"] == asset_path.name), None)
         if asset is None:
@@ -309,11 +327,15 @@ def main() -> None:
             raise ValueError("add the release changelog section before preparation")
         path, checksum = build(ROOT)
         formula = ROOT / "Formula/solis-tools.rb"
-        formula.write_text(update_formula(formula.read_text(), url(args.value), checksum))
+        formula.write_text(
+            update_formula(source_only_formula(formula.read_text()), url(args.value), checksum)
+        )
         if args.binary_run:
             _, metadata = download_binary(ROOT, args.binary_run, checksum, args.value)
             (ROOT / ".release-assets.json").write_text(json.dumps(metadata, indent=2) + "\n")
             formula.write_text(binary_formula(formula.read_text(), metadata))
+        else:
+            (ROOT / ".release-assets.json").unlink(missing_ok=True)
         print(
             f"Prepared {path}: {checksum}; commit all version, changelog and formula changes together"
         )
@@ -352,12 +374,7 @@ def main() -> None:
                     binary_path.as_uri(),
                 )
             else:
-                text = re.sub(
-                    r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS\n",
-                    "",
-                    text,
-                    flags=re.DOTALL,
-                )
+                text = source_only_formula(text)
             formula.write_text(text)
         print(path)
 

@@ -122,6 +122,13 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('sha256 "dependency"', updated)
         self.assertIn('  resource "solis-menubar" do\n    on_macos do', updated)
 
+    def test_source_preparation_removes_stale_prebuilt_resource(self):
+        metadata = self.metadata("a" * 64)
+        with_binary = release.binary_formula(self.formula, metadata)
+        source_only = release.source_only_formula(with_binary)
+        self.assertNotIn("BEGIN PREBUILT MACOS", source_only)
+        self.assertEqual(source_only, self.formula)
+
     def test_binary_rejects_other_source_and_path_traversal(self):
         metadata = self.metadata("a" * 64)
         with self.assertRaisesRegex(ValueError, "does not match"):
@@ -152,6 +159,11 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release.subprocess, "run", return_value=failure):
             with self.assertRaisesRegex(RuntimeError, "403"):
                 release.api_optional("example")
+
+    def test_draft_release_falls_back_to_release_list(self):
+        draft = {"tag_name": "v0.6.0", "draft": True, "assets": []}
+        with patch.object(release, "api_optional", side_effect=[None, [draft]]):
+            self.assertEqual(release.release_for_tag("repos/example/project", "v0.6.0"), draft)
 
     def test_publisher_refuses_to_move_existing_tag(self):
         self.prepare_fixture()

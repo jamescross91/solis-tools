@@ -5,6 +5,23 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.5.2
+
+### Changed
+
+- Enable export regulation only for an inverter endpoint with a matching live
+  validation record. The 7 September hardware test confirmed raw holding PDU
+  address 43074 at 100 W per unit, observed a 3 kW limit, and restored the
+  original 5 kW baseline before normal monitoring resumed.
+- Make the menu-bar export setting available after the connected endpoint's
+  validation is reported by the poller; missing, malformed, mismatched or
+  unrestored evidence remains fail-closed.
+- Remove stale prebuilt metadata when a new release is first prepared, before
+  attaching the matching candidate later in that same PR.
+- Retrieve newly created draft releases from the release list when GitHub's
+  by-tag endpoint temporarily reports them as missing, allowing asset upload and
+  publication to complete.
+
 ## 0.5.1
 
 ### Changed
