@@ -108,6 +108,6 @@ all dependency installation. `--HEAD` and historical source-only versions remain
 source builds.
 
 Keep dynamic control off during installation tests. No release check may write
-to physical inverter hardware. Include import opt-in, locked export control,
-legacy-journal migration and stale-restoration precautions in applicable release
-notes.
+to physical inverter hardware or create an installation-validation record.
+Include import opt-in, endpoint-gated export control, legacy-journal migration
+and stale-restoration precautions in applicable release notes.

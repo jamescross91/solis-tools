@@ -122,6 +122,13 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('sha256 "dependency"', updated)
         self.assertIn('  resource "solis-menubar" do\n    on_macos do', updated)
 
+    def test_source_preparation_removes_stale_prebuilt_resource(self):
+        metadata = self.metadata("a" * 64)
+        with_binary = release.binary_formula(self.formula, metadata)
+        source_only = release.source_only_formula(with_binary)
+        self.assertNotIn("BEGIN PREBUILT MACOS", source_only)
+        self.assertEqual(source_only, self.formula)
+
     def test_binary_rejects_other_source_and_path_traversal(self):
         metadata = self.metadata("a" * 64)
         with self.assertRaisesRegex(ValueError, "does not match"):

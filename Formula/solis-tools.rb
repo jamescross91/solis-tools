@@ -4,7 +4,7 @@ class SolisTools < Formula
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
   url "https://github.com/jamescross91/solis-tools/releases/download/v0.5.1/solis-tools-0.5.1.tar.gz"
-  sha256 "924ae27ef0df111dbdaa881a9ada0a1ecc6ce734ed2a4712b5abcec5745d8176"
+  sha256 "7ce391341f07b78e9df7c60cca3beee9a33855f92d8a83a37d1fa2c0ce47e7a6"
   license "GPL-3.0-only"
 
   # `brew install --HEAD solis-tools` builds the current main branch, so a change
@@ -17,15 +17,6 @@ class SolisTools < Formula
     url "https://files.pythonhosted.org/packages/e5/b8/03dace16e0e5d1c3eb16e8b9bcce9885f5e8a38db34345ec375cd70ed2e2/pymodbus-3.15.0.tar.gz"
     sha256 "4c5f715128bfeba59f4c9fb3542b0c32a8afd4b90081111e39c12f7af0c89aae"
   end
-
-  # BEGIN PREBUILT MACOS
-  resource "solis-menubar" do
-    on_macos do
-      url "https://github.com/jamescross91/solis-tools/releases/download/v0.5.1/solis-menubar-0.5.1-macos-universal.tar.gz"
-      sha256 "7114e2d5196f234339a97dadce831b0c589774bab896c17d29cf9316b3a23e10"
-    end
-  end
-  # END PREBUILT MACOS
 
   def install
     prebuilt = resources.any? { |item| item.name == "solis-menubar" }

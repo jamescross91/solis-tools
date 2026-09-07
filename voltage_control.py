@@ -146,6 +146,87 @@ class DynamicVoltageConfiguration:
 
 
 @dataclass(frozen=True)
+class ExportControlValidation:
+    """Evidence that the export actuator was tested and restored on one endpoint."""
+
+    device_identity: str
+    validated_at: str
+    baseline_raw: int
+    test_raw: int
+    restored_raw: int
+    observed_before_kw: float
+    observed_limited_kw: float
+    schema_version: int = 1
+    register_address: int = 43074
+    watts_per_raw_unit: int = 100
+
+    @classmethod
+    def load(cls, path: Path, device_identity: str) -> ExportControlValidation | None:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"export-control validation record cannot be read: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("export-control validation record must be a JSON object")
+        try:
+            validation = cls(**value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"export-control validation record is invalid: {exc}") from exc
+        try:
+            validation.validate(device_identity)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"export-control validation record is invalid: {exc}") from exc
+        return validation
+
+    def validate(self, device_identity: str) -> None:
+        integer_values = (
+            self.schema_version,
+            self.register_address,
+            self.watts_per_raw_unit,
+            self.baseline_raw,
+            self.test_raw,
+            self.restored_raw,
+        )
+        if any(type(value) is not int for value in integer_values):
+            raise ValueError("export-control validation register values must be integers")
+        if not isinstance(self.validated_at, str) or not self.validated_at.strip():
+            raise ValueError("export-control validation timestamp is missing")
+        if any(
+            type(value) not in (int, float)
+            for value in (self.observed_before_kw, self.observed_limited_kw)
+        ):
+            raise ValueError("export-control validation observations must be numbers")
+        if self.schema_version != 1:
+            raise ValueError("export-control validation schema is unsupported")
+        if self.device_identity != device_identity:
+            raise ValueError("export-control validation does not match this inverter endpoint")
+        if self.register_address != 43074 or self.watts_per_raw_unit != 100:
+            raise ValueError("export-control validation has the wrong register semantics")
+        if not 0 <= self.test_raw < self.baseline_raw <= 0xFFFF:
+            raise ValueError("export-control validation limits do not prove a reduction")
+        if self.restored_raw != self.baseline_raw:
+            raise ValueError("export-control validation does not prove baseline restoration")
+        if not all(
+            math.isfinite(value) for value in (self.observed_before_kw, self.observed_limited_kw)
+        ):
+            raise ValueError("export-control validation observations must be finite")
+        if self.observed_limited_kw < 0:
+            raise ValueError("export-control validation limited observation must be export")
+        expected_limit_kw = self.test_raw * self.watts_per_raw_unit / 1_000
+        if self.observed_before_kw <= expected_limit_kw:
+            raise ValueError("export-control validation did not begin above the test limit")
+        if self.observed_limited_kw > expected_limit_kw + 0.2:
+            raise ValueError("export-control validation did not observe the requested limit")
+
+
+def export_validation_path(state_directory: Path, device_identity: str) -> Path:
+    device_key = hashlib.sha256(device_identity.encode()).hexdigest()[:24]
+    return state_directory / f"export-control-validation-{device_key}.json"
+
+
+@dataclass(frozen=True)
 class GridTelemetrySample:
     monotonic_s: float
     raw_voltage_v: float

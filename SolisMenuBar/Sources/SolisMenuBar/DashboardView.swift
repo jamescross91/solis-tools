@@ -19,6 +19,7 @@ struct DashboardView: View {
     @AppStorage("menuBarPV") private var showPV = false
     @AppStorage("dynamicVoltageEnabled") private var dynamicVoltageEnabled = false
     @AppStorage("dynamicImportEnabled") private var dynamicImportEnabled = true
+    @AppStorage("dynamicExportEnabled") private var dynamicExportEnabled = false
     @AppStorage("minimumVoltage") private var minimumVoltage = 215.0
     @AppStorage("maximumVoltage") private var maximumVoltage = 258.0
     @AppStorage("voltageSafetyMargin") private var voltageSafetyMargin = 1.5
@@ -394,9 +395,12 @@ struct DashboardView: View {
             Toggle("Enable dynamic control", isOn: $dynamicVoltageEnabled)
             Toggle("Enable import regulation", isOn: $dynamicImportEnabled)
                 .disabled(!dynamicVoltageEnabled)
-            Toggle("Enable export regulation", isOn: .constant(false))
-                .disabled(true)
-            Text("Export writes remain locked until register 43074 is live-validated.")
+            Toggle("Enable export regulation", isOn: $dynamicExportEnabled)
+                .disabled(
+                    !dynamicVoltageEnabled
+                        || !monitor.exportControlValidated(host: host, port: port, slave: slave)
+                )
+            Text(exportValidationMessage)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Group {
@@ -521,6 +525,13 @@ struct DashboardView: View {
         case .degraded: "Connection degraded"
         case .failed: "Connection failed"
         }
+    }
+
+    private var exportValidationMessage: String {
+        if monitor.exportControlValidated(host: host, port: port, slave: slave) {
+            return "Export register 43074 is validated for this inverter."
+        }
+        return "Enable dynamic control and connect to check this inverter's export validation."
     }
 
     private var statusColour: Color {

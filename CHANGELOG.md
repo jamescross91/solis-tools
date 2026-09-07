@@ -9,9 +9,18 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Enable export regulation only for an inverter endpoint with a matching live
+  validation record. The 7 September hardware test confirmed raw holding PDU
+  address 43074 at 100 W per unit, observed a 3 kW limit, and restored the
+  original 5 kW baseline before normal monitoring resumed.
+- Make the menu-bar export setting available after the connected endpoint's
+  validation is reported by the poller; missing, malformed, mismatched or
+  unrestored evidence remains fail-closed.
 - Prepare releases in one PR containing version, changelog, source checksum and
   prebuilt macOS package metadata. Successful merged CI automatically publishes
   verified immutable assets without a follow-up formula PR.
+- Remove stale prebuilt metadata when a new release is first prepared, before
+  attaching the matching candidate later in that same PR.
 - Add universal prebuilt macOS app candidates so future stable releases avoid
   Swift compilation during Homebrew installation; retain source builds for HEAD.
 - Document the short `brew install solis-tools` command after tap/trust setup.
