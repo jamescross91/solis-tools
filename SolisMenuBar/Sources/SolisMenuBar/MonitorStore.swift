@@ -79,6 +79,15 @@ final class MonitorStore: ObservableObject {
         }
     }
 
+    func exportControlValidated(host: String, port: Int, slave: Int) -> Bool {
+        guard let activeConfiguration else { return false }
+        return activeConfiguration.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                == host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            && activeConfiguration.port == port
+            && activeConfiguration.slave == slave
+            && latest?.voltageControl?.exportWriteValidated == true
+    }
+
     /// Start from stored settings if they are complete and nothing is running.
     ///
     /// Called when the menu-bar item itself appears, so a configured install
@@ -282,6 +291,9 @@ final class MonitorStore: ObservableObject {
                 "--voltage-history-db",
                 stateDirectory.appendingPathComponent("voltage-history.sqlite3").path,
             ])
+            if configuration.dynamicExportEnabled {
+                result.append("--dynamic-export-control")
+            }
         }
         return result
     }

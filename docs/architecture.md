@@ -34,15 +34,18 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 raw 33251 PCC voltage + existing battery/grid telemetry
         -> state detector -> EWMA/filter and raw safety check
         -> adaptive controller -> dwell and write-rate guard
-        -> ImportLimitActuator -> raw holding PDU 43488, FC06
+        -> typed import/export actuator -> raw holding PDU 43488/43074, FC06
 ```
 
 All transactions use the same `SolisClient` connection. The import actuator
 reads its live baseline with FC03, suppresses duplicate writes, clamps values to
 1–14 kW by default, verifies each write, and restores only while the register
-still equals its last command. Export register 43074 has the same typed boundary
-but its write method refuses operation while the installation validation gate is
-false. No arbitrary address/value operation is exposed to controller or UI code.
+still equals its last command. Export register 43074 has the same typed boundary,
+but both configuration and the write method refuse operation without evidence
+scoped to the normalised host, port and Modbus unit. The record must describe a
+reduced limit, observed physical response and successful restoration using the
+expected address and 100 W scale. Missing, invalid or mismatched evidence fails
+closed. No arbitrary address/value operation is exposed to controller or UI code.
 
 ### Register addressing
 
@@ -128,6 +131,13 @@ last 30 minutes for the voltage/power control chart. The poller persists
 one-minute aggregates and sparse state/change events in a private SQLite file,
 with 30-day retention by default. A small private JSON journal records baseline
 ownership and unclean-shutdown recovery state.
+
+Export validation is a separate endpoint-hashed JSON record in the same private
+state directory. It is installation evidence, not recovery state: changing the
+endpoint selects a different record, while `--export-control-validation` may
+override only its path, not the identity or register-semantic checks. The stream
+reports the resulting gate so the menu-bar toggle is enabled only for the active
+matching configuration.
 
 Control acquisition carries a monotonic meter-request timestamp through the
 reading; envelope emission time is not evidence of fresh voltage. The runtime

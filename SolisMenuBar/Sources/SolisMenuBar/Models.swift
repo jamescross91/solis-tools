@@ -196,6 +196,7 @@ struct MonitorConfiguration: Equatable, Sendable {
     var pvEnabled: Bool
     var dynamicVoltageEnabled: Bool
     var dynamicImportEnabled: Bool
+    var dynamicExportEnabled: Bool
     var minimumVoltage: Double
     var maximumVoltage: Double
     var voltageSafetyMargin: Double
@@ -233,6 +234,7 @@ struct MonitorConfiguration: Equatable, Sendable {
             pvEnabled: defaults.bool(forKey: "pvEnabled"),
             dynamicVoltageEnabled: defaults.bool(forKey: "dynamicVoltageEnabled"),
             dynamicImportEnabled: defaults.object(forKey: "dynamicImportEnabled") as? Bool ?? true,
+            dynamicExportEnabled: defaults.bool(forKey: "dynamicExportEnabled"),
             minimumVoltage: min(279, max(180, defaults.object(forKey: "minimumVoltage") as? Double ?? 215)),
             maximumVoltage: min(280, max(181, defaults.object(forKey: "maximumVoltage") as? Double ?? 258)),
             voltageSafetyMargin: max(0.1, defaults.object(forKey: "voltageSafetyMargin") as? Double ?? 1.5),

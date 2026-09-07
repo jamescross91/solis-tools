@@ -83,7 +83,7 @@ optional, so an older read-only poller still decodes.
 | `voltage_source` | Description of the meter/PCC register source |
 | `estimated_voltage_sensitivity_v_per_kw` | Recent measured response estimate, or null |
 | `import_actuator`, `export_actuator` | Register diagnostics described below |
-| `export_write_validated` | Whether the installation gate permits export writes |
+| `export_write_validated` | Whether matching endpoint evidence permits export writes; UI may use this gate but must not infer it |
 | `recent_events` | Up to 20 recent events from the running process |
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |

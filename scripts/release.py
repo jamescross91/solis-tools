@@ -155,11 +155,15 @@ def binary_formula(formula: str, metadata: dict) -> str:
         "  end\n"
         "  # END PREBUILT MACOS"
     )
-    pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
-    formula = re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
+    formula = source_only_formula(formula)
     # Resource-scoped platform blocks leave no empty resource on Linux and
     # follow Homebrew's required nesting for one-resource platform conditions.
     return formula.replace("  def install\n", block + "\n\n  def install\n", 1)
+
+
+def source_only_formula(formula: str) -> str:
+    pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
+    return re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
 
 
 def download_binary(
@@ -309,11 +313,15 @@ def main() -> None:
             raise ValueError("add the release changelog section before preparation")
         path, checksum = build(ROOT)
         formula = ROOT / "Formula/solis-tools.rb"
-        formula.write_text(update_formula(formula.read_text(), url(args.value), checksum))
+        formula.write_text(
+            update_formula(source_only_formula(formula.read_text()), url(args.value), checksum)
+        )
         if args.binary_run:
             _, metadata = download_binary(ROOT, args.binary_run, checksum, args.value)
             (ROOT / ".release-assets.json").write_text(json.dumps(metadata, indent=2) + "\n")
             formula.write_text(binary_formula(formula.read_text(), metadata))
+        else:
+            (ROOT / ".release-assets.json").unlink(missing_ok=True)
         print(
             f"Prepared {path}: {checksum}; commit all version, changelog and formula changes together"
         )
@@ -352,12 +360,7 @@ def main() -> None:
                     binary_path.as_uri(),
                 )
             else:
-                text = re.sub(
-                    r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS\n",
-                    "",
-                    text,
-                    flags=re.DOTALL,
-                )
+                text = source_only_formula(text)
             formula.write_text(text)
         print(path)
 

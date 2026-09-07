@@ -222,6 +222,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertFalse(configuration.pvEnabled)
         XCTAssertFalse(configuration.dynamicVoltageEnabled)
         XCTAssertTrue(configuration.dynamicImportEnabled)
+        XCTAssertFalse(configuration.dynamicExportEnabled)
         XCTAssertEqual(configuration.minimumVoltage, 215)
         XCTAssertEqual(configuration.maximumVoltage, 258)
         XCTAssertEqual(configuration.minimumWriteInterval, 5)
