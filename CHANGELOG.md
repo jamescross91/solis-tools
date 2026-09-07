@@ -18,6 +18,9 @@ versioning](https://semver.org/spec/v2.0.0.html).
   unrestored evidence remains fail-closed.
 - Remove stale prebuilt metadata when a new release is first prepared, before
   attaching the matching candidate later in that same PR.
+- Retrieve newly created draft releases from the release list when GitHub's
+  by-tag endpoint temporarily reports them as missing, allowing asset upload and
+  publication to complete.
 
 ## 0.5.1
 

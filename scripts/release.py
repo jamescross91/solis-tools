@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "jamescross91/solis-tools"
@@ -210,13 +211,25 @@ def synchronise_version(root: Path, requested: str) -> None:
     subprocess.run([sys.executable, str(root / "scripts/version.py"), *arguments], check=True)
 
 
-def api_optional(endpoint: str) -> dict | None:
+def api_optional(endpoint: str) -> Any | None:
     response = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True)
     if response.returncode:
         if "HTTP 404" in response.stderr:
             return None
         raise RuntimeError(response.stderr)
     return json.loads(response.stdout)
+
+
+def release_for_tag(endpoint: str, tag: str) -> dict | None:
+    release = api_optional(f"{endpoint}/releases/tags/{tag}")
+    if release is not None:
+        return release
+    # GitHub's by-tag endpoint can return 404 for a draft immediately after
+    # creation. The release list includes drafts and makes retries idempotent.
+    releases = api_optional(f"{endpoint}/releases?per_page=100") or []
+    if not isinstance(releases, list):
+        raise RuntimeError("GitHub release list returned an unexpected response")
+    return next((item for item in releases if item.get("tag_name") == tag), None)
 
 
 def publish(root: Path, ref: str) -> None:
@@ -239,7 +252,7 @@ def publish(root: Path, ref: str) -> None:
         gh("api", f"{endpoint}/git/refs", "-f", f"ref=refs/tags/{tag}", "-f", f"sha={commit}")
     elif existing_tag["object"]["type"] != "commit" or existing_tag["object"]["sha"] != commit:
         raise ValueError("release tag already exists at a different object; never retag a release")
-    release = api_optional(f"{endpoint}/releases/tags/{tag}")
+    release = release_for_tag(endpoint, tag)
     if release is None:
         gh(
             "release",
@@ -254,8 +267,9 @@ def publish(root: Path, ref: str) -> None:
             "--notes",
             f"Install or upgrade with Homebrew after publication.\n\nSee https://github.com/{REPOSITORY}/blob/{tag}/CHANGELOG.md for changes and upgrade precautions.\n\nArchive SHA-256: {checksum}",
         )
-        release = api_optional(f"{endpoint}/releases/tags/{tag}")
-    assert release is not None
+        release = release_for_tag(endpoint, tag)
+    if release is None:
+        raise RuntimeError("created draft release could not be retrieved")
     for asset_path, expected in ((path, checksum), (binary_path, metadata["sha256"])):
         asset = next((item for item in release["assets"] if item["name"] == asset_path.name), None)
         if asset is None:

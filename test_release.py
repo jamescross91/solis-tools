@@ -160,6 +160,11 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "403"):
                 release.api_optional("example")
 
+    def test_draft_release_falls_back_to_release_list(self):
+        draft = {"tag_name": "v0.6.0", "draft": True, "assets": []}
+        with patch.object(release, "api_optional", side_effect=[None, [draft]]):
+            self.assertEqual(release.release_for_tag("repos/example/project", "v0.6.0"), draft)
+
     def test_publisher_refuses_to_move_existing_tag(self):
         self.prepare_fixture()
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
