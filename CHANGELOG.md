@@ -5,6 +5,17 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.5.0
+
+### Upgrade notes
+
+- Dynamic voltage control remains off until explicitly enabled. Export writes
+  remain locked pending installation validation; flash-write endurance has not
+  been confirmed by local or CI tests.
+- Upgrade the poller and menu-bar app together. Legacy recovery journals without
+  inverter identity require verification before control can start. Stale-data
+  shutdown defers restoration and retains the journal for later fresh recovery.
+
 ### Fixed
 
 - Measure control freshness from meter acquisition and defer stale shutdown
