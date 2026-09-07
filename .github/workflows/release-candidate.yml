@@ -1,0 +1,45 @@
+name: Release candidate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Detect a release version change
+        id: version
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+        run: |
+          current="$(./scripts/version.py)"
+          previous="$(git show "$BASE_REF:solis_poll.py" | sed -n 's/^VERSION = "\(.*\)"/\1/p')"
+          if [ "$current" != "$previous" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Build and verify both macOS architectures
+        if: steps.version.outputs.changed == 'true'
+        run: python scripts/build_release_app.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.version.outputs.changed == 'true'
+        with:
+          name: macos-release-candidate
+          path: build/macos-candidate/*
+          if-no-files-found: error
+          retention-days: 90

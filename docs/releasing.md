@@ -1,98 +1,113 @@
 # Release runbook
 
-For maintainers. `CONTRIBUTING.md` previously said only that "releases are
-prepared by a maintainer", with the eight hand-edited version locations and the
-checksum step undocumented.
+## One release, one PR
 
-`solis_poll.VERSION` is the single source of truth. Everything else is derived or
-checked.
+A release PR may contain the feature itself: version, changelog, formula and
+prebuilt-package metadata are reviewed together. Do not open separate version
+or formula PRs. This workflow does not push commits to protected main or bypass
+required reviews.
 
-## 1. Prepare
+The formula SHA-256 is calculated before merge from a reproducible source
+archive. Archive entries have fixed ordering, ownership, modes and timestamps;
+commit IDs and commit dates do not affect it. Only `Formula/` and
+`.release-assets.json` are excluded to avoid circular checksums. Everything
+else tracked by Git, including tests and documentation, is retained.
 
-On a branch, from a clean `main`:
+## 1. Prepare the same PR
+
+Use Python 3.14 for release preparation, matching the CI packager.
+
+1. Finish the feature and add its `## X.Y.Z` changelog section, including upgrade
+   precautions. Choose a version greater than the current main version.
+2. Stage new source files so the packager includes them.
+3. Run `python3.14 scripts/release.py prepare X.Y.Z`. This invokes the canonical
+   version updater and calculates the source archive URL and checksum.
+4. Commit all changes and open **one** release PR. Its Release candidate workflow
+   builds both arm64 and x86_64 app binaries, combines them into a universal app,
+   signs it ad hoc, checks both architectures and verifies its reported version.
+   The initial release-integrity check intentionally fails until the binary
+   checksum is attached.
+5. Once that candidate workflow succeeds, attach its artifact to the same PR:
+
+   ```sh
+   python3.14 scripts/release.py prepare X.Y.Z --binary-run RUN_ID
+   git add solis_poll.py SolisMenuBar/Resources/Info.plist \
+     SolisMenuBar/Sources/SolisMenuBar/SolisMenuBarApp.swift \
+     CHANGELOG.md Formula/solis-tools.rb .release-assets.json
+   git commit -m "Attach verified release packages"
+   git push
+   ```
+
+The command authenticates with `gh`, checks the workflow identity, source archive
+digest, version, filename and binary checksum, then records the binary resource
+and provenance. It downloads into `build/release`; binaries are not committed to
+Git. Artifacts are retained for 90 days: rebuild and refresh the same PR if they
+expire before publication.
+
+Any source or documentation change after the candidate build requires another
+candidate and another prepare invocation. Formula/metadata-only changes do not.
+Rebase onto current main before final approval so merge contents match the
+reviewed source checksum. Never reuse a published version.
+
+## 2. Review and merge once
+
+Run `make` and `make swift` with full Xcode. CI also:
+
+- checks that version, changelog, source digest and prebuilt resource agree;
+- installs the exact candidate source archive with Homebrew on macOS and Linux;
+- installs the approved prebuilt macOS resource when its digest matches;
+- verifies the app and poller versions through the formula tests.
+
+Normal feature PRs without a release version change still build/test current
+sources; they do not publish a release. Initial release PR pushes without binary
+metadata are not ready to merge.
+
+## 3. Automatic publication
+
+After successful **main-branch CI**, Release rechecks the merged commit and
+provenance, creates its version tag and a draft GitHub release, and uploads the
+source archive plus the already-built universal macOS app archive. It downloads
+both assets and verifies their SHA-256 values before making the release public.
+Nothing is rebuilt after approval, and no follow-up formula commit is needed.
+
+The formula is already on main, so there is a brief publication window in which
+its new URL may not yet exist. Do not announce availability until Release and
+its Published Homebrew installation jobs pass. The pre-publication CI jobs use
+local candidates, not missing public URLs.
+
+Only publication has repository-content write permission. Candidate builds are
+read-only and have no publishing secrets. Post-publication jobs verify the
+public formula on macOS and Linux. Published assets and tags are never
+overwritten. Ad-hoc signing is not Apple notarisation.
+
+## 4. Verify or retry
+
+For an existing installation:
 
 ```sh
-./scripts/version.py --set 0.4.0    # rewrites the plist and the Swift string
-make                                # lint, format, types, version check, tests
+brew update
+brew upgrade solis-tools
+solis-poll --version
+solis-menubar --version   # macOS only
 ```
 
-Move the `CHANGELOG.md` `## Unreleased` entries under `## 0.4.0`. Open a pull
-request whose only content is the version bump and the changelog, and merge it.
-`CONTRIBUTING.md` asks contributors not to touch version numbers precisely so
-this stays one reviewable commit.
+Fresh installations use the one-time tap/trust instructions in README, then
+`brew install solis-tools`. Homebrew requires three components for a qualified
+formula name; `brew install jamescross91/solis-tools` is not supported.
 
-## 2. Tag
+A failed publication can be retried using Release's manual workflow input
+`ref`, set to the exact merged release commit. Successful main CI and ancestry
+are checked again. Retries accept matching assets, resume incomplete drafts and
+reject mismatched tags/assets rather than overwriting them. Retry before
+candidate artifacts expire; if the source changes, prepare a new version.
 
-For a release containing dynamic voltage control, also run `make swift` with
-the full Xcode toolchain. A successful app build alone does not validate the
-Swift stream tests; a missing `XCTest` module is an environment limitation, not
-a passing test run. Check the packaged source includes both `solis_poll.py` and
-`voltage_control.py` and that the installed CLI can import both. The package
-script and Python module list must agree.
+For a broken public release, use a new patch-version release PR. Do not delete,
+retag or replace a release users may already have installed. Homebrew still
+installs Python/PyModbus; the prebuilt resource removes Swift compilation, not
+all dependency installation. `--HEAD` and historical source-only versions remain
+source builds.
 
-Release notes must call out the explicit import-write opt-in, locked export
-actuator, legacy-journal migration checks, and deferred restoration on stale
-telemetry. Do not enable live control as part of an installation smoke test.
-Use the fake inverter for FC03/FC06 checks; physical response and flash endurance
-require separate installation-specific validation. Update the app and poller
-together because older pollers do not accept the new control flags.
-
-```sh
-git checkout main && git pull
-git tag -a v0.4.0 -m "solis-tools 0.4.0"
-git push origin v0.4.0
-```
-
-The tag triggers `.github/workflows/release.yml`, which:
-
-1. refuses the tag if it disagrees with `solis_poll.VERSION`;
-2. builds the tarball with `scripts/package_release.sh` and asserts it contains
-   everything the formula's install step needs;
-3. extracts it and builds it exactly as Homebrew will — `pip install .` plus
-   `swift build --configuration release`;
-4. publishes the release with the tarball attached;
-5. prints the `url` and `sha256` lines for the formula in the job summary.
-
-If step 1, 2 or 3 fails, nothing is published: delete the tag, fix the branch and
-tag again. The release is published rather than drafted because the asset has to
-be downloadable before the formula can point at it, and the checks that would
-gate a manual review have already run by then.
-
-## 3. Update the formula
-
-The formula tracks the last *published* release, which is why
-`scripts/version.py` reports it but never rewrites it. Take the two lines from
-the release job's summary:
-
-```ruby
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.4.0/solis-tools-0.4.0.tar.gz"
-  sha256 "..."
-```
-
-Check whether the pinned `pymodbus` resource needs bumping too — dependabot
-watches `requirements.txt`, not the formula's pinned resource, so this is a
-manual check at release time:
-
-```sh
-python3 -m pip download --no-binary :all: --no-deps pymodbus
-shasum -a 256 pymodbus-*.tar.gz
-```
-
-Open a pull request with just the formula change. When it merges, the `Homebrew`
-CI job runs on `main` and installs the published tarball on macOS and Linux —
-this is the check that the release actually installs, which is why that job does
-not run on pull requests.
-
-## 4. Verify
-
-```sh
-brew update && brew upgrade solis-tools
-solis-poll --version      # solis-poll 0.4.0
-solis-menubar --version   # solis-menubar 0.4.0
-```
-
-## If a release is broken
-
-Do not delete a published release that people may have installed. Bump the patch
-version and go round again. A yanked release breaks `brew upgrade` for anyone
-whose formula still points at it.
+Keep dynamic control off during installation tests. No release check may write
+to physical inverter hardware. Include import opt-in, locked export control,
+legacy-journal migration and stale-restoration precautions in applicable release
+notes.

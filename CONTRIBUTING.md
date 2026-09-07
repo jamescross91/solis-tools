@@ -77,5 +77,8 @@ before merge. Maintainers normally squash-merge accepted pull requests.
 Releases are prepared by a maintainer following
 [docs/releasing.md](docs/releasing.md). `solis_poll.VERSION` is the only place a
 version is written; everything else is derived by `scripts/version.py` and
-checked in CI. Do not change version numbers, release asset URLs or Homebrew
-checksums unless the pull request is specifically a release change.
+checked in CI. A release uses one PR containing the feature (if applicable),
+version, changelog, formula and verified prebuilt-package metadata. Use
+`scripts/release.py prepare` and attach the candidate workflow's artifact to
+that same PR. Do not open follow-up version or formula PRs. Ordinary non-release
+changes should not alter release versions or checksums.

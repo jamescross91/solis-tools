@@ -38,8 +38,15 @@ latest stable release:
 
 ```sh
 brew tap jamescross91/solis-tools https://github.com/jamescross91/solis-tools
-brew install jamescross91/solis-tools/solis-tools
+brew trust --formula jamescross91/solis-tools/solis-tools
+brew install solis-tools
 ```
+
+The tap/trust commands are one-time setup (older Homebrew versions without
+`brew trust` can omit that step). Afterwards use `brew install solis-tools` or
+`brew upgrade solis-tools`. Homebrew does not accept the two-part
+`brew install jamescross91/solis-tools` spelling: qualified formula names require
+`owner/tap/formula`, whereas a tap itself uses `owner/tap`.
 
 Then run:
 
@@ -77,9 +84,12 @@ resolution. This keeps its popover responsive during long-running sessions.
 Chart history is memory-only and is cleared whenever the app is quit and
 restarted, including after an update.
 
-The menu-bar app is built locally by Homebrew from the release source, so it
-does not require a separately downloaded or unsigned application bundle. Linux
-installations continue to install the terminal monitor only.
+Releases prepared with the prebuilt-package workflow install a checksum-verified
+universal macOS app archive (Apple Silicon and Intel), without compiling Swift
+on your Mac. Python and PyModbus are still installed separately by Homebrew.
+Historical source-only releases, including 0.5.0, and `--HEAD` still build the
+app locally. Linux installations install the terminal monitor only. The app is
+ad-hoc signed, not Apple-notarised.
 
 Homebrew installs Python and PyModbus in an isolated environment. Upgrade or remove it with:
 

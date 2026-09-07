@@ -1,107 +1,86 @@
 name: Release
 
-# Releases were entirely manual: tag, archive by hand, upload, compute the
-# checksum, paste it into the formula. Nothing verified that the tarball built,
-# that the tag matched solis_poll.VERSION, or that the checksum was right.
-#
-# This builds the tarball, verifies it installs and builds exactly the way
-# Homebrew will, and only then publishes the release. It is published rather than
-# drafted because the asset has to be downloadable before the formula can point
-# at it, and every check that would gate a manual review has already run.
-#
-# Updating the formula stays a separate, deliberate step: its sha256 can only be
-# computed once the asset exists.
-
+# Publication follows successful main CI, never an untrusted PR workflow.
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
-        description: Tag to build
+        description: Merged release commit to retry
         required: true
 
 permissions:
   contents: read
 
+env:
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+
+concurrency:
+  group: release-${{ inputs.ref || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
-  tarball:
-    name: Build and verify the release tarball
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     runs-on: macos-latest
     timeout-minutes: 25
     permissions:
       contents: write
+      actions: read
+    outputs:
+      released: ${{ steps.release.outputs.changed }}
+      commit: ${{ steps.release.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ inputs.ref || github.event.workflow_run.head_sha }}
           fetch-depth: 0
-
-      - name: Resolve and check the version
-        id: version
-        run: |
-          tag="${{ inputs.ref || github.ref_name }}"
-          version="$(./scripts/version.py)"
-          if [ "$tag" != "v$version" ]; then
-            echo "tag $tag does not match solis_poll.VERSION ($version)" >&2
-            exit 1
-          fi
-          ./scripts/version.py --check
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Build the tarball
-        id: tarball
-        run: |
-          path="$(./scripts/package_release.sh "${{ steps.version.outputs.version }}" \
-            "${{ steps.version.outputs.tag }}" | tail -1)"
-          echo "path=$path" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(shasum -a 256 "$path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Build from the tarball exactly as Homebrew will
-        run: |
-          workspace="$(mktemp -d)"
-          tar -xzf "${{ steps.tarball.outputs.path }}" -C "$workspace"
-          cd "$workspace/solis-tools-${{ steps.version.outputs.version }}"
-          python3 -m venv .venv
-          ./.venv/bin/pip install --quiet .
-          ./.venv/bin/solis-poll --version
-          swift build --disable-sandbox --configuration release --package-path SolisMenuBar
-
-      - name: Summarise what the formula needs
-        run: |
-          {
-            echo "### solis-tools ${{ steps.version.outputs.version }}"
-            echo
-            echo "Update \`Formula/solis-tools.rb\` with:"
-            echo
-            echo '```ruby'
-            echo '  url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/solis-tools-${{ steps.version.outputs.version }}.tar.gz"'
-            echo '  sha256 "${{ steps.tarball.outputs.sha256 }}"'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish the release
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Validate merged release and successful CI
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-          SHA256: ${{ steps.tarball.outputs.sha256 }}
         run: |
-          notes="$(mktemp)"
-          {
-            echo "Install or upgrade with Homebrew:"
-            echo
-            echo '```sh'
-            echo "brew update && brew upgrade solis-tools"
-            echo '```'
-            echo
-            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$TAG/CHANGELOG.md) for what changed."
-            echo
-            echo "Release asset sha256: \`$SHA256\`"
-          } > "$notes"
-          gh release create "$TAG" \
-            "${{ steps.tarball.outputs.path }}" \
-            --repo "${{ github.repository }}" \
-            --title "solis-tools $VERSION" \
-            --notes-file "$notes"
+          commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$commit" origin/main
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$commit" \
+            --event push --json conclusion --jq 'any(.[]; .conclusion == "success")' | grep -qx true
+          changed="$(python scripts/release.py changed)"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Verify and publish immutable archive
+        if: steps.release.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release.py publish HEAD
+
+  homebrew:
+    name: Published Homebrew (${{ matrix.os }})
+    needs: publish
+    if: needs.publish.outputs.released == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+      - name: Register release formula
+        run: brew tap jamescross91/solis-tools "$GITHUB_WORKSPACE"
+      - run: brew audit --strict --online jamescross91/solis-tools/solis-tools
+      - run: brew install --build-from-source jamescross91/solis-tools/solis-tools
+      - run: brew test jamescross91/solis-tools/solis-tools

@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
@@ -37,6 +39,10 @@ jobs:
         run: mypy
       - name: Version copies agree
         run: ./scripts/version.py --check
+      - name: Release formula matches reproducible archive
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+        run: python scripts/release.py changed "$BASE_REF"
 
   python:
     name: Python tests
@@ -145,10 +151,13 @@ jobs:
 
   test:
     name: Homebrew (${{ matrix.os }})
-    # The formula installs from the published release tarball, so on a pull
-    # request this would build the last release rather than the branch. It runs
-    # where that is the point: after merge, weekly, and on demand.
-    if: github.event_name != 'pull_request'
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    permissions:
+      contents: read
+      actions: read
+    # Test this commit's archive before publication. Release separately tests
+    # the public URL, so CI never depends on an asset that does not exist yet.
     strategy:
       fail-fast: false
       matrix:
@@ -157,12 +166,18 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
       - name: Register repository as a tap
-        run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
-      - name: Audit formula
-        run: brew audit --strict --online jamescross91/solis-tools/solis-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          brew tap jamescross91/solis-tools "$GITHUB_WORKSPACE"
+          python scripts/release.py candidate HEAD
+          cp Formula/solis-tools.rb "$(brew --repository jamescross91/solis-tools)/Formula/solis-tools.rb"
       - name: Install formula
         run: brew install --build-from-source jamescross91/solis-tools/solis-tools
       - name: Test formula
