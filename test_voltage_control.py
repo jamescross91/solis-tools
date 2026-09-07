@@ -50,7 +50,7 @@ class ConfigurationTests(unittest.TestCase):
 class ExportControlValidationTests(unittest.TestCase):
     def evidence(self, **changes: object) -> dict[str, object]:
         value: dict[str, object] = {
-            "device_identity": "192.168.1.57:502/1",
+            "device_identity": "inverter.local:502/1",
             "validated_at": "2026-09-07T12:00:00+01:00",
             "baseline_raw": 50,
             "test_raw": 30,
@@ -68,14 +68,14 @@ class ExportControlValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "validation.json"
             path.write_text(json.dumps(self.evidence()), encoding="utf-8")
-            validation = ExportControlValidation.load(path, "192.168.1.57:502/1")
+            validation = ExportControlValidation.load(path, "inverter.local:502/1")
         self.assertIsNotNone(validation)
         self.assertEqual(validation.test_raw, 30)
 
     def test_missing_evidence_keeps_export_disabled(self):
         with tempfile.TemporaryDirectory() as directory:
             validation = ExportControlValidation.load(
-                Path(directory) / "missing.json", "192.168.1.57:502/1"
+                Path(directory) / "missing.json", "inverter.local:502/1"
             )
         self.assertIsNone(validation)
 
@@ -88,16 +88,18 @@ class ExportControlValidationTests(unittest.TestCase):
                 path = Path(directory) / "validation.json"
                 path.write_text(json.dumps(evidence), encoding="utf-8")
                 identity = (
-                    "inverter.local:502/1" if message == "does not match" else "192.168.1.57:502/1"
+                    "other-inverter.local:502/1"
+                    if message == "does not match"
+                    else "inverter.local:502/1"
                 )
                 with self.assertRaisesRegex(ValueError, message):
                     ExportControlValidation.load(path, identity)
 
     def test_evidence_path_is_stable_and_scoped_to_endpoint(self):
         state = Path("state")
-        first = export_validation_path(state, "192.168.1.57:502/1")
-        second = export_validation_path(state, "192.168.1.58:502/1")
-        self.assertEqual(first, export_validation_path(state, "192.168.1.57:502/1"))
+        first = export_validation_path(state, "inverter.local:502/1")
+        second = export_validation_path(state, "other-inverter.local:502/1")
+        self.assertEqual(first, export_validation_path(state, "inverter.local:502/1"))
         self.assertNotEqual(first, second)
 
 
