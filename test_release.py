@@ -120,6 +120,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(release.binary_formula(updated, metadata), updated)
         self.assertEqual(updated.count('resource "solis-menubar"'), 1)
         self.assertIn('sha256 "dependency"', updated)
+        self.assertIn('  resource "solis-menubar" do\n    on_macos do', updated)
 
     def test_binary_rejects_other_source_and_path_traversal(self):
         metadata = self.metadata("a" * 64)

@@ -147,8 +147,8 @@ def validate_binary(metadata: dict, release_version: str, checksum: str) -> None
 def binary_formula(formula: str, metadata: dict) -> str:
     block = (
         "  # BEGIN PREBUILT MACOS\n"
-        "  on_macos do\n"
-        '    resource "solis-menubar" do\n'
+        '  resource "solis-menubar" do\n'
+        "    on_macos do\n"
         f'      url "https://github.com/{REPOSITORY}/releases/download/v{metadata["version"]}/{metadata["name"]}"\n'
         f'      sha256 "{metadata["sha256"]}"\n'
         "    end\n"
@@ -156,9 +156,10 @@ def binary_formula(formula: str, metadata: dict) -> str:
         "  # END PREBUILT MACOS"
     )
     pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
-    if re.search(pattern, formula, re.DOTALL):
-        return re.sub(pattern, lambda _: block, formula, flags=re.DOTALL)
-    return formula.replace("  def install\n", block + "\n\n  def install\n")
+    formula = re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
+    # Resource-scoped platform blocks leave no empty resource on Linux and
+    # follow Homebrew's required nesting for one-resource platform conditions.
+    return formula.replace("  def install\n", block + "\n\n  def install\n", 1)
 
 
 def download_binary(
