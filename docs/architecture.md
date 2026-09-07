@@ -162,7 +162,9 @@ to the same PR. Formula and metadata are excluded from the source archive to
 avoid checksum recursion. CI verifies candidate Homebrew installs before merge.
 Successful main CI triggers publication of the approved bytes, followed by
 public-URL Homebrew tests. Only publication has write permissions; there is no
-bot commit to protected main. See [releasing.md](releasing.md).
+bot commit to protected main. Draft creation uses GitHub's returned release
+object directly because its lookup endpoints are briefly eventually consistent.
+See [releasing.md](releasing.md).
 
 ## Test coverage
 
