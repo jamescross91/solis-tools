@@ -141,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+        uses: Homebrew/actions/setup-homebrew@f8d4222eb633e65c2a0157383cf80861fc7fae7f
       - name: Register repository as a tap
         run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
       # Offline checks only: this runs on every pull request, and --online makes
@@ -170,7 +170,7 @@ jobs:
         with:
           python-version: '3.14'
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+        uses: Homebrew/actions/setup-homebrew@f8d4222eb633e65c2a0157383cf80861fc7fae7f
       - name: Register repository as a tap
         env:
           GH_TOKEN: ${{ github.token }}
