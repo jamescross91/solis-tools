@@ -6,6 +6,11 @@
 
 <!-- List the commands or checks you ran. -->
 
+<!-- For releases, keep feature/version/changelog/formula changes in this same
+PR. Attach the successful Release candidate run using scripts/release.py prepare
+VERSION --binary-run RUN_ID, then include .release-assets.json. Do not create a
+second formula PR. See docs/releasing.md. -->
+
 ## Checklist
 
 - [ ] The change is focused and contains no unrelated edits.

@@ -5,6 +5,17 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.5.1
+
+### Changed
+
+- Prepare releases in one PR containing version, changelog, source checksum and
+  prebuilt macOS package metadata. Successful merged CI automatically publishes
+  verified immutable assets without a follow-up formula PR.
+- Add universal prebuilt macOS app candidates so future stable releases avoid
+  Swift compilation during Homebrew installation; retain source builds for HEAD.
+- Document the short `brew install solis-tools` command after tap/trust setup.
+
 ## 0.5.0
 
 ### Upgrade notes

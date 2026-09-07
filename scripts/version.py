@@ -12,8 +12,8 @@ wrong version, and nothing checked.
     scripts/version.py --set X.Y.Z  set the canonical version, then rewrite
 
 pyproject.toml reads solis_poll.VERSION dynamically, so it is never edited here.
-The Homebrew formula tracks the last *published* release rather than the working
-tree, so it is reported but never rewritten.
+The Homebrew formula is prepared by scripts/release.py, which knows the archive
+and prebuilt-package checksums. This helper reports it but never rewrites it.
 """
 
 from __future__ import annotations
@@ -78,12 +78,12 @@ def derived_copies() -> list[Copy]:
 
 
 def tracked_only() -> list[Copy]:
-    """Locations reported for information but not rewritten."""
+    """Locations managed by release preparation, not by the version helper."""
     return [
         Copy(
             ROOT / "Formula/solis-tools.rb",
             re.compile(r"solis-tools-(\d+\.\d+\.\d+)\.tar\.gz"),
-            "Homebrew formula (tracks the published release)",
+            "Homebrew formula (managed by scripts/release.py)",
         ),
     ]
 

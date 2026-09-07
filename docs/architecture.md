@@ -143,7 +143,18 @@ Sensitivity observations use signed measured grid-power responses and expire
 even if no later command occurs. The menu-bar lifecycle serialises asynchronous
 stop/start requests, drains pipes until exit and refuses replacement on timeout.
 
-## Testing
+## Release boundary
+
+`scripts/release.py` prepares a reproducible source archive and formula in one
+release PR. The Release candidate workflow builds a universal macOS app and
+stores its source digest and binary checksum; preparation attaches that metadata
+to the same PR. Formula and metadata are excluded from the source archive to
+avoid checksum recursion. CI verifies candidate Homebrew installs before merge.
+Successful main CI triggers publication of the approved bytes, followed by
+public-URL Homebrew tests. Only publication has write permissions; there is no
+bot commit to protected main. See [releasing.md](releasing.md).
+
+## Test coverage
 
 | Layer | Where |
 | --- | --- |
