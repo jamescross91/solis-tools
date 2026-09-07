@@ -22,7 +22,7 @@ class SolisTools < Formula
   resource "solis-menubar" do
     on_macos do
       url "https://github.com/jamescross91/solis-tools/releases/download/v0.5.1/solis-menubar-0.5.1-macos-universal.tar.gz"
-      sha256 "dc59a953bb2f0ef74e771bddc6b73d68c5c74e7d586a4b4b26361f5a46500c20"
+      sha256 "7114e2d5196f234339a97dadce831b0c589774bab896c17d29cf9316b3a23e10"
     end
   end
   # END PREBUILT MACOS
