@@ -7,7 +7,7 @@ struct DashboardView: View {
     @AppStorage("host") private var host = ""
     @AppStorage("port") private var port = 502
     @AppStorage("slave") private var slave = 1
-    @AppStorage("pollInterval") private var pollInterval = 1.0
+    @AppStorage("pollInterval") private var pollInterval = 2.0
     @AppStorage("slowInterval") private var slowInterval = 10.0
     @AppStorage("inverterMaxKw") private var inverterMaxKw = 10.0
     @AppStorage("gridMaxKw") private var gridMaxKw = 23.0
@@ -17,6 +17,25 @@ struct DashboardView: View {
     @AppStorage("menuBarGrid") private var showGrid = true
     @AppStorage("menuBarTemperature") private var showTemperature = false
     @AppStorage("menuBarPV") private var showPV = false
+    @AppStorage("dynamicVoltageEnabled") private var dynamicVoltageEnabled = false
+    @AppStorage("dynamicImportEnabled") private var dynamicImportEnabled = true
+    @AppStorage("minimumVoltage") private var minimumVoltage = 215.0
+    @AppStorage("maximumVoltage") private var maximumVoltage = 258.0
+    @AppStorage("voltageSafetyMargin") private var voltageSafetyMargin = 1.5
+    @AppStorage("voltageDeadband") private var voltageDeadband = 0.75
+    @AppStorage("maximumImportKw") private var maximumImportKw = 14.0
+    @AppStorage("maximumExportKw") private var maximumExportKw = 10.0
+    @AppStorage("siteExportPermissionKw") private var siteExportPermissionKw = 10.0
+    @AppStorage("increaseStepW") private var increaseStepW = 200
+    @AppStorage("reductionStepW") private var reductionStepW = 500
+    @AppStorage("nearLimitReductionW") private var nearLimitReductionW = 1000
+    @AppStorage("emergencyReductionW") private var emergencyReductionW = 2000
+    @AppStorage("controlSettleTime") private var controlSettleTime = 5.0
+    @AppStorage("controlActivationDelay") private var controlActivationDelay = 5.0
+    @AppStorage("controlDeactivationDelay") private var controlDeactivationDelay = 10.0
+    @AppStorage("importActivationKw") private var importActivationKw = 1.0
+    @AppStorage("exportActivationKw") private var exportActivationKw = 0.5
+    @AppStorage("minimumWriteInterval") private var minimumWriteInterval = 5.0
 
     @State private var showingSettings = false
     @State private var selectedMetric: HistoryMetric = .house
@@ -34,6 +53,21 @@ struct DashboardView: View {
                     } else if let sample = monitor.latest {
                         status(sample)
                         metrics(sample.reading)
+                        if let control = sample.voltageControl {
+                            voltageControlStatus(control, reading: sample.reading)
+                            VoltageControlChartView(
+                                liveHistory: monitor.controlHistory,
+                                longHistory: monitor.history,
+                                minimumVoltage: minimumVoltage,
+                                maximumVoltage: maximumVoltage,
+                                safetyMargin: voltageSafetyMargin,
+                                maximumImportKw: maximumImportKw
+                            )
+                        } else {
+                            Label("Dynamic voltage control disabled", systemImage: "pause.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         history
                         alarms(sample.reading.alarms)
                         connection(sample)
@@ -46,7 +80,7 @@ struct DashboardView: View {
             Divider()
             footer
         }
-        .frame(width: 410, height: 600)
+        .frame(width: 450, height: 680)
         .onAppear {
             if !host.isEmpty, !monitor.isRunning {
                 connect()
@@ -122,7 +156,10 @@ struct DashboardView: View {
             MetricCard(
                 title: "Inverter",
                 value: String(format: "%.1f °C", reading.inverterTemperatureC),
-                detail: String(format: "Grid %.1f V", reading.gridVoltageV),
+                detail: String(
+                    format: "PCC %.1f V",
+                    reading.meterVoltageV ?? reading.gridVoltageV
+                ),
                 symbol: "thermometer.medium",
                 colour: .yellow
             )
@@ -136,6 +173,100 @@ struct DashboardView: View {
                 )
             }
         }
+    }
+
+    private func voltageControlStatus(
+        _ control: VoltageControlDetails,
+        reading: InverterReading
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Dynamic voltage control", systemImage: "waveform.path.ecg.rectangle")
+                    .font(.headline)
+                Spacer()
+                Text(control.state)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(control.emergency ? .red : .secondary)
+            }
+            HStack {
+                controlValue(
+                    "PCC voltage",
+                    control.rawVoltageV.map { String(format: "%.1f V", $0) } ?? "—"
+                )
+                controlValue(
+                    "Filtered",
+                    control.filteredVoltageV.map { String(format: "%.1f V", $0) } ?? "—"
+                )
+                controlValue("Grid", String(format: "%+.2f kW", reading.gridImportPositiveKw))
+                controlValue(
+                    "Limit",
+                    control.importActuator.commandedW.map {
+                        String(format: "%.1f kW", Double($0) / 1000)
+                    } ?? "—"
+                )
+            }
+            Text("\(control.action) · \(control.reason)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let note = control.recoveryNote {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            DisclosureGroup("Diagnostics and recent events") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(control.voltageSource)
+                    if let device = monitor.latest?.device,
+                       let supported = device.remoteDispatchSupported {
+                        Text(
+                            "Remote Dispatch: \(supported ? "supported" : "not reported")"
+                                + (device.remoteDispatchVersion.map { " · v\($0)" } ?? "")
+                                + " · not used"
+                        )
+                    }
+                    Text("Import actuator PDU \(control.importActuator.pduAddress) · FC03/FC06")
+                    Text("Writes in last hour: \(control.importActuator.writesLastHour)")
+                    if let total = control.importActuator.totalWriteCount {
+                        Text("Writes this process: \(total)")
+                    }
+                    if let sensitivity = control.estimatedVoltageSensitivityVPerKw {
+                        Text(String(format: "Recent sensitivity: %.2f V/kW", sensitivity))
+                    }
+                    if let summary = control.dailySummary {
+                        Text(
+                            String(
+                                format: "Today: %.0f min import regulation · %.1f–%.1f V · %d emergencies",
+                                summary.importRegulatingS / 60,
+                                summary.lowestVoltageV,
+                                summary.highestVoltageV,
+                                summary.emergencyInterventions
+                            )
+                        )
+                    }
+                    ForEach(control.recentEvents.prefix(6)) { event in
+                        Text("\(event.timestamp.suffix(8)) · \(event.message)")
+                            .lineLimit(2)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            }
+        }
+        .padding(10)
+        .background(
+            (control.emergency ? Color.red : Color.cyan).opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+    }
+
+    private func controlValue(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.semibold).monospacedDigit())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var history: some View {
@@ -258,6 +389,44 @@ struct DashboardView: View {
             Toggle("Enable PV registers", isOn: $pvEnabled)
 
             Divider()
+            Text("Dynamic grid voltage control")
+                .font(.headline)
+            Toggle("Enable dynamic control", isOn: $dynamicVoltageEnabled)
+            Toggle("Enable import regulation", isOn: $dynamicImportEnabled)
+                .disabled(!dynamicVoltageEnabled)
+            Toggle("Enable export regulation", isOn: .constant(false))
+                .disabled(true)
+            Text("Export writes remain locked until register 43074 is live-validated.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Group {
+                numericSetting("Minimum voltage", value: $minimumVoltage, unit: "V")
+                numericSetting("Maximum voltage", value: $maximumVoltage, unit: "V")
+                numericSetting("Maximum import", value: $maximumImportKw, unit: "kW")
+                numericSetting("Maximum export", value: $maximumExportKw, unit: "kW")
+                numericSetting("Site export permission", value: $siteExportPermissionKw, unit: "kW")
+            }
+            .disabled(!dynamicVoltageEnabled)
+            DisclosureGroup("Advanced control behaviour") {
+                VStack(spacing: 8) {
+                    numericSetting("Safety margin", value: $voltageSafetyMargin, unit: "V")
+                    numericSetting("Deadband", value: $voltageDeadband, unit: "V")
+                    integerSetting("Increase step", value: $increaseStepW, unit: "W")
+                    integerSetting("Reduction step", value: $reductionStepW, unit: "W")
+                    integerSetting("Near-limit reduction", value: $nearLimitReductionW, unit: "W")
+                    integerSetting("Emergency reduction", value: $emergencyReductionW, unit: "W")
+                    numericSetting("Settle time", value: $controlSettleTime, unit: "s")
+                    numericSetting("Activation delay", value: $controlActivationDelay, unit: "s")
+                    numericSetting("Deactivation delay", value: $controlDeactivationDelay, unit: "s")
+                    numericSetting("Import activation", value: $importActivationKw, unit: "kW")
+                    numericSetting("Export activation", value: $exportActivationKw, unit: "kW")
+                    numericSetting("Minimum write interval", value: $minimumWriteInterval, unit: "s")
+                }
+                .padding(.top, 6)
+            }
+            .disabled(!dynamicVoltageEnabled)
+
+            Divider()
             Text("Menu bar metrics")
                 .font(.headline)
             Toggle("House load", isOn: $showHouseLoad)
@@ -276,7 +445,11 @@ struct DashboardView: View {
                     connect()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(host.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(
+                    host.trimmingCharacters(in: .whitespaces).isEmpty
+                        || minimumVoltage >= maximumVoltage
+                        || minimumWriteInterval < 5
+                )
                 if monitor.isRunning {
                     Button("Disconnect") {
                         monitor.stop()
@@ -289,8 +462,39 @@ struct DashboardView: View {
         }
     }
 
+    private func numericSetting(
+        _ label: String,
+        value: Binding<Double>,
+        unit: String
+    ) -> some View {
+        LabeledContent(label) {
+            TextField(label, value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 75)
+            Text(unit).foregroundStyle(.secondary)
+        }
+    }
+
+    private func integerSetting(
+        _ label: String,
+        value: Binding<Int>,
+        unit: String
+    ) -> some View {
+        LabeledContent(label) {
+            TextField(label, value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 75)
+            Text(unit).foregroundStyle(.secondary)
+        }
+    }
+
     private var footer: some View {
         HStack {
+            if let message = monitor.shutdownMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
             if let path = monitor.executablePath {
                 Text(URL(fileURLWithPath: path).lastPathComponent)
                     .font(.caption2)
@@ -298,9 +502,11 @@ struct DashboardView: View {
             }
             Spacer()
             Button("Quit") {
-                // Otherwise the poller outlives the app until its next write fails.
-                monitor.stop()
-                NSApplication.shared.terminate(nil)
+                Task {
+                    if await monitor.stopForApplicationTermination() {
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
             }
             .buttonStyle(.plain)
         }
@@ -344,6 +550,123 @@ struct DashboardView: View {
     }
 }
 
+private struct VoltageControlChartView: View {
+    enum TimeRange: String, CaseIterable, Identifiable {
+        case fifteenMinutes = "15m"
+        case oneHour = "1h"
+        case sixHours = "6h"
+        case oneDay = "24h"
+
+        var id: Self { self }
+
+        var seconds: TimeInterval {
+            switch self {
+            case .fifteenMinutes: 15 * 60
+            case .oneHour: 60 * 60
+            case .sixHours: 6 * 60 * 60
+            case .oneDay: 24 * 60 * 60
+            }
+        }
+    }
+
+    let liveHistory: [HistoryPoint]
+    let longHistory: [HistoryPoint]
+    let minimumVoltage: Double
+    let maximumVoltage: Double
+    let safetyMargin: Double
+    let maximumImportKw: Double
+    @State private var timeRange: TimeRange = .fifteenMinutes
+
+    private var points: [HistoryPoint] {
+        let source = timeRange == .fifteenMinutes ? liveHistory : longHistory
+        guard let latest = source.last?.date else { return [] }
+        let cutoff = latest.addingTimeInterval(-timeRange.seconds)
+        return source.filter { $0.date >= cutoff && $0.reading.meterVoltageV != nil }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Voltage control").font(.headline)
+                Spacer()
+                Picker("Range", selection: $timeRange) {
+                    ForEach(TimeRange.allCases) { range in
+                        Text(range.rawValue).tag(range)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+            }
+            Chart {
+                ForEach(points) { point in
+                    if let voltage = point.reading.meterVoltageV {
+                        LineMark(
+                            x: .value("Time", point.date),
+                            y: .value("PCC voltage", voltage)
+                        )
+                        .foregroundStyle(.cyan)
+                        .interpolationMethod(.linear)
+                    }
+                }
+                RuleMark(y: .value("Minimum", minimumVoltage)).foregroundStyle(.red)
+                RuleMark(y: .value("Import target", minimumVoltage + safetyMargin))
+                    .foregroundStyle(.orange.opacity(0.7))
+                RuleMark(y: .value("Export target", maximumVoltage - safetyMargin))
+                    .foregroundStyle(.orange.opacity(0.7))
+                RuleMark(y: .value("Maximum", maximumVoltage)).foregroundStyle(.red)
+            }
+            .chartYAxisLabel("V")
+            .frame(height: 120)
+
+            Chart {
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("Time", point.date),
+                        y: .value("Grid import", point.reading.gridImportPositiveKw),
+                        series: .value("Series", "Grid import")
+                    )
+                    .foregroundStyle(.orange)
+                    if let watts = point.voltageControl?.importActuator.commandedW {
+                        LineMark(
+                            x: .value("Time", point.date),
+                            y: .value("Commanded limit", Double(watts) / 1000),
+                            series: .value("Series", "Commanded limit")
+                        )
+                        .foregroundStyle(.blue)
+                    }
+                    if point.voltageControl?.emergency == true {
+                        PointMark(
+                            x: .value("Emergency", point.date),
+                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                        )
+                        .foregroundStyle(.red)
+                        .symbolSize(36)
+                    } else if point.voltageControl?.action == "Increasing" {
+                        PointMark(
+                            x: .value("Increasing", point.date),
+                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                        )
+                        .foregroundStyle(.green)
+                        .symbolSize(12)
+                    } else if point.voltageControl?.action == "Reducing" {
+                        PointMark(
+                            x: .value("Reducing", point.date),
+                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                        )
+                        .foregroundStyle(.orange)
+                        .symbolSize(18)
+                    }
+                }
+                RuleMark(y: .value("Maximum import", maximumImportKw))
+                    .foregroundStyle(.secondary.opacity(0.6))
+            }
+            .chartYAxisLabel("kW")
+            .frame(height: 120)
+        }
+    }
+}
+
 private struct HistoryChartView: View {
     let history: [HistoryPoint]
     let pvEnabled: Bool
@@ -357,7 +680,7 @@ private struct HistoryChartView: View {
                 Text("History")
                     .font(.headline)
                 Spacer()
-                Text("Since launch · 6h max · 30s samples")
+                Text("Since launch · 24h max · 30s samples")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

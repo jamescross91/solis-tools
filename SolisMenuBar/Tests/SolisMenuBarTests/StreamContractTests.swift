@@ -7,6 +7,7 @@ import XCTest
 final class StreamContractTests: XCTestCase {
     private func envelopeJSON(
         schemaVersion: Int = 1,
+        voltageControl: String = "null",
         health: String = """
             {
               "last_sample_age_s": 0.0,
@@ -49,6 +50,7 @@ final class StreamContractTests: XCTestCase {
                 "alarms": []
               },
               "health": \(health),
+              "voltage_control": \(voltageControl),
               "error": null
             }
             """.utf8
@@ -65,6 +67,8 @@ final class StreamContractTests: XCTestCase {
         XCTAssertEqual(envelope.reading.houseLoadKw, 1.58)
         XCTAssertEqual(envelope.reading.batterySocPercent, 93)
         XCTAssertNil(envelope.reading.pvKw)
+        XCTAssertNil(envelope.reading.meterVoltageV)
+        XCTAssertNil(envelope.voltageControl)
         XCTAssertEqual(envelope.health.rejectedSamples, 0)
         XCTAssertNil(envelope.error)
     }
@@ -74,6 +78,49 @@ final class StreamContractTests: XCTestCase {
         let envelope = try StreamDecoder.decode(envelopeJSON())
         XCTAssertEqual(envelope.reading.gridKw, -0.5)
         XCTAssertEqual(envelope.reading.gridImportPositiveKw, 0.5)
+    }
+
+    func testDynamicVoltageDiagnosticsDecode() throws {
+        let control = """
+            {
+              "state": "Import regulating", "action": "Holding", "mode": "import",
+              "desired_limit_w": 12000, "raw_voltage_v": 216.4,
+              "filtered_voltage_v": 216.8, "reason": "inside deadband",
+              "emergency": false,
+              "configuration": {},
+              "voltage_source": "meter/PCC input register, raw PDU 33251",
+              "estimated_voltage_sensitivity_v_per_kw": 2.1,
+              "import_actuator": {
+                "pdu_address": 43488, "resolution_w": 100, "baseline_raw": 140,
+                "last_commanded_raw": 120, "last_requested_raw": 120,
+                "last_write_at": "2026-09-04T12:00:00+01:00",
+                "writes_last_hour": 3, "last_error": null
+              },
+              "export_actuator": {
+                "pdu_address": 43074, "resolution_w": 100, "baseline_raw": 50,
+                "last_commanded_raw": 50, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_write_validated": false,
+              "recent_events": [{
+                "timestamp": "2026-09-04T12:00:00+01:00",
+                "state": "Import regulating", "action": "Holding",
+                "message": "inside deadband", "voltage_v": 216.4,
+                "grid_kw": -11.8, "limit_w": 12000
+              }],
+              "daily_summary": null,
+              "recovery_note": null
+            }
+            """
+        let details = try XCTUnwrap(
+            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
+        )
+        XCTAssertEqual(details.state, "Import regulating")
+        XCTAssertEqual(details.importActuator.pduAddress, 43488)
+        XCTAssertEqual(details.importActuator.commandedW, 12_000)
+        XCTAssertFalse(details.exportWriteValidated)
+        XCTAssertEqual(details.recentEvents.count, 1)
+        XCTAssertNil(details.dailySummary)
     }
 
     func testHistoryMetricsReadTheirOwnFields() throws {
@@ -168,11 +215,16 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.host, "192.168.1.57")
         XCTAssertEqual(configuration.port, 502)
         XCTAssertEqual(configuration.slave, 1)
-        XCTAssertEqual(configuration.interval, 1)
+        XCTAssertEqual(configuration.interval, 2)
         XCTAssertEqual(configuration.slowInterval, 10)
         XCTAssertEqual(configuration.inverterMaxKw, 10)
         XCTAssertEqual(configuration.gridMaxKw, 23)
         XCTAssertFalse(configuration.pvEnabled)
+        XCTAssertFalse(configuration.dynamicVoltageEnabled)
+        XCTAssertTrue(configuration.dynamicImportEnabled)
+        XCTAssertEqual(configuration.minimumVoltage, 215)
+        XCTAssertEqual(configuration.maximumVoltage, 258)
+        XCTAssertEqual(configuration.minimumWriteInterval, 5)
     }
 
     /// A too-short interval would make the poller hammer the inverter.

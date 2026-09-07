@@ -104,12 +104,73 @@ class StreamContractTests(unittest.TestCase):
         sample = samples[-1]
         self.assertEqual(sample["schema_version"], 1)
         self.assertEqual(
-            set(sample), {"schema_version", "timestamp", "device", "reading", "health", "error"}
+            set(sample),
+            {
+                "schema_version",
+                "timestamp",
+                "device",
+                "reading",
+                "health",
+                "voltage_control",
+                "error",
+            },
         )
         self.assertEqual(sample["reading"]["battery_flow_kw"], sample["reading"]["battery_kw"])
         self.assertEqual(sample["health"]["rejected_samples"], 0)
         self.assertIsNone(sample["error"])
         self.assertTrue(sample["device"]["profile_validated"])
+
+    def test_meter_voltage_is_an_additive_opt_in_field(self):
+        with FakeInverter() as inverter:
+            values = readings(
+                "--host", "127.0.0.1", "--port", str(inverter.port), "--meter-voltage"
+            )
+        self.assertEqual(values["grid_voltage_v"], "242.7")
+        self.assertEqual(values["meter_voltage_v"], "242.5")
+
+    def test_dynamic_import_uses_one_session_and_restores_its_baseline(self):
+        import tempfile
+
+        bank = hybrid_bank()
+        bank[33135] = 0  # charging
+        bank[33251] = 2300
+        bank[33263] = 0xFFFF
+        bank[33264] = 0xF830  # -2.0 kW import
+        bank[43488] = 100
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter:
+                samples = stream_samples(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--interval",
+                    "0.05",
+                    "--slow-interval",
+                    "30",
+                    "--dynamic-voltage-control",
+                    "--control-activation-delay",
+                    "0.1",
+                    "--control-settle-time",
+                    "0.1",
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                    wanted=8,
+                )
+                writes = list(inverter.writes)
+                final_import_limit = inverter.bank[43488]
+                maximum_connections = inverter.maximum_active_connections
+
+        self.assertGreaterEqual(len(samples), 8)
+        self.assertIn((43488, 102), writes)
+        self.assertEqual(writes[-1], (43488, 100))
+        self.assertEqual(final_import_limit, 100)
+        self.assertEqual(maximum_connections, 1)
+        self.assertEqual(samples[-1]["voltage_control"]["voltage_source"].split()[-1], "33251")
+        self.assertTrue(samples[-1]["device"]["remote_dispatch_supported"])
+        self.assertEqual(samples[-1]["device"]["remote_dispatch_version"], 1)
 
 
 class TransientFaultTests(unittest.TestCase):

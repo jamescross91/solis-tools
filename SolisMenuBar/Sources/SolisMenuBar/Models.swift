@@ -19,6 +19,7 @@ struct StreamEnvelope: Decodable, Sendable {
     let device: DeviceDetails
     let reading: InverterReading
     let health: ConnectionDetails
+    let voltageControl: VoltageControlDetails?
     let error: String?
 }
 
@@ -29,10 +30,13 @@ struct DeviceDetails: Decodable, Sendable {
     let protocolVersion: Int
     let typeDefinition: Int?
     let profileValidated: Bool
+    let remoteDispatchSupported: Bool?
+    let remoteDispatchVersion: Int?
 }
 
 struct InverterReading: Decodable, Sendable {
     let gridVoltageV: Double
+    let meterVoltageV: Double?
     let inverterTemperatureC: Double
     let inverterStatusCode: Int
     let inverterStatus: String
@@ -49,6 +53,62 @@ struct InverterReading: Decodable, Sendable {
 
     /// Grid power with the display convention used by the menu bar: imports are positive and exports are negative.
     var gridImportPositiveKw: Double { -gridKw }
+}
+
+struct VoltageControlDetails: Decodable, Sendable {
+    let state: String
+    let action: String
+    let mode: String?
+    let desiredLimitW: Int?
+    let rawVoltageV: Double?
+    let filteredVoltageV: Double?
+    let reason: String
+    let emergency: Bool
+    let voltageSource: String
+    let estimatedVoltageSensitivityVPerKw: Double?
+    let importActuator: ActuatorDetails
+    let exportActuator: ActuatorDetails
+    let exportWriteValidated: Bool
+    let recentEvents: [VoltageControlEvent]
+    let dailySummary: VoltageControlDailySummary?
+    let recoveryNote: String?
+}
+
+struct VoltageControlDailySummary: Decodable, Sendable {
+    let lowestVoltageV: Double
+    let highestVoltageV: Double
+    let importRegulatingS: Double
+    let exportRegulatingS: Double
+    let emergencyInterventions: Int
+    let maximumImportKw: Double
+    let maximumExportKw: Double
+    let averageGridKw: Double
+}
+
+struct ActuatorDetails: Decodable, Sendable {
+    let pduAddress: Int
+    let resolutionW: Int
+    let baselineRaw: Int?
+    let lastCommandedRaw: Int?
+    let lastRequestedRaw: Int?
+    let lastWriteAt: String?
+    let writesLastHour: Int
+    let totalWriteCount: Int?
+    let lastError: String?
+
+    var commandedW: Int? { lastCommandedRaw.map { $0 * resolutionW } }
+}
+
+struct VoltageControlEvent: Decodable, Identifiable, Sendable {
+    let timestamp: String
+    let state: String
+    let action: String
+    let message: String
+    let voltageV: Double?
+    let gridKw: Double?
+    let limitW: Int?
+
+    var id: String { "\(timestamp)-\(state)-\(message)" }
 }
 
 struct InverterAlarm: Decodable, Identifiable, Sendable {
@@ -73,11 +133,35 @@ struct HistoryPoint: Identifiable, Sendable {
     let id = UUID()
     let date: Date
     let reading: InverterReading
+    let voltageControl: VoltageControlDetails?
+
+    init(date: Date, reading: InverterReading, voltageControl: VoltageControlDetails? = nil) {
+        self.date = date
+        self.reading = reading
+        self.voltageControl = voltageControl
+    }
+}
+
+struct ControlHistoryBuffer: Sendable {
+    static let retentionInterval: TimeInterval = 30 * 60
+    private(set) var points: [HistoryPoint] = []
+
+    mutating func append(_ point: HistoryPoint) {
+        points.append(point)
+        let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
+        if let firstRetained = points.firstIndex(where: { $0.date >= cutoff }), firstRetained > 0 {
+            points.removeFirst(firstRetained)
+        }
+    }
+
+    mutating func removeAll() {
+        points.removeAll(keepingCapacity: true)
+    }
 }
 
 struct HistoryBuffer: Sendable {
     static let displaySampleInterval: TimeInterval = 30
-    static let retentionInterval: TimeInterval = 6 * 60 * 60
+    static let retentionInterval: TimeInterval = 24 * 60 * 60
 
     private(set) var points: [HistoryPoint] = []
 
@@ -110,6 +194,25 @@ struct MonitorConfiguration: Equatable, Sendable {
     var inverterMaxKw: Double
     var gridMaxKw: Double
     var pvEnabled: Bool
+    var dynamicVoltageEnabled: Bool
+    var dynamicImportEnabled: Bool
+    var minimumVoltage: Double
+    var maximumVoltage: Double
+    var voltageSafetyMargin: Double
+    var voltageDeadband: Double
+    var maximumImportKw: Double
+    var maximumExportKw: Double
+    var siteExportPermissionKw: Double
+    var increaseStepW: Int
+    var reductionStepW: Int
+    var nearLimitReductionW: Int
+    var emergencyReductionW: Int
+    var controlSettleTime: Double
+    var controlActivationDelay: Double
+    var controlDeactivationDelay: Double
+    var importActivationKw: Double
+    var exportActivationKw: Double
+    var minimumWriteInterval: Double
 
     /// Read the settings the dashboard stores, or nil if no host is set yet.
     ///
@@ -123,11 +226,30 @@ struct MonitorConfiguration: Equatable, Sendable {
             host: host,
             port: defaults.object(forKey: "port") as? Int ?? 502,
             slave: defaults.object(forKey: "slave") as? Int ?? 1,
-            interval: max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 1),
+            interval: max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 2),
             slowInterval: max(1, defaults.object(forKey: "slowInterval") as? Double ?? 10),
             inverterMaxKw: max(0.1, defaults.object(forKey: "inverterMaxKw") as? Double ?? 10),
             gridMaxKw: max(0.1, defaults.object(forKey: "gridMaxKw") as? Double ?? 23),
-            pvEnabled: defaults.bool(forKey: "pvEnabled")
+            pvEnabled: defaults.bool(forKey: "pvEnabled"),
+            dynamicVoltageEnabled: defaults.bool(forKey: "dynamicVoltageEnabled"),
+            dynamicImportEnabled: defaults.object(forKey: "dynamicImportEnabled") as? Bool ?? true,
+            minimumVoltage: min(279, max(180, defaults.object(forKey: "minimumVoltage") as? Double ?? 215)),
+            maximumVoltage: min(280, max(181, defaults.object(forKey: "maximumVoltage") as? Double ?? 258)),
+            voltageSafetyMargin: max(0.1, defaults.object(forKey: "voltageSafetyMargin") as? Double ?? 1.5),
+            voltageDeadband: max(0.1, defaults.object(forKey: "voltageDeadband") as? Double ?? 0.75),
+            maximumImportKw: max(1, defaults.object(forKey: "maximumImportKw") as? Double ?? 14),
+            maximumExportKw: max(0, defaults.object(forKey: "maximumExportKw") as? Double ?? 10),
+            siteExportPermissionKw: max(0, defaults.object(forKey: "siteExportPermissionKw") as? Double ?? 10),
+            increaseStepW: max(100, defaults.object(forKey: "increaseStepW") as? Int ?? 200),
+            reductionStepW: max(100, defaults.object(forKey: "reductionStepW") as? Int ?? 500),
+            nearLimitReductionW: max(100, defaults.object(forKey: "nearLimitReductionW") as? Int ?? 1_000),
+            emergencyReductionW: max(100, defaults.object(forKey: "emergencyReductionW") as? Int ?? 2_000),
+            controlSettleTime: max(0, defaults.object(forKey: "controlSettleTime") as? Double ?? 5),
+            controlActivationDelay: max(0, defaults.object(forKey: "controlActivationDelay") as? Double ?? 5),
+            controlDeactivationDelay: max(0, defaults.object(forKey: "controlDeactivationDelay") as? Double ?? 10),
+            importActivationKw: max(0, defaults.object(forKey: "importActivationKw") as? Double ?? 1),
+            exportActivationKw: max(0, defaults.object(forKey: "exportActivationKw") as? Double ?? 0.5),
+            minimumWriteInterval: max(5, defaults.object(forKey: "minimumWriteInterval") as? Double ?? 5)
         )
     }
 }

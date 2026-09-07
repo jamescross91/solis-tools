@@ -8,8 +8,9 @@ change that looks right and is not.
 
 Two deliverables from one repository:
 
-- `solis_poll.py` — the terminal monitor. A single module: register map, Modbus
-  client, decoders, recorder, ANSI renderer, JSON stream contract and CLI.
+- `solis_poll.py` — the terminal monitor: register map, Modbus client, decoders,
+  recorder, typed actuators, ANSI renderer, JSON stream contract and CLI.
+  `voltage_control.py` contains the transport-independent controller and journal.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
   `solis-poll --stream-json` as a subprocess and renders its stdout.
 
@@ -42,10 +43,13 @@ reproduce against it belongs in `test_end_to_end.py`.
 
 ## Rules that are not negotiable
 
-**Read-only Modbus.** The monitor issues function code 4, read input registers,
-and nothing else. Writing to an inverter is out of scope and `SECURITY.md`
-treats a change that does so as a vulnerability. Do not add a write path, even
-behind a flag.
+**Controlled writes are a closed whitelist.** Telemetry uses function code 4.
+Dynamic voltage control may read holding registers 43488 and 43074 with FC03;
+only typed actuators may issue FC06 writes. Import register 43488 is enabled
+when the user explicitly enables control. Export register 43074 remains blocked
+by the installation-validation gate. Never expose an arbitrary register writer,
+write 43073/43291/43292/44100+, or widen the whitelist without a deliberate
+security-policy change and hardware evidence.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
@@ -66,6 +70,11 @@ comments, the README table and `fake_inverter.py`'s bank all use the **raw**
 zero-based address. So `_registers(33136, 16)` reads raw 33135–33150, and
 `status[10]` is raw 33145. Check any register change against all four: the call,
 its comment, the README table, and the offsets indexed out of the block.
+
+**Control addresses do not use that conversion.** The feature's holding
+registers and meter register are already raw zero-based PDU addresses. FC03/FC06
+calls use 43488 and 43074 exactly; the meter input-register helper is called
+with 1-based reference 33252 so `_registers` puts raw 33251 on the wire.
 
 **A new metric has to be added in five places** that must agree, or a reading
 appears in one output and not another:

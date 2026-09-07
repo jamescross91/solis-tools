@@ -12,4 +12,5 @@
 - [ ] Tests cover new or changed behaviour.
 - [ ] Documentation is updated where necessary.
 - [ ] No secrets, credentials or captured logs from a real network are included.
-- [ ] The Python monitor still uses read-only Modbus operations.
+- [ ] Telemetry remains read-only; control writes require explicit opt-in, stay within the typed whitelist, and preserve the export-validation gate.
+- [ ] Control changes include fake-inverter or deterministic safety/recovery tests; no test writes to physical hardware.

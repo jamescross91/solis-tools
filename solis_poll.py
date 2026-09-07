@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import ipaddress
 import json
 import logging
@@ -13,14 +14,27 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import sys
 import time
+import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn
+
+from voltage_control import (
+    ControlAction,
+    ControlDecision,
+    ControllerJournal,
+    DynamicVoltageConfiguration,
+    DynamicVoltageController,
+    GridTelemetrySample,
+    VoltageControlState,
+    configuration_dict,
+)
 
 MIN_PYTHON = (3, 10)
 VERSION = "0.4.0"
@@ -29,6 +43,7 @@ HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+EXPORT_CONTROL_VALIDATED = False
 
 # ESINV fault registers 33116-33120. Bit numbers run from the least-significant
 # bit of the first register through to the most-significant bit of the fifth.
@@ -155,6 +170,8 @@ class DeviceInfo:
     protocol_version: int
     type_definition: int | None
     profile_validated: bool
+    remote_dispatch_supported: bool | None = None
+    remote_dispatch_version: int | None = None
 
     def display(self) -> str:
         validation = "validated hybrid" if self.profile_validated else "hybrid register map"
@@ -188,6 +205,8 @@ class Reading:
     alarms: tuple[Alarm, ...] = ()
     pv_kw: float | None = None
     pv_today_kwh: float | None = None
+    meter_voltage_v: float | None = None
+    meter_sample_monotonic: float | None = None
 
 
 @dataclass
@@ -285,6 +304,7 @@ class SolisClient:
         ModbusTcpClient, self.modbus_exception = load_modbus_client()
         self.client = ModbusTcpClient(host=host, port=port, timeout=timeout)
         self.slave = slave
+        self.control_identity = f"{host.strip().lower()}:{port}/{slave}"
 
     def connect(self) -> None:
         if not self.client.connect():
@@ -311,6 +331,65 @@ class SolisClient:
             )
         return registers
 
+    def _holding_registers(self, address: int, count: int = 1) -> list[int]:
+        """Read raw zero-based holding-register PDU addresses."""
+        response = self.client.read_holding_registers(
+            address=address,
+            count=count,
+            device_id=self.slave,
+        )
+        if response.isError():
+            raise ConnectionError(f"Modbus error reading holding register {address}: {response}")
+        registers = response.registers
+        if len(registers) != count:
+            raise ConnectionError(
+                f"incomplete response at holding register {address} "
+                f"(expected {count}, received {len(registers)})"
+            )
+        return registers
+
+    def _optional_input_register(self, reference: int) -> int | None:
+        response = self.client.read_input_registers(
+            address=reference - 1,
+            count=1,
+            device_id=self.slave,
+        )
+        if response.isError():
+            if getattr(response, "exception_code", None) == 2:
+                return None
+            raise ConnectionError(f"Modbus error reading register {reference}: {response}")
+        if len(response.registers) != 1:
+            raise ConnectionError(f"incomplete response at register {reference}")
+        return response.registers[0]
+
+    def _write_control_register(self, address: int, value: int) -> None:
+        """Write only deliberately approved actuator registers with FC06."""
+        if address not in {43488, 43074}:
+            raise PermissionError(f"holding register {address} is not in the control whitelist")
+        response = self.client.write_register(
+            address=address,
+            value=value,
+            device_id=self.slave,
+        )
+        if response.isError():
+            raise ConnectionError(f"Modbus error writing holding register {address}: {response}")
+
+    def read_peak_shaving_limit_raw(self) -> int:
+        return self._holding_registers(43488)[0]
+
+    def set_peak_shaving_limit_raw(self, value: int) -> None:
+        self._write_control_register(43488, value)
+
+    def read_export_limit_raw(self) -> int:
+        return self._holding_registers(43074)[0]
+
+    def set_export_limit_raw(self, value: int, *, installation_validated: bool) -> None:
+        if not installation_validated:
+            raise PermissionError(
+                "export control is blocked until register 43074 is live-validated"
+            )
+        self._write_control_register(43074, value)
+
     @staticmethod
     def _unsigned_32(high: int, low: int) -> int:
         return (high << 16) | low
@@ -334,7 +413,9 @@ class SolisClient:
     HYBRID_INVERTER_FAMILY = 0x20
     HYBRID_DECIMAL_PREFIX = 20
 
-    def identify(self, skip_profile_check: bool = False) -> DeviceInfo:
+    def identify(
+        self, skip_profile_check: bool = False, control_diagnostics: bool = False
+    ) -> DeviceInfo:
         """Read model metadata and reject a positively identified string map."""
         metadata = self._registers(33001, 4)  # Raw PDU addresses 33000-33003.
         type_definition: int | None = None
@@ -368,6 +449,17 @@ class SolisClient:
                 "Re-run with --skip-profile-check to continue anyway."
             )
         model_code, dsp_version, hmi_version, protocol_version = metadata
+        remote_dispatch_supported: bool | None = None
+        remote_dispatch_version: int | None = None
+        if control_diagnostics:
+            try:
+                remote_dispatch = self._registers(34503, 3)  # Raw 34502-34504.
+                remote_dispatch_supported = remote_dispatch[0] == 0xAA55
+                remote_dispatch_version = remote_dispatch[1]
+            except ConnectionError:
+                # Capability diagnostics do not authorise Remote Dispatch and
+                # must not prevent the independently verified actuator running.
+                pass
         return DeviceInfo(
             model_code=model_code,
             dsp_version=dsp_version,
@@ -375,6 +467,8 @@ class SolisClient:
             protocol_version=protocol_version,
             type_definition=type_definition,
             profile_validated=profile_validated,
+            remote_dispatch_supported=remote_dispatch_supported,
+            remote_dispatch_version=remote_dispatch_version,
         )
 
     def poll_slow(self, pv_enabled: bool) -> SlowMetrics:
@@ -395,8 +489,13 @@ class SolisClient:
             pv_today_kwh=pv_today,
         )
 
-    def poll_fast(self, slow: SlowMetrics, pv_enabled: bool) -> Reading:
+    def poll_fast(
+        self, slow: SlowMetrics, pv_enabled: bool, meter_voltage_enabled: bool = False
+    ) -> Reading:
         voltage = self._registers(33074, 1)[0] / 10
+        meter_sample_monotonic = time.monotonic()
+        meter_raw = self._optional_input_register(33252) if meter_voltage_enabled else None
+        meter_voltage = meter_raw / 10 if meter_raw is not None else None
         status = self._registers(33136, 16)
         grid = self._registers(33264, 2)
 
@@ -405,6 +504,8 @@ class SolisClient:
         battery_kw = self._unsigned_32(status[14], status[15]) / 1000
         grid_kw = self._signed_32(grid[0], grid[1]) / 1000
         checked(voltage, 0, 300, "grid voltage")
+        if meter_voltage is not None:
+            checked(meter_voltage, 100, 300, "meter/PCC voltage")
         checked(state_of_charge, 0, 100, "battery state of charge")
         checked(house_load_kw, 0, 70, "house load")
         checked(battery_kw, 0, 250, "battery power")
@@ -434,7 +535,725 @@ class SolisClient:
             alarms=slow.inverter_alarms + decode_bms_faults(status[10:12]),
             pv_kw=pv_kw,
             pv_today_kwh=slow.pv_today_kwh,
+            meter_voltage_v=meter_voltage,
+            meter_sample_monotonic=meter_sample_monotonic,
         )
+
+
+class _LimitActuator:
+    """Shared mechanics for typed, whitelisted actuator implementations."""
+
+    address: int
+    resolution_w = 100
+
+    def __init__(self, minimum_w: int, maximum_w: int, minimum_write_interval_s: float):
+        self.minimum_w = minimum_w
+        self.maximum_w = maximum_w
+        self.minimum_write_interval_s = minimum_write_interval_s
+        self.baseline_raw: int | None = None
+        self.last_commanded_raw: int | None = None
+        self.last_requested_raw: int | None = None
+        self.last_write_monotonic: float | None = None
+        self.last_write_at: str | None = None
+        self.last_error: str | None = None
+        self.write_times: deque[float] = deque()
+        self.total_write_count = 0
+        self.before_write: Callable[[int], None] | None = None
+        self.after_write: Callable[[int], None] | None = None
+        self.uncertain_raw: int | None = None
+
+    def _verified_write(self, raw: int, now: float) -> None:
+        if self.before_write:
+            self.before_write(raw)
+        self.uncertain_raw = raw
+        self.last_write_monotonic = now
+        self.write_times.append(now)
+        self.total_write_count += 1
+        self._write(raw)
+        if self._read() != raw:
+            raise ConnectionError(f"write verification failed: requested {raw}")
+        if self.after_write:
+            self.after_write(raw)
+        self.last_commanded_raw = raw
+        self.uncertain_raw = None
+
+    def _reconcile(self) -> None:
+        if self.uncertain_raw is None:
+            return
+        current = self._read()
+        if current not in (self.last_commanded_raw, self.uncertain_raw):
+            raise ConnectionError("external modification during uncertain write; control suspended")
+        if self.after_write:
+            self.after_write(current)
+        self.last_commanded_raw = current
+        self.uncertain_raw = None
+
+    def _read(self) -> int:
+        raise NotImplementedError
+
+    def _write(self, value: int) -> None:
+        raise NotImplementedError
+
+    def capture(self, baseline_raw: int | None = None) -> int:
+        current = self._read()
+        self.baseline_raw = current if baseline_raw is None else baseline_raw
+        self.last_commanded_raw = current
+        return current
+
+    @property
+    def commanded_w(self) -> int:
+        return (self.last_commanded_raw or 0) * self.resolution_w
+
+    def command(self, watts: int, now: float, *, emergency: bool = False) -> tuple[bool, str]:
+        self._reconcile()
+        lower = math.ceil(self.minimum_w / self.resolution_w)
+        upper = self.maximum_w // self.resolution_w
+        if lower > upper:
+            raise ValueError("no representable register value within actuator bounds")
+        raw = min(upper, max(lower, round(watts / self.resolution_w)))
+        self.last_requested_raw = raw
+        if raw == self.last_commanded_raw:
+            return False, "unchanged command suppressed"
+        if (
+            not emergency
+            and self.last_write_monotonic is not None
+            and now - self.last_write_monotonic < self.minimum_write_interval_s
+        ):
+            return False, "write-rate guard active"
+        try:
+            self._verified_write(raw, now)
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
+        self.last_commanded_raw = raw
+        self.last_write_monotonic = now
+        self.last_write_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.last_error = None
+        self._trim_write_times(now)
+        return True, "write acknowledged"
+
+    def restore(self, now: float) -> tuple[bool, str]:
+        self._reconcile()
+        if self.baseline_raw is None or self.last_commanded_raw is None:
+            return False, "no captured baseline"
+        current = self._read()
+        if current != self.last_commanded_raw:
+            return False, "external modification detected; baseline not restored"
+        if current == self.baseline_raw:
+            return False, "baseline already present"
+        self._verified_write(self.baseline_raw, now)
+        self.last_commanded_raw = self.baseline_raw
+        self.last_write_monotonic = now
+        self.last_write_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self._trim_write_times(now)
+        return True, "captured baseline restored"
+
+    def _trim_write_times(self, now: float) -> None:
+        while self.write_times and self.write_times[0] < now - 3600:
+            self.write_times.popleft()
+
+    def diagnostics(self, now: float) -> dict[str, Any]:
+        self._trim_write_times(now)
+        return {
+            "pdu_address": self.address,
+            "resolution_w": self.resolution_w,
+            "baseline_raw": self.baseline_raw,
+            "last_commanded_raw": self.last_commanded_raw,
+            "last_requested_raw": self.last_requested_raw,
+            "last_write_at": self.last_write_at,
+            "writes_last_hour": len(self.write_times),
+            "total_write_count": self.total_write_count,
+            "last_error": self.last_error,
+        }
+
+
+class ImportLimitActuator(_LimitActuator):
+    address = 43488
+
+    def __init__(
+        self,
+        client: SolisClient,
+        minimum_w: int,
+        maximum_w: int,
+        minimum_write_interval_s: float,
+    ):
+        super().__init__(minimum_w, maximum_w, minimum_write_interval_s)
+        self.client = client
+
+    def _read(self) -> int:
+        return self.client.read_peak_shaving_limit_raw()
+
+    def _write(self, value: int) -> None:
+        self.client.set_peak_shaving_limit_raw(value)
+
+
+class ExportLimitActuator(_LimitActuator):
+    address = 43074
+
+    def __init__(
+        self,
+        client: SolisClient,
+        maximum_w: int,
+        minimum_write_interval_s: float,
+        installation_validated: bool,
+    ):
+        super().__init__(0, maximum_w, minimum_write_interval_s)
+        self.client = client
+        self.installation_validated = installation_validated
+
+    def _read(self) -> int:
+        return self.client.read_export_limit_raw()
+
+    def _write(self, value: int) -> None:
+        self.client.set_export_limit_raw(value, installation_validated=self.installation_validated)
+
+
+class VoltageHistoryStore:
+    """Minute aggregates and sparse events with bounded retention."""
+
+    def __init__(self, path: Path, retention_days: int = 30):
+        self.path = path
+        self.retention_days = retention_days
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.connection = sqlite3.connect(path)
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS voltage_minutes (
+                minute INTEGER PRIMARY KEY,
+                voltage_min REAL NOT NULL,
+                voltage_max REAL NOT NULL,
+                voltage_sum REAL NOT NULL,
+                grid_kw_min REAL NOT NULL,
+                grid_kw_max REAL NOT NULL,
+                grid_kw_sum REAL NOT NULL,
+                limit_w_min INTEGER,
+                limit_w_max INTEGER,
+                limit_w_sum INTEGER NOT NULL,
+                sample_count INTEGER NOT NULL,
+                seconds_import REAL NOT NULL,
+                seconds_export REAL NOT NULL,
+                seconds_increasing REAL NOT NULL,
+                seconds_holding REAL NOT NULL,
+                seconds_reducing REAL NOT NULL,
+                emergency_count INTEGER NOT NULL
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS voltage_events (
+                timestamp TEXT NOT NULL,
+                state TEXT NOT NULL,
+                action TEXT NOT NULL,
+                message TEXT NOT NULL,
+                voltage_v REAL,
+                grid_kw REAL,
+                limit_w INTEGER
+            )
+            """
+        )
+        self.connection.commit()
+        os.chmod(path, 0o600)
+        self.last_sample_at: float | None = None
+        self.last_retention_at = 0.0
+        self.last_flush_at: float | None = None
+
+    def record_sample(
+        self,
+        timestamp: float,
+        voltage_v: float,
+        grid_kw: float,
+        limit_w: int | None,
+        decision: ControlDecision,
+        emergency_intervention: bool = False,
+    ) -> None:
+        minute = int(timestamp // 60) * 60
+        duration = 0.0
+        if self.last_sample_at is not None:
+            duration = min(10.0, max(0.0, timestamp - self.last_sample_at))
+        self.last_sample_at = timestamp
+        import_s = duration if decision.mode == "import" else 0.0
+        export_s = duration if decision.mode == "export" else 0.0
+        increasing_s = duration if decision.action == ControlAction.INCREASING else 0.0
+        holding_s = duration if decision.action == ControlAction.HOLDING else 0.0
+        reducing_s = duration if decision.action == ControlAction.REDUCING else 0.0
+        self.connection.execute(
+            """
+            INSERT INTO voltage_minutes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(minute) DO UPDATE SET
+                voltage_min = min(voltage_min, excluded.voltage_min),
+                voltage_max = max(voltage_max, excluded.voltage_max),
+                voltage_sum = voltage_sum + excluded.voltage_sum,
+                grid_kw_min = min(grid_kw_min, excluded.grid_kw_min),
+                grid_kw_max = max(grid_kw_max, excluded.grid_kw_max),
+                grid_kw_sum = grid_kw_sum + excluded.grid_kw_sum,
+                limit_w_min = CASE WHEN excluded.limit_w_min IS NULL THEN limit_w_min
+                    WHEN limit_w_min IS NULL THEN excluded.limit_w_min
+                    ELSE min(limit_w_min, excluded.limit_w_min) END,
+                limit_w_max = CASE WHEN excluded.limit_w_max IS NULL THEN limit_w_max
+                    WHEN limit_w_max IS NULL THEN excluded.limit_w_max
+                    ELSE max(limit_w_max, excluded.limit_w_max) END,
+                limit_w_sum = limit_w_sum + excluded.limit_w_sum,
+                sample_count = sample_count + 1,
+                seconds_import = seconds_import + excluded.seconds_import,
+                seconds_export = seconds_export + excluded.seconds_export,
+                seconds_increasing = seconds_increasing + excluded.seconds_increasing,
+                seconds_holding = seconds_holding + excluded.seconds_holding,
+                seconds_reducing = seconds_reducing + excluded.seconds_reducing,
+                emergency_count = emergency_count + excluded.emergency_count
+            """,
+            (
+                minute,
+                voltage_v,
+                voltage_v,
+                voltage_v,
+                grid_kw,
+                grid_kw,
+                grid_kw,
+                limit_w,
+                limit_w,
+                limit_w or 0,
+                import_s,
+                export_s,
+                increasing_s,
+                holding_s,
+                reducing_s,
+                1 if emergency_intervention else 0,
+            ),
+        )
+        if timestamp - self.last_retention_at >= 3600:
+            cutoff = timestamp - self.retention_days * 86400
+            self.connection.execute("DELETE FROM voltage_minutes WHERE minute < ?", (cutoff,))
+            self.connection.execute(
+                "DELETE FROM voltage_events WHERE timestamp < ?",
+                (datetime.fromtimestamp(cutoff).astimezone().isoformat(),),
+            )
+            self.last_retention_at = timestamp
+        if self.last_flush_at is None or timestamp - self.last_flush_at >= 60:
+            self.connection.commit()
+            self.last_flush_at = timestamp
+
+    def record_event(
+        self,
+        timestamp: datetime,
+        decision: ControlDecision,
+        grid_kw: float | None,
+        limit_w: int | None,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        event = {
+            "timestamp": timestamp.isoformat(timespec="seconds"),
+            "state": decision.state.value,
+            "action": decision.action.value,
+            "message": message or decision.reason,
+            "voltage_v": decision.raw_voltage_v,
+            "grid_kw": grid_kw,
+            "limit_w": limit_w,
+        }
+        self.connection.execute(
+            "INSERT INTO voltage_events VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(event.values())
+        )
+        self.connection.commit()
+        return event
+
+    def daily_summary(self, now: datetime) -> dict[str, Any]:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        row = self.connection.execute(
+            """
+            SELECT min(voltage_min), max(voltage_max),
+                   sum(seconds_import), sum(seconds_export), sum(emergency_count),
+                   min(grid_kw_min), max(grid_kw_max), sum(grid_kw_sum), sum(sample_count)
+            FROM voltage_minutes WHERE minute >= ?
+            """,
+            (start,),
+        ).fetchone()
+        if row is None or row[-1] in (None, 0):
+            return {}
+        grid_average = row[7] / row[8]
+        return {
+            "lowest_voltage_v": row[0],
+            "highest_voltage_v": row[1],
+            "import_regulating_s": row[2] or 0,
+            "export_regulating_s": row[3] or 0,
+            "emergency_interventions": row[4] or 0,
+            "maximum_import_kw": max(0.0, -(row[5] or 0)),
+            "maximum_export_kw": max(0.0, row[6] or 0),
+            "average_grid_kw": grid_average,
+        }
+
+    def close(self) -> None:
+        self.connection.commit()
+        self.connection.close()
+
+
+class VoltageControlRuntime:
+    """Own controller, actuators, journal and event/history side effects."""
+
+    def __init__(
+        self,
+        client: SolisClient,
+        configuration: DynamicVoltageConfiguration,
+        minimum_write_interval_s: float,
+        journal_path: Path,
+        history_path: Path | None,
+        retention_days: int,
+    ):
+        self.configuration = configuration
+        self.controller = DynamicVoltageController(configuration)
+        self.import_actuator = ImportLimitActuator(
+            client,
+            configuration.minimum_import_w,
+            configuration.maximum_import_w,
+            minimum_write_interval_s,
+        )
+        self.export_actuator = ExportLimitActuator(
+            client,
+            configuration.effective_maximum_export_w,
+            minimum_write_interval_s,
+            configuration.export_control_validated,
+        )
+        identity = getattr(client, "control_identity", str(journal_path.resolve()))
+        self.journal = ControllerJournal(journal_path, identity)
+        self.journal.acquire_lock()
+        self.journal_value: dict[str, Any] | None = None
+        try:
+            self.history_store = (
+                VoltageHistoryStore(history_path, retention_days) if history_path else None
+            )
+        except Exception:
+            self.journal.close()
+            raise
+        self.events: deque[dict[str, Any]] = deque(maxlen=20)
+        self.initialised = False
+        self.last_event_signature: tuple[str, str, str] | None = None
+        self.recovery_note: str | None = None
+        self.summary: dict[str, Any] = {}
+        self.summary_updated_at = 0.0
+        self.active_mode: str | None = None
+        self.last_meter_monotonic: float | None = None
+
+    def _fresh(self) -> bool:
+        return (
+            self.last_meter_monotonic is not None
+            and time.monotonic() - self.last_meter_monotonic <= self.configuration.fresh_age_s
+            and not self.controller.recovering
+        )
+
+    def _active_now(self, reading: Reading, mode: str) -> bool:
+        if mode == "import":
+            return (
+                reading.grid_kw * -1_000 >= self.configuration.import_activation_w
+                and reading.battery_status == "Charging"
+            )
+        return reading.grid_kw * 1_000 >= self.configuration.export_activation_w
+
+    def initialise(self, reading: Reading, now: float) -> bool:
+        previous = self.journal.load()
+        self.journal_value = previous
+        for mode, actuator in (("import", self.import_actuator), ("export", self.export_actuator)):
+            actuator.before_write = lambda raw, mode=mode: self._prepare_write(mode, raw)
+            actuator.after_write = lambda raw, mode=mode: self._complete_write(mode, raw)
+        import_current = self.import_actuator.capture()
+        export_current = self.export_actuator.capture()
+        import_w = import_current * self.import_actuator.resolution_w
+        if not self.import_actuator.minimum_w <= import_w <= self.import_actuator.maximum_w:
+            self.controller.decision = ControlDecision(
+                VoltageControlState.UNSUPPORTED,
+                ControlAction.SUSPENDED,
+                None,
+                None,
+                reading.meter_voltage_v,
+                None,
+                f"live import limit {import_w} W is outside the configured actuator bounds",
+            )
+            return False
+        notes: list[str] = []
+        if previous and not previous.get("clean_shutdown", True):
+            for mode, actuator, current in (
+                ("import", self.import_actuator, import_current),
+                ("export", self.export_actuator, export_current),
+            ):
+                if mode == "export" and not self.configuration.export_control_validated:
+                    notes.append("export recovery left untouched because its write gate is locked")
+                    continue
+                old_last = previous.get(f"last_commanded_{mode}_raw")
+                old_baseline = previous.get(f"baseline_{mode}_raw")
+                if not isinstance(old_last, int) or not isinstance(old_baseline, int):
+                    raise ValueError("invalid baseline or command in control journal")
+                if not actuator.minimum_w <= old_baseline * 100 <= actuator.maximum_w:
+                    raise ValueError("recovered baseline exceeds configured actuator bounds")
+                pending = previous.get(f"pending_{mode}_raw")
+                if pending is not None:
+                    if current not in (old_last, pending):
+                        raise ValueError("external modification during pending command recovery")
+                    old_last = current
+                    self._complete_write(mode, current)
+                if current != old_last:
+                    notes.append(f"{mode} external modification detected after unclean shutdown")
+                    continue
+                actuator.baseline_raw = old_baseline
+                actuator.last_commanded_raw = current
+                if self._active_now(reading, mode):
+                    actuator.maximum_w = min(actuator.maximum_w, old_baseline * 100)
+                    notes.append(f"resumed conservative {mode} limit after unclean shutdown")
+                else:
+                    changed, message = actuator.restore(now)
+                    if changed:
+                        notes.append(f"restored {mode} baseline after unclean shutdown")
+                    elif message != "baseline already present":
+                        notes.append(message)
+
+        import_current = self.import_actuator.capture(self.import_actuator.baseline_raw)
+        export_current = self.export_actuator.capture(self.export_actuator.baseline_raw)
+        self.journal_value = self.journal.start(
+            str(uuid.uuid4()),
+            import_current
+            if self.import_actuator.baseline_raw is None
+            else self.import_actuator.baseline_raw,
+            export_current
+            if self.export_actuator.baseline_raw is None
+            else self.export_actuator.baseline_raw,
+            import_current,
+            export_current,
+            datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        self.recovery_note = "; ".join(notes) if notes else None
+        self.initialised = True
+        return True
+
+    def _prepare_write(self, mode: str, raw: int) -> None:
+        actuator = self.import_actuator if mode == "import" else self.export_actuator
+        if (
+            self.last_meter_monotonic is None
+            or time.monotonic() - self.last_meter_monotonic > self.configuration.stale_age_s
+        ):
+            raise ConnectionError("write deferred because telemetry has expired")
+        if raw > (actuator.last_commanded_raw or 0) and not self._fresh():
+            raise ConnectionError("power increase deferred until fresh telemetry recovers")
+        if self.journal_value is None:
+            raise RuntimeError("cannot write without a recovery journal")
+        self.journal.prepare_command(self.journal_value, mode, raw)
+
+    def _complete_write(self, mode: str, raw: int) -> None:
+        if self.journal_value is None:
+            raise RuntimeError("cannot acknowledge without a recovery journal")
+        self.journal.update_command(
+            self.journal_value, mode, raw, datetime.now().astimezone().isoformat(timespec="seconds")
+        )
+
+    def update(self, reading: Reading, now: float, sampled_at: float) -> ControlDecision:
+        age = (
+            max(0.0, time.monotonic() - reading.meter_sample_monotonic)
+            if reading.meter_sample_monotonic is not None
+            else max(0.0, time.time() - sampled_at)
+        )
+        self.last_meter_monotonic = time.monotonic() - age
+        if age > self.configuration.stale_age_s:
+            return self.controller.communication_unavailable()
+        if reading.meter_voltage_v is None:
+            self.last_meter_monotonic = None
+            self.controller.communication_unavailable()
+            self.controller.decision = ControlDecision(
+                VoltageControlState.UNSUPPORTED,
+                ControlAction.SUSPENDED,
+                None,
+                None,
+                None,
+                None,
+                "meter/PCC voltage register 33251 is unavailable",
+            )
+            return self.controller.decision
+        if not self.initialised:
+            if age > self.configuration.fresh_age_s:
+                return self.controller.communication_unavailable()
+            if not self.initialise(reading, now):
+                return self.controller.decision
+
+        decision = self.controller.evaluate(
+            GridTelemetrySample(
+                monotonic_s=now,
+                raw_voltage_v=reading.meter_voltage_v,
+                grid_kw=reading.grid_kw,
+                battery_status=reading.battery_status,
+                age_s=age,
+            ),
+            self.import_actuator.commanded_w,
+            self.export_actuator.commanded_w,
+        )
+        regulating_states = {
+            VoltageControlState.IMPORT_REGULATING,
+            VoltageControlState.EXPORT_REGULATING,
+            VoltageControlState.EMERGENCY_LOW_VOLTAGE,
+            VoltageControlState.EMERGENCY_HIGH_VOLTAGE,
+        }
+        regulated_mode = decision.mode if decision.state in regulating_states else None
+        restoration_states = {
+            VoltageControlState.STANDBY,
+            VoltageControlState.GRID_CHARGING,
+            VoltageControlState.EXPORTING,
+        }
+        if (
+            self.active_mode is not None
+            and regulated_mode != self.active_mode
+            and decision.mode != self.active_mode
+            and decision.state in restoration_states
+            and self._fresh()
+        ):
+            previous_actuator: _LimitActuator = (
+                self.import_actuator if self.active_mode == "import" else self.export_actuator
+            )
+            restored, restoration_message = previous_actuator.restore(now)
+            if restored and self.journal_value is not None:
+                self.journal.update_command(
+                    self.journal_value,
+                    self.active_mode,
+                    previous_actuator.last_commanded_raw or 0,
+                    datetime.now().astimezone().isoformat(timespec="seconds"),
+                )
+            self._event(
+                decision,
+                reading.grid_kw,
+                previous_actuator.commanded_w,
+                restoration_message,
+            )
+        if regulated_mode is not None:
+            self.active_mode = regulated_mode
+        elif (
+            decision.state
+            not in {
+                VoltageControlState.COMMUNICATION_UNAVAILABLE,
+                VoltageControlState.RECOVERING,
+            }
+            and decision.mode != self.active_mode
+        ):
+            self.active_mode = None
+        actuator: _LimitActuator | None = None
+        if decision.mode == "import":
+            actuator = self.import_actuator
+        elif decision.mode == "export":
+            actuator = self.export_actuator
+
+        changed = False
+        command_message: str | None = None
+        if actuator is not None and decision.desired_limit_w is not None:
+            old_w = actuator.commanded_w
+            changed, command_message = actuator.command(
+                decision.desired_limit_w, now, emergency=decision.emergency
+            )
+            if changed:
+                self.controller.command_applied(
+                    decision.mode or "",
+                    old_w,
+                    actuator.commanded_w,
+                    reading.meter_voltage_v,
+                    now,
+                    reading.grid_kw,
+                )
+
+        signature = (decision.state.value, decision.action.value, decision.reason)
+        if changed or signature != self.last_event_signature:
+            message = decision.reason
+            if command_message and not changed:
+                message = f"{message}; {command_message}"
+            self._event(
+                decision, reading.grid_kw, actuator.commanded_w if actuator else None, message
+            )
+            self.last_event_signature = signature
+        if self.history_store:
+            self.history_store.record_sample(
+                sampled_at,
+                reading.meter_voltage_v,
+                reading.grid_kw,
+                actuator.commanded_w if actuator else None,
+                decision,
+                emergency_intervention=changed and decision.emergency,
+            )
+        return decision
+
+    def communication_unavailable(self) -> None:
+        decision = self.controller.communication_unavailable()
+        signature = (decision.state.value, decision.action.value, decision.reason)
+        if signature != self.last_event_signature:
+            self._event(decision, None, None)
+            self.last_event_signature = signature
+
+    def _event(
+        self,
+        decision: ControlDecision,
+        grid_kw: float | None,
+        limit_w: int | None,
+        message: str | None = None,
+    ) -> None:
+        timestamp = datetime.now().astimezone()
+        if self.history_store:
+            event = self.history_store.record_event(timestamp, decision, grid_kw, limit_w, message)
+        else:
+            event = {
+                "timestamp": timestamp.isoformat(timespec="seconds"),
+                "state": decision.state.value,
+                "action": decision.action.value,
+                "message": message or decision.reason,
+                "voltage_v": decision.raw_voltage_v,
+                "grid_kw": grid_kw,
+                "limit_w": limit_w,
+            }
+        self.events.appendleft(event)
+
+    def stream_dict(self, now: float) -> dict[str, Any]:
+        decision = self.controller.decision
+        if self.history_store and now - self.summary_updated_at >= 60:
+            self.summary = self.history_store.daily_summary(datetime.now().astimezone())
+            self.summary_updated_at = now
+        result = decision.stream_dict()
+        result.update(
+            {
+                "configuration": configuration_dict(self.configuration),
+                "voltage_source": "meter/PCC input register, raw PDU 33251",
+                "estimated_voltage_sensitivity_v_per_kw": self.controller.sensitivity_v_per_kw,
+                "import_actuator": self.import_actuator.diagnostics(now),
+                "export_actuator": self.export_actuator.diagnostics(now),
+                "export_write_validated": self.configuration.export_control_validated,
+                "recent_events": list(self.events),
+                "daily_summary": self.summary or None,
+                "recovery_note": self.recovery_note,
+            }
+        )
+        return result
+
+    def shutdown(self) -> list[str]:
+        messages: list[str] = []
+        restoration_failed = False
+        if self.initialised and self._fresh():
+            now = time.monotonic()
+            for label, actuator in (
+                ("import", self.import_actuator),
+                ("export", self.export_actuator),
+            ):
+                try:
+                    changed, message = actuator.restore(now)
+                    if changed or "external modification" in message:
+                        messages.append(f"{label}: {message}")
+                except Exception as exc:
+                    restoration_failed = True
+                    messages.append(f"{label}: baseline restoration failed: {exc}")
+            if self.journal_value is not None and not restoration_failed:
+                try:
+                    self.journal.mark_clean(
+                        self.journal_value,
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                    )
+                except OSError as exc:
+                    messages.append(f"journal clean-shutdown update failed: {exc}")
+        elif self.initialised:
+            messages.append(
+                "baseline restoration deferred: telemetry is not fresh; journal retained"
+            )
+        try:
+            if self.history_store:
+                self.history_store.close()
+        finally:
+            self.journal.close()
+        return messages
 
 
 class Recorder:
@@ -1034,6 +1853,8 @@ def print_once(reading: Reading, device: DeviceInfo, health: ConnectionHealth) -
     print(f"inverter_status_code=0x{reading.inverter_status_code:04X}")
     print(f"alarms={'; '.join(alarm.display() for alarm in reading.alarms)}")
     print(f"grid_voltage_v={reading.voltage:.1f}")
+    if reading.meter_voltage_v is not None:
+        print(f"meter_voltage_v={reading.meter_voltage_v:.1f}")
     print(f"inverter_temperature_c={reading.inverter_temperature_c:.1f}")
     print(f"battery_soc_percent={reading.state_of_charge}")
     print(f"house_load_kw={reading.house_load_kw:.2f}")
@@ -1054,6 +1875,7 @@ def stream_payload(
     health: ConnectionHealth,
     error: str | None,
     timestamp: datetime,
+    voltage_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the versioned JSON contract consumed by the menu-bar app."""
     sampled_at = timestamp.isoformat(timespec="milliseconds")
@@ -1070,9 +1892,12 @@ def stream_payload(
             "protocol_version": device.protocol_version,
             "type_definition": device.type_definition,
             "profile_validated": device.profile_validated,
+            "remote_dispatch_supported": device.remote_dispatch_supported,
+            "remote_dispatch_version": device.remote_dispatch_version,
         },
         "reading": {
             "grid_voltage_v": reading.voltage,
+            "meter_voltage_v": reading.meter_voltage_v,
             "inverter_temperature_c": reading.inverter_temperature_c,
             "inverter_status_code": reading.inverter_status_code,
             "inverter_status": reading.inverter_status,
@@ -1103,6 +1928,7 @@ def stream_payload(
             "reconnects": health.reconnects,
             "rejected_samples": health.rejected_samples,
         },
+        "voltage_control": voltage_control,
         "error": error,
     }
 
@@ -1112,6 +1938,7 @@ def print_stream_json(
     device: DeviceInfo,
     health: ConnectionHealth,
     error: str | None,
+    voltage_control: dict[str, Any] | None = None,
 ) -> None:
     payload = stream_payload(
         reading,
@@ -1119,6 +1946,7 @@ def print_stream_json(
         health,
         error,
         datetime.now().astimezone(),
+        voltage_control,
     )
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
@@ -1171,6 +1999,47 @@ def parse_args() -> argparse.Namespace:
         "--pv", action="store_true", help="enable PV power, daily energy and history (default: off)"
     )
     parser.add_argument(
+        "--meter-voltage",
+        action="store_true",
+        help="read meter/PCC voltage from raw input-register PDU address 33251",
+    )
+    parser.add_argument(
+        "--dynamic-voltage-control",
+        action="store_true",
+        help="enable closed-loop voltage control and authorised import-limit writes",
+    )
+    parser.add_argument(
+        "--dynamic-import-control",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="allow import regulation when dynamic control is enabled (default: enabled)",
+    )
+    parser.add_argument(
+        "--dynamic-export-control",
+        action="store_true",
+        help="request export regulation (blocked until installation validation)",
+    )
+    parser.add_argument("--minimum-voltage", type=float, default=215.0)
+    parser.add_argument("--maximum-voltage", type=float, default=258.0)
+    parser.add_argument("--voltage-safety-margin", type=float, default=1.5)
+    parser.add_argument("--voltage-deadband", type=float, default=0.75)
+    parser.add_argument("--maximum-import-kw", type=float, default=14.0)
+    parser.add_argument("--maximum-export-kw", type=float, default=10.0)
+    parser.add_argument("--site-export-permission-kw", type=float, default=10.0)
+    parser.add_argument("--increase-step-w", type=int, default=200)
+    parser.add_argument("--reduction-step-w", type=int, default=500)
+    parser.add_argument("--near-limit-reduction-w", type=int, default=1000)
+    parser.add_argument("--emergency-reduction-w", type=int, default=2000)
+    parser.add_argument("--control-settle-time", type=float, default=5.0)
+    parser.add_argument("--control-activation-delay", type=float, default=5.0)
+    parser.add_argument("--control-deactivation-delay", type=float, default=10.0)
+    parser.add_argument("--import-activation-kw", type=float, default=1.0)
+    parser.add_argument("--export-activation-kw", type=float, default=0.5)
+    parser.add_argument("--minimum-write-interval", type=float, default=5.0)
+    parser.add_argument("--control-journal", type=Path)
+    parser.add_argument("--voltage-history-db", type=Path)
+    parser.add_argument("--voltage-history-retention-days", type=int, default=30)
+    parser.add_argument(
         "--csv", type=Path, help="append readings to CSV and restore its last six hours"
     )
     parser.add_argument(
@@ -1209,7 +2078,47 @@ def parse_args() -> argparse.Namespace:
         parser.error("poll intervals, timeout and bar maximums must be finite and above zero")
     if args.csv and args.jsonl and args.csv.resolve() == args.jsonl.resolve():
         parser.error("--csv and --jsonl must name different files")
+    if args.dynamic_export_control and not EXPORT_CONTROL_VALIDATED:
+        parser.error(
+            "--dynamic-export-control is blocked until holding register 43074 is "
+            "live-validated for this installation"
+        )
+    if args.once and args.dynamic_voltage_control:
+        parser.error("--dynamic-voltage-control cannot be combined with --once")
+    try:
+        dynamic_configuration(args).validate()
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not math.isfinite(args.minimum_write_interval) or args.minimum_write_interval < 5:
+        parser.error("--minimum-write-interval must be finite and at least 5 seconds")
+    if not 1 <= args.voltage_history_retention_days <= 365:
+        parser.error("--voltage-history-retention-days must be between 1 and 365")
     return args
+
+
+def dynamic_configuration(args: argparse.Namespace) -> DynamicVoltageConfiguration:
+    return DynamicVoltageConfiguration(
+        enabled=args.dynamic_voltage_control,
+        import_enabled=args.dynamic_import_control,
+        export_enabled=args.dynamic_export_control,
+        export_control_validated=EXPORT_CONTROL_VALIDATED,
+        minimum_voltage_v=args.minimum_voltage,
+        maximum_voltage_v=args.maximum_voltage,
+        safety_margin_v=args.voltage_safety_margin,
+        deadband_v=args.voltage_deadband,
+        maximum_import_w=round(args.maximum_import_kw * 1_000),
+        maximum_export_w=round(args.maximum_export_kw * 1_000),
+        site_export_permission_w=round(args.site_export_permission_kw * 1_000),
+        increase_step_w=args.increase_step_w,
+        reduction_step_w=args.reduction_step_w,
+        near_limit_reduction_w=args.near_limit_reduction_w,
+        emergency_reduction_w=args.emergency_reduction_w,
+        settle_time_s=args.control_settle_time,
+        activation_delay_s=args.control_activation_delay,
+        deactivation_delay_s=args.control_deactivation_delay,
+        import_activation_w=round(args.import_activation_kw * 1_000),
+        export_activation_w=round(args.export_activation_kw * 1_000),
+    )
 
 
 def _interrupt(signal_number: int, _frame: object) -> NoReturn:
@@ -1219,6 +2128,12 @@ def _interrupt(signal_number: int, _frame: object) -> NoReturn:
     whatever shell had launched the dashboard.
     """
     raise KeyboardInterrupt(signal_number)
+
+
+def default_control_state_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "SolisTools"
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "solis-tools"
 
 
 def main() -> int:
@@ -1237,13 +2152,38 @@ def main() -> int:
     health = ConnectionHealth()
     started_at = time.time()
     history: deque[tuple[float, Reading]] = deque()
+    voltage_runtime: VoltageControlRuntime | None = None
+    reconnect_attempt = 0
+    reconnect_not_before = 0.0
 
     try:
         recorder = Recorder(args.csv, args.jsonl)
         if not args.once and not args.stream_json:
             history = recorder.load_history(started_at)
         client.connect()
-        device = client.identify(args.skip_profile_check)
+        device = client.identify(
+            args.skip_profile_check,
+            control_diagnostics=args.meter_voltage or args.dynamic_voltage_control,
+        )
+        if args.dynamic_voltage_control:
+            state_dir = default_control_state_dir()
+            if (
+                args.control_journal is None
+                and (state_dir / "voltage-control-journal.json").exists()
+            ):
+                raise ValueError(
+                    "legacy unscoped control journal exists; verify its inverter and baseline "
+                    "before migrating or archiving it"
+                )
+            device_key = hashlib.sha256(client.control_identity.encode()).hexdigest()[:24]
+            voltage_runtime = VoltageControlRuntime(
+                client,
+                dynamic_configuration(args),
+                args.minimum_write_interval,
+                args.control_journal or state_dir / f"voltage-control-{device_key}.json",
+                args.voltage_history_db or state_dir / "voltage-history.sqlite3",
+                args.voltage_history_retention_days,
+            )
         if dashboard:
             print("\033[?25l", end="")
         while True:
@@ -1253,16 +2193,24 @@ def main() -> int:
                 if slow_metrics is None or now_monotonic - last_slow_poll >= args.slow_interval:
                     slow_metrics = client.poll_slow(args.pv)
                     last_slow_poll = now_monotonic
-                last_reading = client.poll_fast(slow_metrics, args.pv)
+                last_reading = client.poll_fast(
+                    slow_metrics,
+                    args.pv,
+                    meter_voltage_enabled=args.meter_voltage or args.dynamic_voltage_control,
+                )
                 sampled_at = time.time()
                 health.succeeded(sampled_at, (time.perf_counter() - poll_started) * 1000)
+                reconnect_attempt = 0
+                reconnect_not_before = 0.0
                 last_error = None
+                if voltage_runtime:
+                    voltage_runtime.update(last_reading, time.monotonic(), sampled_at)
                 history.append((sampled_at, for_history(last_reading)))
                 cutoff = sampled_at - HISTORY_SECONDS
                 while history and history[0][0] < cutoff:
                     history.popleft()
                 recorder.write(last_reading, health, datetime.now().astimezone())
-            except (UnsupportedProfileError, RecordingError):
+            except (UnsupportedProfileError, RecordingError, sqlite3.Error):
                 raise
             except ImplausibleReadingError as exc:
                 # Before the first good sample this means the register map is
@@ -1277,16 +2225,31 @@ def main() -> int:
                 last_error = f"implausible sample discarded: {exc}"
                 health.failed(rejected=True)
                 slow_metrics = None
+                if voltage_runtime:
+                    voltage_runtime.communication_unavailable()
             except (ConnectionError, OSError, client.modbus_exception) as exc:
                 last_error = str(exc)
                 health.failed()
                 slow_metrics = None
+                if voltage_runtime:
+                    voltage_runtime.communication_unavailable()
                 client.close()
-                try:
-                    client.connect()
-                    health.reconnects += 1
-                except (ConnectionError, OSError, client.modbus_exception) as reconnect_error:
-                    last_error = f"{last_error}; reconnect failed: {reconnect_error}"
+                reconnect_now = time.monotonic()
+                if reconnect_now >= reconnect_not_before:
+                    try:
+                        client.connect()
+                        health.reconnects += 1
+                    except (ConnectionError, OSError, client.modbus_exception) as reconnect_error:
+                        delay = min(60.0, 2 ** min(reconnect_attempt, 6))
+                        reconnect_attempt += 1
+                        reconnect_not_before = reconnect_now + delay
+                        last_error = (
+                            f"{last_error}; reconnect failed: {reconnect_error}; "
+                            f"retrying in {delay:g}s"
+                        )
+                else:
+                    wait = reconnect_not_before - reconnect_now
+                    last_error = f"{last_error}; reconnect backoff {wait:.1f}s"
 
             if last_reading is None:
                 # The connection and identity block already succeeded, so a
@@ -1300,7 +2263,13 @@ def main() -> int:
                 print_once(last_reading, device, health)
                 return 0
             if args.stream_json:
-                print_stream_json(last_reading, device, health, last_error)
+                print_stream_json(
+                    last_reading,
+                    device,
+                    health,
+                    last_error,
+                    voltage_runtime.stream_dict(time.monotonic()) if voltage_runtime else None,
+                )
                 time.sleep(args.interval)
                 continue
             output = render(
@@ -1312,16 +2281,24 @@ def main() -> int:
         return 130
     except UnsupportedProfileError as exc:
         fail(str(exc), 1)
-    except RecordingError as exc:
+    except (RecordingError, sqlite3.Error, ValueError, RuntimeError) as exc:
         fail(str(exc), 1)
     except (ConnectionError, OSError, client.modbus_exception) as exc:
         fail(f"cannot connect to {args.host}:{args.port}: {exc}", 1)
     finally:
-        client.close()
-        if recorder:
-            recorder.close()
-        if dashboard:
-            print("\033[?25h", end="", flush=True)
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), signal.SIG_IGN)
+        try:
+            if voltage_runtime:
+                for message in voltage_runtime.shutdown():
+                    print(f"voltage control shutdown: {message}", file=sys.stderr)
+        finally:
+            client.close()
+            if recorder:
+                recorder.close()
+            if dashboard:
+                print("\033[?25h", end="", flush=True)
 
 
 if __name__ == "__main__":

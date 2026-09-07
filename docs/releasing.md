@@ -23,6 +23,20 @@ this stays one reviewable commit.
 
 ## 2. Tag
 
+For a release containing dynamic voltage control, also run `make swift` with
+the full Xcode toolchain. A successful app build alone does not validate the
+Swift stream tests; a missing `XCTest` module is an environment limitation, not
+a passing test run. Check the packaged source includes both `solis_poll.py` and
+`voltage_control.py` and that the installed CLI can import both. The package
+script and Python module list must agree.
+
+Release notes must call out the explicit import-write opt-in, locked export
+actuator, legacy-journal migration checks, and deferred restoration on stale
+telemetry. Do not enable live control as part of an installation smoke test.
+Use the fake inverter for FC03/FC06 checks; physical response and flash endurance
+require separate installation-specific validation. Update the app and poller
+together because older pollers do not accept the new control flags.
+
 ```sh
 git checkout main && git pull
 git tag -a v0.4.0 -m "solis-tools 0.4.0"
