@@ -14,7 +14,9 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var state: State = .stopped
     @Published private(set) var latest: StreamEnvelope?
     @Published private(set) var history: [HistoryPoint] = []
+    @Published private(set) var controlHistory: [HistoryPoint] = []
     @Published private(set) var executablePath: String?
+    @Published private(set) var shutdownMessage: String?
 
     private var process: Process?
     private var outputPipe: Pipe?
@@ -27,6 +29,10 @@ final class MonitorStore: ObservableObject {
     private var lastSuccessfulPolls = 0
     private var retryAttempt = 0
     private var historyBuffer = HistoryBuffer()
+    private var controlHistoryBuffer = ControlHistoryBuffer()
+    private var lifecycleTask: Task<Void, Never>?
+    private var lifecycleRevision = 0
+    private var terminationRequested = false
 
     private static let maximumBufferedBytes = 1 << 20
     private static let maximumRetryDelay: TimeInterval = 60
@@ -83,23 +89,40 @@ final class MonitorStore: ObservableObject {
     }
 
     func start(configuration: MonitorConfiguration) {
-        stop(clearReading: false)
-        activeConfiguration = configuration
-        shouldRun = true
-        launch(configuration: configuration)
+        lifecycleRevision += 1
+        let revision = lifecycleRevision
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            guard revision == lifecycleRevision, await stopAndWaitForRestoration() else { return }
+            guard revision == lifecycleRevision else { return }
+            activeConfiguration = configuration
+            shutdownMessage = nil
+            shouldRun = true
+            launch(configuration: configuration)
+        }
     }
 
     func stop(clearReading: Bool = false) {
+        lifecycleRevision += 1
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            if await stopAndWaitForRestoration() {
+                clearStoppedProcess(clearReading: clearReading)
+            }
+        }
+    }
+
+    private func clearStoppedProcess(clearReading: Bool) {
         shouldRun = false
         retryTask?.cancel()
         retryTask = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminationHandler = nil
-        if let running = process, running.isRunning {
-            running.terminate()
-        }
         process = nil
+        terminationRequested = false
         outputPipe = nil
         errorPipe = nil
         outputBuffer.removeAll(keepingCapacity: true)
@@ -109,8 +132,48 @@ final class MonitorStore: ObservableObject {
             latest = nil
             historyBuffer.removeAll()
             history.removeAll(keepingCapacity: true)
+            controlHistoryBuffer.removeAll()
+            controlHistory.removeAll(keepingCapacity: true)
             lastSuccessfulPolls = 0
         }
+    }
+
+    func stopForApplicationTermination() async -> Bool {
+        lifecycleRevision += 1
+        await lifecycleTask?.value
+        return await stopAndWaitForRestoration()
+    }
+
+    private func stopAndWaitForRestoration() async -> Bool {
+        shouldRun = false
+        retryTask?.cancel()
+        retryTask = nil
+        if let running = process, running.isRunning {
+            // SIGTERM is handled by the poller, which ownership-checks and
+            // restores captured limits before closing its one Modbus session.
+            running.terminationHandler = nil
+            state = .degraded
+            shutdownMessage = "Stopping control and checking baseline restoration…"
+            if !terminationRequested {
+                terminationRequested = true
+                running.terminate()
+            }
+            let deadline = Date().addingTimeInterval(15)
+            while running.isRunning {
+                if Date() >= deadline {
+                    state = .failed("Restoration is still pending. The poller is retained; try stopping again.")
+                    shutdownMessage = "Restoration is still pending; the poller has not been replaced."
+                    return false
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let diagnostics = String(data: errorBuffer, encoding: .utf8) ?? ""
+            shutdownMessage = diagnostics.components(separatedBy: .newlines).last {
+                $0.contains("voltage control shutdown:") && ($0.contains("deferred") || $0.contains("failed"))
+            }
+        }
+        clearStoppedProcess(clearReading: false)
+        return true
     }
 
     private func launch(configuration: MonitorConfiguration) {
@@ -183,10 +246,42 @@ final class MonitorStore: ObservableObject {
             "--slave", String(configuration.slave),
             "--interval", String(configuration.interval),
             "--slow-interval", String(configuration.slowInterval),
+            "--meter-voltage",
             "--stream-json",
         ]
         if configuration.pvEnabled {
             result.append("--pv")
+        }
+        if configuration.dynamicVoltageEnabled {
+            let stateDirectory = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            )[0].appendingPathComponent("SolisTools", isDirectory: true)
+            result.append(contentsOf: [
+                "--dynamic-voltage-control",
+                configuration.dynamicImportEnabled
+                    ? "--dynamic-import-control" : "--no-dynamic-import-control",
+                "--minimum-voltage", String(configuration.minimumVoltage),
+                "--maximum-voltage", String(configuration.maximumVoltage),
+                "--voltage-safety-margin", String(configuration.voltageSafetyMargin),
+                "--voltage-deadband", String(configuration.voltageDeadband),
+                "--maximum-import-kw", String(configuration.maximumImportKw),
+                "--maximum-export-kw", String(configuration.maximumExportKw),
+                "--site-export-permission-kw", String(configuration.siteExportPermissionKw),
+                "--increase-step-w", String(configuration.increaseStepW),
+                "--reduction-step-w", String(configuration.reductionStepW),
+                "--near-limit-reduction-w", String(configuration.nearLimitReductionW),
+                "--emergency-reduction-w", String(configuration.emergencyReductionW),
+                "--control-settle-time", String(configuration.controlSettleTime),
+                "--control-activation-delay", String(configuration.controlActivationDelay),
+                "--control-deactivation-delay", String(configuration.controlDeactivationDelay),
+                "--import-activation-kw", String(configuration.importActivationKw),
+                "--export-activation-kw", String(configuration.exportActivationKw),
+                "--minimum-write-interval", String(configuration.minimumWriteInterval),
+                "--control-journal",
+                stateDirectory.appendingPathComponent("voltage-control-journal.json").path,
+                "--voltage-history-db",
+                stateDirectory.appendingPathComponent("voltage-history.sqlite3").path,
+            ])
         }
         return result
     }
@@ -241,7 +336,14 @@ final class MonitorStore: ObservableObject {
         if envelope.health.successfulPolls != lastSuccessfulPolls {
             lastSuccessfulPolls = envelope.health.successfulPolls
             let sampleDate = StreamDecoder.date(from: envelope.timestamp) ?? Date()
-            if historyBuffer.append(HistoryPoint(date: sampleDate, reading: envelope.reading)) {
+            let point = HistoryPoint(
+                date: sampleDate,
+                reading: envelope.reading,
+                voltageControl: envelope.voltageControl
+            )
+            controlHistoryBuffer.append(point)
+            controlHistory = controlHistoryBuffer.points
+            if historyBuffer.append(point) {
                 history = historyBuffer.points
             }
         }

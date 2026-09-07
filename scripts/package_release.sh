@@ -30,6 +30,7 @@ required=(
     "$prefix/pyproject.toml"
     "$prefix/requirements.txt"
     "$prefix/solis_poll.py"
+    "$prefix/voltage_control.py"
     "$prefix/SolisMenuBar/Package.swift"
     "$prefix/SolisMenuBar/Resources/Info.plist"
     "$prefix/SolisMenuBar/Sources/SolisMenuBar/SolisMenuBarApp.swift"

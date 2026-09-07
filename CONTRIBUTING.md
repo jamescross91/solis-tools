@@ -49,9 +49,11 @@ python3 fake_inverter.py --port 5020 --drop-after 10   # forces a reconnect
 python3 fake_inverter.py --port 5020 --corrupt-after 8 # a bad register mid-run
 ```
 
-Tests must not write to an inverter, and the monitor issues read-input-register
-requests only. `test_solis_poll.py` holds decoder tests against a fake client;
-`test_end_to_end.py` drives the real CLI against `fake_inverter.py`.
+Tests must never write to physical inverter hardware. `fake_inverter.py`
+implements input reads plus FC03/FC06 for only the two control whitelist
+addresses, allowing actuator, ownership and restoration behaviour to be tested
+locally. `test_solis_poll.py` holds decoder tests against a fake client;
+`test_end_to_end.py` drives the real CLI against the fake Modbus server.
 
 [CLAUDE.md](CLAUDE.md) records the conventions and the traps that have caused
 real bugs — register numbering, the five places a new metric has to be added,

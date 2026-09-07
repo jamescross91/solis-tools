@@ -5,7 +5,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/jamescross91/solis-tools)](https://github.com/jamescross91/solis-tools/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-`solis-poll` is a lightweight, nmon-inspired terminal monitor for a Solis hybrid inverter exposed over Modbus TCP. It uses a persistent native Python connection and only reads input registers; it never writes to the inverter.
+`solis-poll` is a lightweight, nmon-inspired terminal monitor for a Solis hybrid inverter exposed over Modbus TCP. Telemetry is read-only by default. The macOS app also provides optional Dynamic Grid Voltage Control through one narrowly whitelisted import-limit actuator.
 
 It provides:
 
@@ -13,10 +13,11 @@ It provides:
 - live voltage, temperature, battery, house-load and grid-flow gauges
 - inverter state plus decoded inverter and BMS fault indicators
 - connection latency, last-sample age, failure and reconnect counters
-- rolling six-hour line graphs, optionally restored after a restart
+- rolling line graphs, with up to 24 hours in the menu-bar app
 - optional CSV and JSONL recording
 - optional PV power, daily generation and history
 - fast power polling with slower status, temperature and energy polling
+- disabled-by-default adaptive import control around configurable PCC voltage limits
 
 PV monitoring is **off by default**, so installations without panels do not read or display PV registers.
 
@@ -56,11 +57,22 @@ Open its menu-bar item, enter the inverter data-logger IP, and select **Save and
 connect**. Select which compact house-load, battery state-of-charge, grid-flow,
 temperature and PV metrics appear in the menu bar from Settings; PV generation
 is available when PV is enabled. The popover provides battery, grid,
-temperature, voltage, alarms, connection health and selectable six-hour charts.
+temperature, voltage, alarms, connection health and selectable charts.
 Its connection settings are stored in the current macOS user's preferences. PV
 remains disabled unless enabled in the app settings.
 
-The menu-bar app retains up to six hours of chart history at a 30-second display
+Dynamic Grid Voltage Control is also off by default. Enabling it authorises the
+poller to adjust only raw holding-register PDU address `43488`. The controller
+captures the live limit, verifies each FC06 write with FC03, suppresses duplicate
+writes and ownership-checks before restoring the baseline when regulation ends,
+on disable, or on orderly quit, provided telemetry is fresh and recovered.
+Control-setting changes, including disabling control, take effect when **Save
+and connect** is selected; changing a toggle alone does not stop the running
+poller. Export control is visible but locked until this installation's
+`43074` response is validated live.
+
+The menu-bar app retains up to 24 hours of chart history at a 30-second display
+resolution, plus the last 30 minutes of voltage-control data at native polling
 resolution. This keeps its popover responsive during long-running sessions.
 Chart history is memory-only and is cleared whenever the app is quit and
 restarted, including after an update.
@@ -143,6 +155,117 @@ PV registers are not read unless `--pv` is supplied:
 
 This adds current PV generation, today's generated energy and a PV history graph. The PV bar uses `--inverter-max-kw` as its full-scale value.
 
+## Dynamic Grid Voltage Control
+
+The feature maximises grid charging power while meter/PCC voltage remains above
+the configured lower boundary. It is a closed loop, not a voltage-to-power
+lookup table. Import regulation activates only after both sustained grid import
+and the existing battery-direction signal report grid charging. Ordinary house
+import remains in standby.
+
+The default working floor is `215.0 V + 1.5 V`, with a `0.75 V` deadband.
+Increases are cautious (200 W), reductions are faster (500 W or 1 kW near the
+boundary), and raw voltage at or below 215 V immediately requests a 2 kW
+reduction. The limit is clamped to 1–14 kW. A five-second dwell blocks further
+increases after a command while raw-voltage emergency intervention remains
+available. Telemetry older than four seconds cannot cause an increase; after
+communications loss, three fresh samples are required before optimisation
+resumes.
+
+The menu-bar settings are the supported way to enable control. For development,
+the equivalent CLI entry point is:
+
+```sh
+solis-poll --host 192.168.1.57 --interval 2 \
+  --dynamic-voltage-control --dynamic-import-control \
+  --minimum-voltage 215 --maximum-voltage 258 \
+  --maximum-import-kw 14
+```
+
+Do not run a second poller or Modbus client concurrently: the tested logger
+supports only one active Modbus TCP session. The controller journal, minute
+aggregates and sparse events are private files under the platform state or
+Application Support directory. Export writes remain compile-time gated even if
+`--dynamic-export-control` is supplied.
+
+Control journals are scoped to the configured host, port and Modbus unit. Use a
+consistent endpoint spelling: aliases for the same logger are not recognised as
+the same device. An operating-system lock prevents two controllers using the
+same endpoint, including with different journal files. Other Modbus applications
+do not honour this lock. A legacy unscoped journal blocks automatic startup until
+its inverter and baseline have been checked and the file migrated or archived;
+never discard an unresolved recovery record merely to enable control.
+
+Every write first durably records a pending command. Lost replies are reconciled
+against the old and intended values before another write is allowed. After an
+unclean restart during charging, the recovered baseline caps further increases.
+Voltage age is measured from the start of the meter request using a monotonic
+clock. Shutdown with stale or recovering telemetry leaves the current limit and
+unclean journal intact for later fresh recovery rather than raising power.
+
+Stopping the menu-bar poller is asynchronous and keeps draining its output. If
+it has not exited after 15 seconds, the app reports pending restoration and
+retains the process instead of launching another one. Minute-history transactions
+are committed once per minute in steady operation, on meaningful events, and on
+close; an abrupt crash can lose the current uncommitted history, not the separately
+flushed safety journal.
+
+### Control options and defaults
+
+The CLI still defaults to a 0.5-second poll; new menu-bar settings default to
+2 seconds. The example above explicitly uses the latter. All power limits are
+quantised to 100 W; ceilings round down and the 1 kW import floor cannot be
+disabled. The export limit is distinct from site permission and neither is
+changed by capturing its baseline.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--meter-voltage` | Off in CLI | Read PCC voltage without authorising writes |
+| `--dynamic-voltage-control` | Off | Master control opt-in; also reads PCC voltage |
+| `--dynamic-import-control` / `--no-dynamic-import-control` | On beneath master | Allow/block import regulation |
+| `--dynamic-export-control` | Off, gated | Rejected while installation validation is locked |
+| `--minimum-voltage` / `--maximum-voltage` | 215 / 258 V | Raw emergency boundaries |
+| `--voltage-safety-margin` | 1.5 V | Working targets inside boundaries |
+| `--voltage-deadband` | 0.75 V | Holding band around working targets |
+| `--maximum-import-kw` | 14 kW | Normal import ceiling |
+| `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling, currently gated |
+| `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
+| `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |
+| `--near-limit-reduction-w` / `--emergency-reduction-w` | 1,000 / 2,000 W | Faster safety reductions |
+| `--control-settle-time` | 5 s | Dwell after a changed command |
+| `--control-activation-delay` / `--control-deactivation-delay` | 5 / 10 s | Operating-state debounce |
+| `--import-activation-kw` / `--export-activation-kw` | 1 / 0.5 kW | Activation thresholds; import also requires battery charging |
+| `--minimum-write-interval` | 5 s | Minimum normal-write spacing; emergency reductions bypass it |
+| `--control-journal` | Endpoint-hashed JSON in state directory | Override recovery path, not device identity |
+| `--voltage-history-db` | `voltage-history.sqlite3` in state directory | Override private SQLite history path |
+| `--voltage-history-retention-days` | 30 days | Retention for minute aggregates and control events |
+
+The state directory is `~/Library/Application Support/SolisTools` on macOS and
+`$XDG_STATE_HOME/solis-tools` (or `~/.local/state/solis-tools`) on Linux. If using
+multiple inverters, select a separate history database for each; the default
+history database, unlike recovery journals, is not endpoint-scoped.
+
+The existing CSV/JSONL recorder does not store PCC/control diagnostics. These
+remain available through the JSON stream and the separate control database;
+the app's charts are not reloaded from that database. The terminal dashboard is
+not a control-status console: use the menu-bar diagnostics or JSON stream.
+
+### Recovery and deployment precautions
+
+If restoration is deferred, retain the journal and use the same endpoint and
+journal path on a later control-enabled run with fresh telemetry. Starting a
+read-only poller does not recover an unfinished control session. A pending write
+is reconciled only if the live register matches its previous or intended value;
+unexpected values or invalid journals require investigation rather than deletion.
+
+Legacy unscoped journals cannot establish which inverter they belong to. Before
+archiving one, independently verify that its recorded baseline is restored on
+the correct inverter and no controller remains active. Do not manually assign an
+identity to an unverified journal. Inverter flash-write endurance remains
+unconfirmed: retain the write-rate guard and inspect write counts. Export control
+must remain locked until its scaling and physical response are validated for
+the installation. Local tests exercise simulated hardware only.
+
 ## Recording and restored history
 
 Append every successful sample to CSV or JSONL:
@@ -218,6 +341,7 @@ The monitor uses the Solis hybrid ESINV-33000 **input-register** map. The `mbpol
 | `33035` | `33036` | Today's PV generation, scaled by 10; only with `--pv` |
 | `33057–33058` | `33058–33059` | Total PV power, scaled by 1000; only with `--pv` |
 | `33073` | `33074` | Grid voltage, scaled by 10 |
+| `33251` | `33252` | Meter/PCC voltage, scaled by 10; with `--meter-voltage` or dynamic control |
 | `33093` | `33094` | Inverter temperature, signed and scaled by 10 |
 | `33095` | `33096` | Inverter state |
 | `33116–33120` | `33117–33121` | Inverter fault words |
@@ -228,6 +352,17 @@ The monitor uses the Solis hybrid ESINV-33000 **input-register** map. The `mbpol
 | `33149–33150` | `33150–33151` | Battery power, scaled by 1000 |
 | `33263–33264` | `33264–33265` | Grid power, signed and scaled by 1000 |
 | `35000` | `35001` | Inverter register-family definition, where supported |
+
+Control holding registers use raw PDU addresses directly; they do not use the
+input-register helper's 1-based call convention.
+
+| Raw holding PDU address | Read/write | Scale | Policy |
+| --- | --- | --- | --- |
+| `43488` | FC03 / FC06 | 100 W per unit | Typed import actuator; explicit opt-in |
+| `43074` | FC03 / FC06 | 100 W per unit | Typed export actuator; writes blocked pending live validation |
+
+No other holding-register write is permitted. In particular, Remote Dispatch,
+Flexible Export and operating-mode registers are outside the whitelist.
 
 Inverter firmware can change register availability. Check the map against the exact model before relying on the display operationally.
 
@@ -253,8 +388,9 @@ path and recording.
 
 ### Running without an inverter
 
-`fake_inverter.py` answers Modbus read-input-register requests from a register
-bank, so the monitor and the menu-bar app both run with no hardware:
+`fake_inverter.py` answers Modbus input reads and emulates FC03/FC06 for only the
+two control whitelist addresses, so control and restoration tests run with no
+hardware:
 
 ```sh
 make demo                                                # dashboard against a fake inverter

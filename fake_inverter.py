@@ -4,8 +4,9 @@
 Everything past ``SolisClient._registers`` — the poll cadence, the reconnect
 path, recording, history restore, the JSON stream the menu-bar app consumes —
 needed a real inverter on the LAN to exercise, so none of it was covered. This
-answers read-input-registers (function code 4) from a register bank, which is
-the only function the monitor ever sends.
+answers read-input-registers (function code 4) from a register bank. It also
+implements the two deliberately whitelisted control holding registers so the
+FC03/FC06 lifecycle can be exercised without inverter hardware.
 
 Run it to drive the real monitor with no hardware:
 
@@ -25,8 +26,11 @@ import struct
 import threading
 
 READ_INPUT_REGISTERS = 4
+READ_HOLDING_REGISTERS = 3
+WRITE_SINGLE_REGISTER = 6
 ILLEGAL_DATA_ADDRESS = 0x02
 MBAP_HEADER = 7
+CONTROL_HOLDING_ADDRESSES = {43074, 43488}
 
 
 def hybrid_bank() -> dict[int, int]:
@@ -50,6 +54,12 @@ def hybrid_bank() -> dict[int, int]:
         33150: 2500,  # battery power, 2.50 kW
         33263: 0xFFFF,
         33264: 0xFE0C,  # grid power, -0.5 kW (importing)
+        33251: 2425,  # meter/PCC voltage, 242.5 V
+        34502: 0xAA55,  # Remote Dispatch capability marker (diagnostic only)
+        34503: 1,  # Remote Dispatch version
+        34504: 0,
+        43074: 50,  # conventional export limit, 5.0 kW
+        43488: 140,  # peak usable grid power, 14.0 kW
     }
     for address in range(33116, 33121):  # inverter fault words
         bank[address] = 0
@@ -73,6 +83,11 @@ class FakeInverter:
         self.corrupt_until = corrupt_until
         self.drop_after = drop_after
         self.reads = 0
+        self.writes: list[tuple[int, int]] = []
+        self.connections = 0
+        self.active_connections = 0
+        self.maximum_active_connections = 0
+        self._lock = threading.Lock()
         self.stopped = False
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -102,36 +117,77 @@ class FakeInverter:
                 connection, _ = self._socket.accept()
             except OSError:
                 return
+            with self._lock:
+                self.connections += 1
+                self.active_connections += 1
+                self.maximum_active_connections = max(
+                    self.maximum_active_connections, self.active_connections
+                )
             threading.Thread(target=self._serve_client, args=(connection,), daemon=True).start()
 
     def _serve_client(self, connection: socket.socket) -> None:
-        with connection:
-            while not self.stopped:
-                header = self._receive(connection, MBAP_HEADER)
-                if header is None:
-                    return
-                _transaction, _protocol, length, unit = struct.unpack(">HHHB", header)
-                body = self._receive(connection, length - 1)
-                if body is None:
-                    return
-                function = body[0]
-                if function != READ_INPUT_REGISTERS:
-                    connection.sendall(
-                        header[:4]
-                        + struct.pack(">HBBB", 3, unit, function | 0x80, ILLEGAL_DATA_ADDRESS)
-                    )
-                    continue
-                address, quantity = struct.unpack(">HH", body[1:5])
-                self.reads += 1
-                if self.drop_after is not None and self.reads > self.drop_after:
-                    return
-                registers = [self._value(address + offset) for offset in range(quantity)]
-                payload = struct.pack(">BB", READ_INPUT_REGISTERS, quantity * 2) + b"".join(
-                    struct.pack(">H", register) for register in registers
-                )
-                connection.sendall(
-                    header[:4] + struct.pack(">HB", len(payload) + 1, unit) + payload
-                )
+        try:
+            with connection:
+                while not self.stopped:
+                    header = self._receive(connection, MBAP_HEADER)
+                    if header is None:
+                        return
+                    _transaction, _protocol, length, unit = struct.unpack(">HHHB", header)
+                    body = self._receive(connection, length - 1)
+                    if body is None:
+                        return
+                    function = body[0]
+                    address, value = struct.unpack(">HH", body[1:5])
+                    self.reads += 1
+                    if self.drop_after is not None and self.reads > self.drop_after:
+                        return
+                    if function == READ_INPUT_REGISTERS:
+                        self._send_registers(connection, header, unit, function, address, value)
+                    elif function == READ_HOLDING_REGISTERS:
+                        if any(
+                            address + offset not in CONTROL_HOLDING_ADDRESSES
+                            for offset in range(value)
+                        ):
+                            self._send_error(connection, header, unit, function)
+                        else:
+                            self._send_registers(connection, header, unit, function, address, value)
+                    elif function == WRITE_SINGLE_REGISTER:
+                        if address not in CONTROL_HOLDING_ADDRESSES:
+                            self._send_error(connection, header, unit, function)
+                        else:
+                            with self._lock:
+                                self.bank[address] = value
+                                self.writes.append((address, value))
+                            payload = body[:5]
+                            connection.sendall(
+                                header[:4] + struct.pack(">HB", len(payload) + 1, unit) + payload
+                            )
+                    else:
+                        self._send_error(connection, header, unit, function)
+        finally:
+            with self._lock:
+                self.active_connections -= 1
+
+    def _send_registers(
+        self,
+        connection: socket.socket,
+        header: bytes,
+        unit: int,
+        function: int,
+        address: int,
+        quantity: int,
+    ) -> None:
+        registers = [self._value(address + offset) for offset in range(quantity)]
+        payload = struct.pack(">BB", function, quantity * 2) + b"".join(
+            struct.pack(">H", register) for register in registers
+        )
+        connection.sendall(header[:4] + struct.pack(">HB", len(payload) + 1, unit) + payload)
+
+    @staticmethod
+    def _send_error(connection: socket.socket, header: bytes, unit: int, function: int) -> None:
+        connection.sendall(
+            header[:4] + struct.pack(">HBBB", 3, unit, function | 0x80, ILLEGAL_DATA_ADDRESS)
+        )
 
     def _value(self, address: int) -> int:
         # 33149 is the high word of battery power; 0xFFFF decodes to ~4.29e6 kW,

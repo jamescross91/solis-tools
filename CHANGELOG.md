@@ -5,6 +5,40 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Measure control freshness from meter acquisition and defer stale shutdown
+  restoration while preserving recovery state.
+- Persist pending writes before transmission, reconcile uncertain replies and
+  scope recovery journals and exclusive controller ownership to the endpoint.
+- Cap active crash recovery at the captured baseline and quantise actuator
+  limits without exceeding configured bounds.
+- Keep menu-bar shutdown responsive, drain subprocess output until exit and
+  report a pending stop instead of replacing a running controller.
+- Emit null empty-history summaries, batch telemetry commits and expire voltage
+  sensitivity estimates based on measured rather than commanded power changes.
+
+### Added
+
+- Disabled-by-default Dynamic Grid Voltage Control for grid charging, using the
+  meter/PCC voltage at raw input PDU address 33251, an EWMA, debounced operating
+  states, asymmetric steps, dwell, stale-data recovery and recent adaptive
+  voltage sensitivity.
+- A typed import actuator for raw holding PDU address 43488 using FC03/FC06,
+  verified 100 W scaling, read-back, write-rate limiting, ownership-safe baseline
+  restoration and an unclean-shutdown journal. The export actuator is present
+  but its writes remain blocked pending live validation of 43074.
+- Menu-bar settings, live control status, diagnostics, recent events and a
+  native-resolution 15-minute voltage/power chart.
+- Private SQLite minute aggregates and sparse control events with bounded
+  retention, plus fake-inverter FC03/FC06 coverage.
+
+### Security
+
+- Replaced the blanket read-only policy with a closed write whitelist. No
+  arbitrary register writer is exposed; only typed 43488 import commands are
+  enabled, and 43074 remains validation-gated.
+
 ## 0.4.0
 
 ### Fixed
