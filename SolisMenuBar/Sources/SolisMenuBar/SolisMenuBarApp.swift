@@ -3,13 +3,20 @@ import SwiftUI
 
 @main
 struct SolisMenuBarApp: App {
-    @StateObject private var monitor = MonitorStore()
+    @StateObject private var monitor: MonitorStore
 
     init() {
         if CommandLine.arguments.contains("--version") {
             print("solis-menubar 0.5.3")
             Darwin.exit(EXIT_SUCCESS)
         }
+
+        let monitor = MonitorStore()
+        _monitor = StateObject(wrappedValue: monitor)
+        // MenuBarExtra label tasks are not guaranteed to run until macOS
+        // presents the item. Start from the application lifecycle so a login
+        // launch resumes unattended monitoring without needing a click.
+        monitor.startIfConfigured()
     }
 
     var body: some Scene {
@@ -17,9 +24,8 @@ struct SolisMenuBarApp: App {
             DashboardView(monitor: monitor)
         } label: {
             // The label is the only view present before the popover is opened,
-            // so this is where polling has to begin.
+            // and observes only the throttled compact presentation.
             MenuBarMetricsView(presentation: monitor.menuPresentation)
-                .task { monitor.startIfConfigured() }
         }
         .menuBarExtraStyle(.window)
     }
