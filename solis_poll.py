@@ -39,7 +39,7 @@ from voltage_control import (
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20

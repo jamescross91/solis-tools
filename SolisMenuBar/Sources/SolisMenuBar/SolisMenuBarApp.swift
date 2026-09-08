@@ -7,7 +7,7 @@ struct SolisMenuBarApp: App {
 
     init() {
         if CommandLine.arguments.contains("--version") {
-            print("solis-menubar 0.5.2")
+            print("solis-menubar 0.5.3")
             Darwin.exit(EXIT_SUCCESS)
         }
     }
