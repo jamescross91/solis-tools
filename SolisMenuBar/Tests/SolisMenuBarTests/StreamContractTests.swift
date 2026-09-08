@@ -104,9 +104,10 @@ final class StreamContractTests: XCTestCase {
               "export_write_validated": false,
               "recent_events": [{
                 "timestamp": "2026-09-04T12:00:00+01:00",
-                "state": "Import regulating", "action": "Holding",
+                "state": "Import regulating", "action": "Reducing", "mode": "import",
                 "message": "inside deadband", "voltage_v": 216.4,
-                "grid_kw": -11.8, "limit_w": 12000
+                "grid_kw": -11.8, "limit_w": 12000,
+                "previous_limit_w": 12500, "limit_delta_w": -500
               }],
               "daily_summary": null,
               "recovery_note": null
@@ -120,7 +121,47 @@ final class StreamContractTests: XCTestCase {
         XCTAssertEqual(details.importActuator.commandedW, 12_000)
         XCTAssertFalse(details.exportWriteValidated)
         XCTAssertEqual(details.recentEvents.count, 1)
+        XCTAssertEqual(
+            details.recentEvents[0].changeLabel,
+            "Import limit 12.5 kW → 12.0 kW (-0.5 kW)"
+        )
         XCTAssertNil(details.dailySummary)
+    }
+
+    func testActivityDescriptionExplainsHeldLimit() throws {
+        let control = """
+            {
+              "state": "Export regulating", "action": "Holding", "mode": "export",
+              "desired_limit_w": 4300, "raw_voltage_v": 259.4,
+              "filtered_voltage_v": 259.2, "reason": "inside deadband",
+              "emergency": false, "voltage_source": "meter/PCC",
+              "estimated_voltage_sensitivity_v_per_kw": null,
+              "import_actuator": {
+                "pdu_address": 43488, "resolution_w": 100, "baseline_raw": 140,
+                "last_commanded_raw": 140, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_actuator": {
+                "pdu_address": 43074, "resolution_w": 100, "baseline_raw": 50,
+                "last_commanded_raw": 43, "last_requested_raw": 43,
+                "last_write_at": null, "writes_last_hour": 1, "last_error": null
+              },
+              "export_write_validated": true,
+              "recent_events": [{
+                "timestamp": "2026-09-04T12:00:00+01:00",
+                "state": "Export regulating", "action": "Holding", "mode": "export",
+                "message": "voltage is inside the export deadband", "voltage_v": 259.4,
+                "grid_kw": 4.15, "limit_w": 4300,
+                "previous_limit_w": 4300, "limit_delta_w": 0
+              }],
+              "daily_summary": null, "recovery_note": null
+            }
+            """
+        let event = try XCTUnwrap(
+            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
+        ).recentEvents[0]
+        XCTAssertEqual(event.changeLabel, "Export limit held at 4.3 kW")
+        XCTAssertFalse(event.timeLabel.isEmpty)
     }
 
     func testHistoryMetricsReadTheirOwnFields() throws {
@@ -139,24 +180,6 @@ final class StreamContractTests: XCTestCase {
             HistoryMetric.grid.value(from: reading),
             reading.gridImportPositiveKw
         )
-    }
-
-    func testConfiguredRangesFollowTheScaleSettings() {
-        XCTAssertEqual(
-            HistoryMetric.house.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
-            0...10
-        )
-        XCTAssertEqual(
-            HistoryMetric.battery.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
-            -10...10
-        )
-        XCTAssertEqual(
-            HistoryMetric.grid.configuredRange(inverterMaxKw: 10, gridMaxKw: 23),
-            -23...23
-        )
-        // Voltage and temperature have no configured full scale.
-        XCTAssertNil(HistoryMetric.voltage.configuredRange(inverterMaxKw: 10, gridMaxKw: 23))
-        XCTAssertNil(HistoryMetric.temperature.configuredRange(inverterMaxKw: 10, gridMaxKw: 23))
     }
 
     func testTimestampsParseWithAndWithoutFractionalSeconds() {
@@ -225,6 +248,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertFalse(configuration.dynamicExportEnabled)
         XCTAssertEqual(configuration.minimumVoltage, 215)
         XCTAssertEqual(configuration.maximumVoltage, 258)
+        XCTAssertEqual(configuration.importHeadroomKw, 2)
         XCTAssertEqual(configuration.minimumWriteInterval, 5)
     }
 
@@ -238,6 +262,7 @@ final class StoredConfigurationTests: XCTestCase {
                     "slowInterval": 0.0,
                     "inverterMaxKw": 0.0,
                     "gridMaxKw": -5.0,
+                    "importHeadroomKw": -1.0,
                     "pvEnabled": true,
                 ])
             )
@@ -247,6 +272,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.slowInterval, 1)
         XCTAssertEqual(configuration.inverterMaxKw, 0.1)
         XCTAssertEqual(configuration.gridMaxKw, 0.1)
+        XCTAssertEqual(configuration.importHeadroomKw, 0)
         XCTAssertTrue(configuration.pvEnabled)
     }
 }

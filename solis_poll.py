@@ -840,19 +840,36 @@ class VoltageHistoryStore:
         decision: ControlDecision,
         grid_kw: float | None,
         limit_w: int | None,
+        previous_limit_w: int | None = None,
         message: str | None = None,
     ) -> dict[str, Any]:
         event = {
             "timestamp": timestamp.isoformat(timespec="seconds"),
             "state": decision.state.value,
             "action": decision.action.value,
+            "mode": decision.mode,
             "message": message or decision.reason,
             "voltage_v": decision.raw_voltage_v,
             "grid_kw": grid_kw,
             "limit_w": limit_w,
+            "previous_limit_w": previous_limit_w,
+            "limit_delta_w": (
+                limit_w - previous_limit_w
+                if limit_w is not None and previous_limit_w is not None
+                else None
+            ),
         }
         self.connection.execute(
-            "INSERT INTO voltage_events VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(event.values())
+            "INSERT INTO voltage_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                event["timestamp"],
+                event["state"],
+                event["action"],
+                event["message"],
+                event["voltage_v"],
+                event["grid_kw"],
+                event["limit_w"],
+            ),
         )
         self.connection.commit()
         return event
@@ -1103,6 +1120,7 @@ class VoltageControlRuntime:
             previous_actuator: _LimitActuator = (
                 self.import_actuator if self.active_mode == "import" else self.export_actuator
             )
+            previous_limit_w = previous_actuator.commanded_w
             restored, restoration_message = previous_actuator.restore(now)
             if restored and self.journal_value is not None:
                 self.journal.update_command(
@@ -1115,6 +1133,7 @@ class VoltageControlRuntime:
                 decision,
                 reading.grid_kw,
                 previous_actuator.commanded_w,
+                previous_limit_w,
                 restoration_message,
             )
         if regulated_mode is not None:
@@ -1134,10 +1153,11 @@ class VoltageControlRuntime:
         elif decision.mode == "export":
             actuator = self.export_actuator
 
+        old_w = actuator.commanded_w if actuator else None
         changed = False
         command_message: str | None = None
         if actuator is not None and decision.desired_limit_w is not None:
-            old_w = actuator.commanded_w
+            assert old_w is not None
             changed, command_message = actuator.command(
                 decision.desired_limit_w, now, emergency=decision.emergency
             )
@@ -1157,7 +1177,11 @@ class VoltageControlRuntime:
             if command_message and not changed:
                 message = f"{message}; {command_message}"
             self._event(
-                decision, reading.grid_kw, actuator.commanded_w if actuator else None, message
+                decision,
+                reading.grid_kw,
+                actuator.commanded_w if actuator else None,
+                old_w,
+                message,
             )
             self.last_event_signature = signature
         if self.history_store:
@@ -1183,20 +1207,30 @@ class VoltageControlRuntime:
         decision: ControlDecision,
         grid_kw: float | None,
         limit_w: int | None,
+        previous_limit_w: int | None = None,
         message: str | None = None,
     ) -> None:
         timestamp = datetime.now().astimezone()
         if self.history_store:
-            event = self.history_store.record_event(timestamp, decision, grid_kw, limit_w, message)
+            event = self.history_store.record_event(
+                timestamp, decision, grid_kw, limit_w, previous_limit_w, message
+            )
         else:
             event = {
                 "timestamp": timestamp.isoformat(timespec="seconds"),
                 "state": decision.state.value,
                 "action": decision.action.value,
+                "mode": decision.mode,
                 "message": message or decision.reason,
                 "voltage_v": decision.raw_voltage_v,
                 "grid_kw": grid_kw,
                 "limit_w": limit_w,
+                "previous_limit_w": previous_limit_w,
+                "limit_delta_w": (
+                    limit_w - previous_limit_w
+                    if limit_w is not None and previous_limit_w is not None
+                    else None
+                ),
             }
         self.events.appendleft(event)
 
@@ -1211,6 +1245,7 @@ class VoltageControlRuntime:
                 "configuration": configuration_dict(self.configuration),
                 "voltage_source": "meter/PCC input register, raw PDU 33251",
                 "estimated_voltage_sensitivity_v_per_kw": self.controller.sensitivity_v_per_kw,
+                "import_demand_ceiling_w": self.controller.import_demand_ceiling_w,
                 "import_actuator": self.import_actuator.diagnostics(now),
                 "export_actuator": self.export_actuator.diagnostics(now),
                 "export_write_validated": self.configuration.export_control_validated,
@@ -2025,6 +2060,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voltage-safety-margin", type=float, default=1.5)
     parser.add_argument("--voltage-deadband", type=float, default=0.75)
     parser.add_argument("--maximum-import-kw", type=float, default=14.0)
+    parser.add_argument(
+        "--import-headroom-kw",
+        type=float,
+        default=2.0,
+        help="maximum unused import allowance above measured grid demand (default: 2)",
+    )
     parser.add_argument("--maximum-export-kw", type=float, default=10.0)
     parser.add_argument("--site-export-permission-kw", type=float, default=10.0)
     parser.add_argument("--increase-step-w", type=int, default=200)
@@ -2116,6 +2157,7 @@ def dynamic_configuration(
         safety_margin_v=args.voltage_safety_margin,
         deadband_v=args.voltage_deadband,
         maximum_import_w=round(args.maximum_import_kw * 1_000),
+        import_headroom_w=round(args.import_headroom_kw * 1_000),
         maximum_export_w=round(args.maximum_export_kw * 1_000),
         site_export_permission_w=round(args.site_export_permission_kw * 1_000),
         increase_step_w=args.increase_step_w,

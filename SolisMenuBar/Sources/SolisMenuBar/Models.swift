@@ -66,6 +66,7 @@ struct VoltageControlDetails: Decodable, Sendable {
     let emergency: Bool
     let voltageSource: String
     let estimatedVoltageSensitivityVPerKw: Double?
+    let importDemandCeilingW: Int?
     let importActuator: ActuatorDetails
     let exportActuator: ActuatorDetails
     let exportWriteValidated: Bool
@@ -103,12 +104,41 @@ struct VoltageControlEvent: Decodable, Identifiable, Sendable {
     let timestamp: String
     let state: String
     let action: String
+    let mode: String?
     let message: String
     let voltageV: Double?
     let gridKw: Double?
     let limitW: Int?
+    let previousLimitW: Int?
+    let limitDeltaW: Int?
 
     var id: String { "\(timestamp)-\(state)-\(message)" }
+
+    var date: Date? { StreamDecoder.date(from: timestamp) }
+
+    var timeLabel: String {
+        date?.formatted(date: .omitted, time: .standard) ?? timestamp
+    }
+
+    var changeLabel: String {
+        let subject = mode.map { "\($0.capitalized) limit" } ?? "Control limit"
+        guard let limitW else { return state }
+        let current = Self.power(limitW)
+        guard let previousLimitW else { return "\(subject) \(current)" }
+        if previousLimitW == limitW {
+            return "\(subject) held at \(current)"
+        }
+        let delta = limitDeltaW ?? limitW - previousLimitW
+        return "\(subject) \(Self.power(previousLimitW)) → \(current) (\(Self.signedPower(delta)))"
+    }
+
+    private static func power(_ watts: Int) -> String {
+        String(format: "%.1f kW", Double(watts) / 1_000)
+    }
+
+    private static func signedPower(_ watts: Int) -> String {
+        String(format: "%+.1f kW", Double(watts) / 1_000)
+    }
 }
 
 struct InverterAlarm: Decodable, Identifiable, Sendable {
@@ -202,6 +232,7 @@ struct MonitorConfiguration: Equatable, Sendable {
     var voltageSafetyMargin: Double
     var voltageDeadband: Double
     var maximumImportKw: Double
+    var importHeadroomKw: Double
     var maximumExportKw: Double
     var siteExportPermissionKw: Double
     var increaseStepW: Int
@@ -240,6 +271,9 @@ struct MonitorConfiguration: Equatable, Sendable {
             voltageSafetyMargin: max(0.1, defaults.object(forKey: "voltageSafetyMargin") as? Double ?? 1.5),
             voltageDeadband: max(0.1, defaults.object(forKey: "voltageDeadband") as? Double ?? 0.75),
             maximumImportKw: max(1, defaults.object(forKey: "maximumImportKw") as? Double ?? 14),
+            importHeadroomKw: max(
+                0, defaults.object(forKey: "importHeadroomKw") as? Double ?? 2
+            ),
             maximumExportKw: max(0, defaults.object(forKey: "maximumExportKw") as? Double ?? 10),
             siteExportPermissionKw: max(0, defaults.object(forKey: "siteExportPermissionKw") as? Double ?? 10),
             increaseStepW: max(100, defaults.object(forKey: "increaseStepW") as? Int ?? 200),
@@ -271,19 +305,6 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
         case .voltage: "V"
         case .temperature: "°C"
         default: "kW"
-        }
-    }
-
-    /// Full-scale range this metric should show, from the configured maxima.
-    ///
-    /// Swift Charts otherwise fits the axis to whatever is on screen, so a
-    /// quarter-kilowatt wobble filled the plot and looked like an event.
-    func configuredRange(inverterMaxKw: Double, gridMaxKw: Double) -> ClosedRange<Double>? {
-        switch self {
-        case .house, .pv: 0...inverterMaxKw
-        case .battery: -inverterMaxKw...inverterMaxKw
-        case .grid: -gridMaxKw...gridMaxKw
-        case .voltage, .temperature: nil
         }
     }
 

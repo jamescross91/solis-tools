@@ -25,6 +25,7 @@ struct DashboardView: View {
     @AppStorage("voltageSafetyMargin") private var voltageSafetyMargin = 1.5
     @AppStorage("voltageDeadband") private var voltageDeadband = 0.75
     @AppStorage("maximumImportKw") private var maximumImportKw = 14.0
+    @AppStorage("importHeadroomKw") private var importHeadroomKw = 2.0
     @AppStorage("maximumExportKw") private var maximumExportKw = 10.0
     @AppStorage("siteExportPermissionKw") private var siteExportPermissionKw = 10.0
     @AppStorage("increaseStepW") private var increaseStepW = 200
@@ -62,7 +63,8 @@ struct DashboardView: View {
                                 minimumVoltage: minimumVoltage,
                                 maximumVoltage: maximumVoltage,
                                 safetyMargin: voltageSafetyMargin,
-                                maximumImportKw: maximumImportKw
+                                maximumImportKw: maximumImportKw,
+                                maximumExportKw: min(maximumExportKw, siteExportPermissionKw)
                             )
                         } else {
                             Label("Dynamic voltage control disabled", systemImage: "pause.circle")
@@ -180,7 +182,10 @@ struct DashboardView: View {
         _ control: VoltageControlDetails,
         reading: InverterReading
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let activeActuator = control.mode == "export"
+            ? control.exportActuator : control.importActuator
+        let limitLabel = control.mode.map { "\($0.capitalized) limit" } ?? "Limit"
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("Dynamic voltage control", systemImage: "waveform.path.ecg.rectangle")
                     .font(.headline)
@@ -200,8 +205,8 @@ struct DashboardView: View {
                 )
                 controlValue("Grid", String(format: "%+.2f kW", reading.gridImportPositiveKw))
                 controlValue(
-                    "Limit",
-                    control.importActuator.commandedW.map {
+                    limitLabel,
+                    activeActuator.commandedW.map {
                         String(format: "%.1f kW", Double($0) / 1000)
                     } ?? "—"
                 )
@@ -215,7 +220,7 @@ struct DashboardView: View {
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
-            DisclosureGroup("Diagnostics and recent events") {
+            DisclosureGroup("Diagnostics and activity") {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(control.voltageSource)
                     if let device = monitor.latest?.device,
@@ -234,6 +239,14 @@ struct DashboardView: View {
                     if let sensitivity = control.estimatedVoltageSensitivityVPerKw {
                         Text(String(format: "Recent sensitivity: %.2f V/kW", sensitivity))
                     }
+                    if let ceiling = control.importDemandCeilingW {
+                        Text(
+                            String(
+                                format: "Import session ceiling: %.1f kW",
+                                Double(ceiling) / 1_000
+                            )
+                        )
+                    }
                     if let summary = control.dailySummary {
                         Text(
                             String(
@@ -245,9 +258,14 @@ struct DashboardView: View {
                             )
                         )
                     }
-                    ForEach(control.recentEvents.prefix(6)) { event in
-                        Text("\(event.timestamp.suffix(8)) · \(event.message)")
-                            .lineLimit(2)
+                    if !control.recentEvents.isEmpty {
+                        Divider().padding(.vertical, 2)
+                        Text("Recent activity")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
+                    ForEach(control.recentEvents.prefix(8)) { event in
+                        VoltageControlEventRow(event: event)
                     }
                 }
                 .font(.caption2)
@@ -274,8 +292,6 @@ struct DashboardView: View {
         HistoryChartView(
             history: monitor.history,
             pvEnabled: pvEnabled,
-            inverterMaxKw: inverterMaxKw,
-            gridMaxKw: gridMaxKw,
             selectedMetric: $selectedMetric
         )
     }
@@ -407,6 +423,7 @@ struct DashboardView: View {
                 numericSetting("Minimum voltage", value: $minimumVoltage, unit: "V")
                 numericSetting("Maximum voltage", value: $maximumVoltage, unit: "V")
                 numericSetting("Maximum import", value: $maximumImportKw, unit: "kW")
+                numericSetting("Import demand headroom", value: $importHeadroomKw, unit: "kW")
                 numericSetting("Maximum export", value: $maximumExportKw, unit: "kW")
                 numericSetting("Site export permission", value: $siteExportPermissionKw, unit: "kW")
             }
@@ -561,6 +578,36 @@ struct DashboardView: View {
     }
 }
 
+private struct VoltageControlEventRow: View {
+    let event: VoltageControlEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(event.timeLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Text(event.changeLabel)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.primary)
+            }
+            Text("\(event.action) · \(event.message)")
+                .foregroundStyle(event.action == "Emergency" ? .red : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                if let voltage = event.voltageV {
+                    Text(String(format: "PCC %.1f V", voltage))
+                }
+                if let grid = event.gridKw {
+                    Text(String(format: "Grid %+.2f kW", -grid))
+                }
+            }
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
 private struct VoltageControlChartView: View {
     enum TimeRange: String, CaseIterable, Identifiable {
         case fifteenMinutes = "15m"
@@ -586,7 +633,10 @@ private struct VoltageControlChartView: View {
     let maximumVoltage: Double
     let safetyMargin: Double
     let maximumImportKw: Double
+    let maximumExportKw: Double
     @State private var timeRange: TimeRange = .fifteenMinutes
+    @State private var hoveredVoltageDate: Date?
+    @State private var hoveredPowerDate: Date?
 
     private var points: [HistoryPoint] {
         let source = timeRange == .fifteenMinutes ? liveHistory : longHistory
@@ -609,7 +659,34 @@ private struct VoltageControlChartView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 190)
             }
+            HStack(spacing: 12) {
+                ChartKey(colour: .cyan, label: "PCC voltage")
+                ChartKey(colour: .orange, label: "Operating targets", dashed: true)
+                ChartKey(colour: .red, label: "Hard limits", dashed: true)
+            }
+            Text(
+                String(
+                    format: "Target band %.1f–%.1f V · hard limits %.1f–%.1f V",
+                    minimumVoltage + safetyMargin,
+                    maximumVoltage - safetyMargin,
+                    minimumVoltage,
+                    maximumVoltage
+                )
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
             Chart {
+                if let point = nearestPoint(to: hoveredVoltageDate),
+                   let voltage = point.reading.meterVoltageV {
+                    RuleMark(x: .value("Selected time", point.date))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                        .annotation(position: .top, spacing: 4) {
+                            ChartTooltip(
+                                title: point.date.formatted(date: .omitted, time: .standard),
+                                lines: [String(format: "PCC voltage %.2f V", voltage)]
+                            )
+                        }
+                }
                 ForEach(points) { point in
                     if let voltage = point.reading.meterVoltageV {
                         LineMark(
@@ -618,31 +695,77 @@ private struct VoltageControlChartView: View {
                         )
                         .foregroundStyle(.cyan)
                         .interpolationMethod(.linear)
+                        if point.id == points.last?.id {
+                            PointMark(
+                                x: .value("Latest time", point.date),
+                                y: .value("Latest PCC voltage", voltage)
+                            )
+                            .foregroundStyle(.cyan)
+                            .annotation(position: .topTrailing) {
+                                Text(String(format: "Now %.1f V", voltage))
+                                    .font(.caption2.weight(.medium))
+                            }
+                        }
                     }
                 }
-                RuleMark(y: .value("Minimum", minimumVoltage)).foregroundStyle(.red)
+                RuleMark(y: .value("Minimum", minimumVoltage))
+                    .foregroundStyle(.red)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 RuleMark(y: .value("Import target", minimumVoltage + safetyMargin))
                     .foregroundStyle(.orange.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 RuleMark(y: .value("Export target", maximumVoltage - safetyMargin))
                     .foregroundStyle(.orange.opacity(0.7))
-                RuleMark(y: .value("Maximum", maximumVoltage)).foregroundStyle(.red)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                RuleMark(y: .value("Maximum", maximumVoltage))
+                    .foregroundStyle(.red)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
+            .chartYScale(domain: voltageDomain)
             .chartYAxisLabel("V")
-            .frame(height: 120)
+            .chartXAxis { timeAxis }
+            .chartOverlay { proxy in
+                hoverOverlay(proxy: proxy, selection: $hoveredVoltageDate)
+            }
+            .frame(height: 145)
 
+            HStack(spacing: 12) {
+                ChartKey(colour: .orange, label: "Grid flow")
+                ChartKey(colour: .blue, label: "Active limit")
+                ChartKey(colour: .red, label: "Emergency", point: true)
+            }
+            Text(
+                String(
+                    format: "Positive = import · negative = export · configured bounds +%.1f/−%.1f kW",
+                    maximumImportKw,
+                    maximumExportKw
+                )
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
             Chart {
+                if let point = nearestPoint(to: hoveredPowerDate) {
+                    RuleMark(x: .value("Selected time", point.date))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                        .annotation(position: .top, spacing: 4) {
+                            ChartTooltip(
+                                title: point.date.formatted(date: .omitted, time: .standard),
+                                lines: powerTooltipLines(point)
+                            )
+                        }
+                }
                 ForEach(points) { point in
                     LineMark(
                         x: .value("Time", point.date),
-                        y: .value("Grid import", point.reading.gridImportPositiveKw),
-                        series: .value("Series", "Grid import")
+                        y: .value("Grid flow", point.reading.gridImportPositiveKw),
+                        series: .value("Series", "Grid flow")
                     )
                     .foregroundStyle(.orange)
-                    if let watts = point.voltageControl?.importActuator.commandedW {
+                    if let limit = signedControlLimit(point) {
                         LineMark(
                             x: .value("Time", point.date),
-                            y: .value("Commanded limit", Double(watts) / 1000),
-                            series: .value("Series", "Commanded limit")
+                            y: .value("Active limit", limit),
+                            series: .value("Series", "Active limit")
                         )
                         .foregroundStyle(.blue)
                     }
@@ -668,25 +791,190 @@ private struct VoltageControlChartView: View {
                         .foregroundStyle(.orange)
                         .symbolSize(18)
                     }
+                    if point.id == points.last?.id {
+                        PointMark(
+                            x: .value("Latest time", point.date),
+                            y: .value("Latest grid flow", point.reading.gridImportPositiveKw)
+                        )
+                        .foregroundStyle(.orange)
+                        .annotation(position: .topTrailing) {
+                            Text(
+                                String(
+                                    format: "Now %+.2f kW",
+                                    point.reading.gridImportPositiveKw
+                                )
+                            )
+                            .font(.caption2.weight(.medium))
+                        }
+                    }
                 }
-                RuleMark(y: .value("Maximum import", maximumImportKw))
-                    .foregroundStyle(.secondary.opacity(0.6))
+                RuleMark(y: .value("Zero", 0))
+                    .foregroundStyle(.secondary.opacity(0.35))
             }
+            .chartYScale(domain: powerDomain)
             .chartYAxisLabel("kW")
-            .frame(height: 120)
+            .chartXAxis { timeAxis }
+            .chartOverlay { proxy in
+                hoverOverlay(proxy: proxy, selection: $hoveredPowerDate)
+            }
+            .frame(height: 145)
         }
+    }
+
+    @AxisContentBuilder
+    private var timeAxis: some AxisContent {
+        AxisMarks(values: .automatic(desiredCount: 4)) {
+            AxisGridLine()
+            AxisValueLabel(format: timeRange == .oneDay ? .dateTime.hour() : .dateTime.hour().minute())
+        }
+    }
+
+    private var voltageDomain: ClosedRange<Double> {
+        let values = points.compactMap(\.reading.meterVoltageV)
+        guard let low = values.min(), let high = values.max() else {
+            return minimumVoltage...maximumVoltage
+        }
+        let middle = (minimumVoltage + maximumVoltage) / 2
+        var anchors = values
+        if low >= middle {
+            anchors += [maximumVoltage - safetyMargin, maximumVoltage]
+        } else if high <= middle {
+            anchors += [minimumVoltage, minimumVoltage + safetyMargin]
+        } else {
+            anchors += [minimumVoltage, maximumVoltage]
+        }
+        return paddedDomain(anchors, minimumPadding: 0.4, includeZero: false)
+    }
+
+    private var powerDomain: ClosedRange<Double> {
+        var values = points.map { $0.reading.gridImportPositiveKw }
+        values += points.compactMap(signedControlLimit)
+        return paddedDomain(values, minimumPadding: 0.25, includeZero: true)
+    }
+
+    private func signedControlLimit(_ point: HistoryPoint) -> Double? {
+        guard let control = point.voltageControl else { return nil }
+        let mode = control.mode ?? {
+            if control.state.contains("Export") { return "export" }
+            if control.state.contains("Import") || control.state.contains("charging") {
+                return "import"
+            }
+            return nil
+        }()
+        if mode == "export", let watts = control.exportActuator.commandedW {
+            return -Double(watts) / 1_000
+        }
+        if mode == "import", let watts = control.importActuator.commandedW {
+            return Double(watts) / 1_000
+        }
+        return nil
+    }
+
+    private func nearestPoint(to date: Date?) -> HistoryPoint? {
+        guard let date else { return nil }
+        return points.min {
+            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+        }
+    }
+
+    private func powerTooltipLines(_ point: HistoryPoint) -> [String] {
+        var lines = [String(format: "Grid flow %+.2f kW", point.reading.gridImportPositiveKw)]
+        if let limit = signedControlLimit(point) {
+            lines.append(String(format: "Active limit %+.2f kW", limit))
+        }
+        if let control = point.voltageControl {
+            lines.append("\(control.action) · \(control.reason)")
+        }
+        return lines
+    }
+
+    private func hoverOverlay(proxy: ChartProxy, selection: Binding<Date?>) -> some View {
+        GeometryReader { geometry in
+            Rectangle()
+                .fill(.clear)
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case let .active(location):
+                        let frame = geometry[proxy.plotAreaFrame]
+                        guard frame.contains(location) else {
+                            selection.wrappedValue = nil
+                            return
+                        }
+                        selection.wrappedValue = proxy.value(atX: location.x - frame.origin.x)
+                    case .ended:
+                        selection.wrappedValue = nil
+                    }
+                }
+        }
+    }
+
+    private func paddedDomain(
+        _ values: [Double], minimumPadding: Double, includeZero: Bool
+    ) -> ClosedRange<Double> {
+        var low = values.min() ?? 0
+        var high = values.max() ?? 1
+        if includeZero {
+            low = min(low, 0)
+            high = max(high, 0)
+        }
+        let padding = max(minimumPadding, (high - low) * 0.12)
+        return (low - padding)...(high + padding)
+    }
+}
+
+private struct ChartKey: View {
+    let colour: Color
+    let label: String
+    var dashed = false
+    var point = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if point {
+                Circle().fill(colour).frame(width: 7, height: 7)
+            } else {
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: 4))
+                    path.addLine(to: CGPoint(x: 14, y: 4))
+                }
+                .stroke(
+                    colour,
+                    style: StrokeStyle(lineWidth: 2, dash: dashed ? [3, 2] : [])
+                )
+                .frame(width: 14, height: 8)
+            }
+            Text(label)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
+}
+
+private struct ChartTooltip: View {
+    let title: String
+    let lines: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).fontWeight(.semibold).monospacedDigit()
+            ForEach(lines, id: \.self) { Text($0) }
+        }
+        .font(.caption2)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 }
 
 private struct HistoryChartView: View {
     let history: [HistoryPoint]
     let pvEnabled: Bool
-    let inverterMaxKw: Double
-    let gridMaxKw: Double
     @Binding var selectedMetric: HistoryMetric
+    @State private var hoveredDate: Date?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let latestID = chartPoints.last?.id
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("History")
                     .font(.headline)
@@ -711,13 +999,48 @@ private struct HistoryChartView: View {
                 )
                 .frame(height: 145)
             } else {
-                Chart(chartPoints) { point in
-                    LineMark(
-                        x: .value("Time", point.date),
-                        y: .value(metric.unit, point.value)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(metricColour)
+                HStack {
+                    ChartKey(colour: metricColour, label: metric.rawValue)
+                    Spacer()
+                    Text(historyRangeLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Chart {
+                    if let point = nearestPoint(to: hoveredDate) {
+                        RuleMark(x: .value("Selected time", point.date))
+                            .foregroundStyle(.secondary.opacity(0.5))
+                            .annotation(position: .top, spacing: 4) {
+                                ChartTooltip(
+                                    title: point.date.formatted(
+                                        date: .omitted, time: .standard
+                                    ),
+                                    lines: [
+                                        String(format: "%.2f %@", point.value, metric.unit)
+                                    ]
+                                )
+                            }
+                    }
+                    ForEach(chartPoints) { point in
+                        LineMark(
+                            x: .value("Time", point.date),
+                            y: .value(metric.unit, point.value)
+                        )
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(metricColour)
+                        if point.id == latestID {
+                            PointMark(
+                                x: .value("Latest time", point.date),
+                                y: .value("Latest value", point.value)
+                            )
+                            .foregroundStyle(metricColour)
+                            .annotation(position: .topTrailing) {
+                                Text(String(format: "%.1f %@", point.value, metric.unit))
+                                    .font(.caption2.weight(.medium))
+                            }
+                        }
+                    }
                     RuleMark(y: .value("Zero", 0))
                         .foregroundStyle(.secondary.opacity(0.25))
                 }
@@ -727,6 +1050,28 @@ private struct HistoryChartView: View {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine()
                         AxisValueLabel(format: axisTimeFormat)
+                    }
+                }
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case let .active(location):
+                                    let frame = geometry[proxy.plotAreaFrame]
+                                    guard frame.contains(location) else {
+                                        hoveredDate = nil
+                                        return
+                                    }
+                                    hoveredDate = proxy.value(
+                                        atX: location.x - frame.origin.x
+                                    )
+                                case .ended:
+                                    hoveredDate = nil
+                                }
+                            }
                     }
                 }
                 .frame(height: 155)
@@ -763,19 +1108,43 @@ private struct HistoryChartView: View {
         }
     }
 
-    /// The configured full scale, widened when a reading exceeds it so a spike is
-    /// never clipped out of view.
+    private func nearestPoint(to date: Date?) -> ChartPoint? {
+        guard let date else { return nil }
+        return chartPoints.min {
+            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+        }
+    }
+
+    /// Fit the observed values with useful headroom. Voltage and temperature
+    /// must not be pulled down to zero, while power keeps zero visible so its
+    /// direction remains obvious.
     private var yDomain: ClosedRange<Double> {
         let values = chartPoints.map(\.value)
-        let low = min(values.min() ?? 0, 0)
-        let high = max(values.max() ?? 1, low + 0.1)
-        guard let configured = metric.configuredRange(
-            inverterMaxKw: inverterMaxKw,
-            gridMaxKw: gridMaxKw
-        ) else {
-            return low...high
+        guard var low = values.min(), var high = values.max() else { return 0...1 }
+        switch metric {
+        case .house, .pv:
+            low = 0
+        case .battery, .grid:
+            low = min(low, 0)
+            high = max(high, 0)
+        case .voltage, .temperature:
+            break
         }
-        return min(configured.lowerBound, low)...max(configured.upperBound, high)
+        let minimumPadding = metric == .voltage ? 0.5 : metric == .temperature ? 1 : 0.25
+        let padding = max(minimumPadding, (high - low) * 0.12)
+        let lower = metric == .house || metric == .pv ? 0 : low - padding
+        return lower...max(high + padding, lower + minimumPadding * 2)
+    }
+
+    private var historyRangeLabel: String {
+        let values = chartPoints.map(\.value)
+        guard let low = values.min(), let high = values.max(), let latest = values.last else {
+            return ""
+        }
+        return String(
+            format: "%.1f–%.1f %@ · now %.1f %@",
+            low, high, metric.unit, latest, metric.unit
+        )
     }
 
     /// Hours and minutes repeat every tick until the window is minutes wide, so

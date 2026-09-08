@@ -185,7 +185,8 @@ reduction. The limit is clamped to 1–14 kW. A five-second dwell blocks further
 increases after a command while raw-voltage emergency intervention remains
 available. Telemetry older than four seconds cannot cause an increase; after
 communications loss, three fresh samples are required before optimisation
-resumes.
+resumes. Routine increases also stop at the peak demand observed during the
+activation delay plus 2 kW of headroom.
 
 The menu-bar settings are the supported way to enable control. For development,
 the equivalent CLI entry point is:
@@ -194,7 +195,7 @@ the equivalent CLI entry point is:
 solis-poll --host 192.168.1.57 --interval 2 \
   --dynamic-voltage-control --dynamic-import-control \
   --minimum-voltage 215 --maximum-voltage 258 \
-  --maximum-import-kw 14
+  --maximum-import-kw 14 --import-headroom-kw 2
 ```
 
 Do not run a second poller or Modbus client concurrently: the tested logger
@@ -216,6 +217,9 @@ never discard an unresolved recovery record merely to enable control.
 Every write first durably records a pending command. Lost replies are reconciled
 against the old and intended values before another write is allowed. After an
 unclean restart during charging, the recovered baseline caps further increases.
+Each import-control session also latches a demand ceiling from its first measured
+grid peak plus the configured headroom. Later demand responses cannot ratchet
+that ceiling upwards; the latch resets only after the import condition ends.
 Voltage age is measured from the start of the meter request using a monotonic
 clock. Shutdown with stale or recovering telemetry leaves the current limit and
 unclean journal intact for later fresh recovery rather than raising power.
@@ -226,6 +230,12 @@ retains the process instead of launching another one. Minute-history transaction
 are committed once per minute in steady operation, on meaningful events, and on
 close; an abrupt crash can lose the current uncommitted history, not the separately
 flushed safety journal.
+
+The control charts identify each series, focus their scales on the relevant
+operating range, label targets and safety boundaries, and show the exact local
+time and measurements under the pointer. The activity list records when a limit
+changed, its previous and new values, the signed difference, the measured PCC
+voltage and grid flow, and the controller's reason.
 
 ### Control options and defaults
 
@@ -246,6 +256,7 @@ changed by capturing its baseline.
 | `--voltage-safety-margin` | 1.5 V | Working targets inside boundaries |
 | `--voltage-deadband` | 0.75 V | Holding band around working targets |
 | `--maximum-import-kw` | 14 kW | Normal import ceiling |
+| `--import-headroom-kw` | 2 kW | Maximum unused import allowance above demand measured when an import session begins |
 | `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling |
 | `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
 | `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |

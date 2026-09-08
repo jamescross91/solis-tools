@@ -177,8 +177,9 @@ class ControllerTests(unittest.TestCase):
         voltage: float,
         now: float = 0,
     ):
-        controller.evaluate(sample(now, voltage), current_w, 5_000)
-        return controller.evaluate(sample(now, voltage), current_w, 5_000)
+        importing = sample(now, voltage, grid_kw=-current_w / 1_000)
+        controller.evaluate(importing, current_w, 5_000)
+        return controller.evaluate(importing, current_w, 5_000)
 
     def test_import_increases_holds_reduces_and_never_exceeds_maximum(self):
         controller = self.controller()
@@ -197,6 +198,41 @@ class ControllerTests(unittest.TestCase):
         controller = self.controller(maximum_import_w=14_000)
         decision = self.activated_decision(controller, 14_000, 230)
         self.assertEqual(decision.desired_limit_w, 14_000)
+
+    def test_import_allowance_is_latched_to_session_demand_plus_headroom(self):
+        controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
+        initial = sample(0, voltage=220, grid_kw=-12)
+        controller.evaluate(initial, 10_000, 5_000)
+        increase = controller.evaluate(initial, 10_000, 5_000)
+        self.assertEqual(increase.desired_limit_w, 10_200)
+
+        # Demand following the released allowance must not ratchet the session
+        # ceiling beyond the 14 kW established from the initial 12 kW peak.
+        at_ceiling = controller.evaluate(sample(10, voltage=220, grid_kw=-14), 14_000, 5_000)
+        self.assertEqual(at_ceiling.action, ControlAction.HOLDING)
+        self.assertEqual(at_ceiling.desired_limit_w, 14_000)
+        self.assertIn("2 kW demand headroom", at_ceiling.reason)
+
+    def test_import_ceiling_uses_peak_during_activation_delay(self):
+        controller = self.controller(
+            maximum_import_w=22_000,
+            import_headroom_w=2_000,
+            activation_delay_s=5,
+        )
+        controller.evaluate(sample(0, voltage=220, grid_kw=-12), 10_000, 5_000)
+        controller.evaluate(sample(3, voltage=220, grid_kw=-10), 10_000, 5_000)
+        decision = controller.evaluate(sample(5, voltage=220, grid_kw=-11), 14_000, 5_000)
+        self.assertEqual(decision.action, ControlAction.HOLDING)
+        self.assertEqual(decision.desired_limit_w, 14_000)
+
+    def test_unused_import_allowance_is_trimmed_to_latched_ceiling(self):
+        controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
+        reported = sample(0, voltage=220, grid_kw=-12)
+        controller.evaluate(reported, 22_000, 5_000)
+        decision = controller.evaluate(reported, 22_000, 5_000)
+        self.assertEqual(decision.action, ControlAction.REDUCING)
+        self.assertEqual(decision.desired_limit_w, 14_000)
+        self.assertIn("above measured import", decision.reason)
 
     def test_raw_boundary_causes_immediate_emergency_reduction(self):
         controller = DynamicVoltageController(DynamicVoltageConfiguration(enabled=True))
@@ -494,8 +530,12 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             decision = controller.decision
             store.record_sample(60, 220, -2, 10_000, decision)
             store.record_sample(62, 218, -3, 9_500, decision)
-            store.record_event(
-                __import__("datetime").datetime.now().astimezone(), decision, -3, 9_500
+            event = store.record_event(
+                __import__("datetime").datetime.now().astimezone(),
+                decision,
+                -3,
+                9_500,
+                10_000,
             )
             store.close()
             database = sqlite3.connect(path)
@@ -506,6 +546,8 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             database.close()
             self.assertEqual(row, (218.0, 220.0, 2))
             self.assertEqual(events, (1,))
+            self.assertEqual(event["previous_limit_w"], 10_000)
+            self.assertEqual(event["limit_delta_w"], -500)
 
     def test_crash_journal_round_trips_and_marks_clean(self):
         with tempfile.TemporaryDirectory() as directory:

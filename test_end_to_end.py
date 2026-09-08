@@ -164,11 +164,16 @@ class StreamContractTests(unittest.TestCase):
                 maximum_connections = inverter.maximum_active_connections
 
         self.assertGreaterEqual(len(samples), 8)
-        self.assertIn((43488, 102), writes)
+        self.assertIn((43488, 40), writes)
         self.assertEqual(writes[-1], (43488, 100))
         self.assertEqual(final_import_limit, 100)
         self.assertEqual(maximum_connections, 1)
         self.assertEqual(samples[-1]["voltage_control"]["voltage_source"].split()[-1], "33251")
+        activity = samples[-1]["voltage_control"]["recent_events"]
+        trimmed = next(event for event in activity if event["limit_delta_w"] == -6_000)
+        self.assertEqual(trimmed["previous_limit_w"], 10_000)
+        self.assertEqual(trimmed["limit_delta_w"], -6_000)
+        self.assertIn("2 kW above measured import", trimmed["message"])
         self.assertTrue(samples[-1]["device"]["remote_dispatch_supported"])
         self.assertEqual(samples[-1]["device"]["remote_dispatch_version"], 1)
 

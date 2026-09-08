@@ -132,6 +132,12 @@ one-minute aggregates and sparse state/change events in a private SQLite file,
 with 30-day retention by default. A small private JSON journal records baseline
 ownership and unclean-shutdown recovery state.
 
+Chart axes fit observed values with meaningful headroom rather than forcing
+voltage and temperature through zero. Voltage-control charts select the relevant
+high- or low-voltage operating band, distinguish signed grid flow from the active
+actuator limit, and expose exact samples on pointer hover. Activity events carry
+the previous, current and delta limit so the UI can state what changed and why.
+
 Export validation is a separate endpoint-hashed JSON record in the same private
 state directory. It is installation evidence, not recovery state: changing the
 endpoint selects a different record, while `--export-control-validation` may
@@ -146,6 +152,9 @@ The endpoint-scoped journal uses write-ahead pending commands, file and director
 fsync, atomic replacement and a process-lifetime endpoint lock. Readback resolves
 an interrupted write to either the prior or intended value; other values suspend
 recovery. Recovered active-session baselines constrain the actuator maximum.
+Import regulation also latches a per-session ceiling at initial measured grid
+demand plus configured headroom. It may trim an already excessive allowance
+immediately and does not move the latch as released demand changes.
 
 SQLite telemetry transactions are batched for 60 seconds, with event and close
 flushes. Safety-journal writes are independent and durable before transmission.

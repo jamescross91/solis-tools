@@ -5,6 +5,23 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Cap each import-regulation session at its initial measured grid demand plus a
+  configurable 2 kW headroom, preventing unused grid peak-shaving allowance
+  ratcheting towards the hard maximum. Excess allowance is trimmed without
+  weakening voltage-triggered reductions.
+- Plot the active export actuator with the correct sign instead of always
+  showing the import actuator, and use data-driven scales that no longer flatten
+  voltage and temperature against zero.
+
+### Changed
+
+- Expand voltage-control activity with local times, previous and new limits,
+  signed deltas, measurements and reasons.
+- Add chart legends, operating-band annotations, latest-value labels and pointer
+  hover tooltips with exact timestamps and measurements.
+
 ## 0.5.2
 
 ### Changed
