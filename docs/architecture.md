@@ -152,9 +152,9 @@ The endpoint-scoped journal uses write-ahead pending commands, file and director
 fsync, atomic replacement and a process-lifetime endpoint lock. Readback resolves
 an interrupted write to either the prior or intended value; other values suspend
 recovery. Recovered active-session baselines constrain the actuator maximum.
-Import regulation also latches a per-session ceiling at initial measured grid
-demand plus configured headroom. It may trim an already excessive allowance
-immediately and does not move the latch as released demand changes.
+Import regulation starts a per-session ceiling at initial measured grid demand
+plus configured headroom. It trims excessive allowance immediately and follows
+measured demand downwards, but cannot ratchet upwards as released demand changes.
 
 SQLite telemetry transactions are batched for 60 seconds, with event and close
 flushes. Safety-journal writes are independent and durable before transmission.

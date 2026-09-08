@@ -217,9 +217,10 @@ never discard an unresolved recovery record merely to enable control.
 Every write first durably records a pending command. Lost replies are reconciled
 against the old and intended values before another write is allowed. After an
 unclean restart during charging, the recovered baseline caps further increases.
-Each import-control session also latches a demand ceiling from its first measured
-grid peak plus the configured headroom. Later demand responses cannot ratchet
-that ceiling upwards; the latch resets only after the import condition ends.
+Each import-control session starts with a demand ceiling from its first measured
+grid peak plus the configured headroom. The ceiling follows measured demand
+downwards during the session but cannot ratchet upwards as released charging
+demand responds; it resets only after the import condition ends.
 Voltage age is measured from the start of the meter request using a monotonic
 clock. Shutdown with stale or recovering telemetry leaves the current limit and
 unclean journal intact for later fresh recovery rather than raising power.
@@ -256,7 +257,7 @@ changed by capturing its baseline.
 | `--voltage-safety-margin` | 1.5 V | Working targets inside boundaries |
 | `--voltage-deadband` | 0.75 V | Holding band around working targets |
 | `--maximum-import-kw` | 14 kW | Normal import ceiling |
-| `--import-headroom-kw` | 2 kW | Maximum unused import allowance above demand measured when an import session begins |
+| `--import-headroom-kw` | 2 kW | Unused import allowance above measured demand; the session ceiling may follow demand down but not up |
 | `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling |
 | `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
 | `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |

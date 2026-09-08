@@ -9,8 +9,8 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 - Cap each import-regulation session at its initial measured grid demand plus a
   configurable 2 kW headroom, preventing unused grid peak-shaving allowance
-  ratcheting towards the hard maximum. Excess allowance is trimmed without
-  weakening voltage-triggered reductions.
+  ratcheting towards the hard maximum. The ceiling follows falling demand and
+  trims excess allowance without weakening voltage-triggered reductions.
 - Plot the active export actuator with the correct sign instead of always
   showing the import actuator, and use data-driven scales that no longer flatten
   voltage and temperature against zero.

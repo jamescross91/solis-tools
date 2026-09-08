@@ -199,7 +199,7 @@ class ControllerTests(unittest.TestCase):
         decision = self.activated_decision(controller, 14_000, 230)
         self.assertEqual(decision.desired_limit_w, 14_000)
 
-    def test_import_allowance_is_latched_to_session_demand_plus_headroom(self):
+    def test_import_allowance_cannot_rise_above_initial_demand_plus_headroom(self):
         controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
         initial = sample(0, voltage=220, grid_kw=-12)
         controller.evaluate(initial, 10_000, 5_000)
@@ -225,7 +225,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(decision.action, ControlAction.HOLDING)
         self.assertEqual(decision.desired_limit_w, 14_000)
 
-    def test_unused_import_allowance_is_trimmed_to_latched_ceiling(self):
+    def test_unused_import_allowance_is_trimmed_to_session_ceiling(self):
         controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
         reported = sample(0, voltage=220, grid_kw=-12)
         controller.evaluate(reported, 22_000, 5_000)
@@ -233,6 +233,24 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(decision.action, ControlAction.REDUCING)
         self.assertEqual(decision.desired_limit_w, 14_000)
         self.assertIn("above measured import", decision.reason)
+
+    def test_import_ceiling_only_tracks_falling_demand(self):
+        controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
+        initial = sample(0, voltage=220, grid_kw=-12)
+        controller.evaluate(initial, 10_000, 5_000)
+        controller.evaluate(initial, 10_000, 5_000)
+        self.assertEqual(controller.import_demand_ceiling_w, 14_000)
+
+        falling = controller.evaluate(sample(10, voltage=220, grid_kw=-8), 14_000, 5_000)
+        self.assertEqual(falling.action, ControlAction.REDUCING)
+        self.assertEqual(falling.desired_limit_w, 10_000)
+        self.assertEqual(controller.import_demand_ceiling_w, 10_000)
+
+        # Later import growth must not reopen the feedback path to the hard
+        # maximum during the same control session.
+        rising = controller.evaluate(sample(20, voltage=220, grid_kw=-11), 10_000, 5_000)
+        self.assertEqual(rising.desired_limit_w, 10_000)
+        self.assertEqual(controller.import_demand_ceiling_w, 10_000)
 
     def test_raw_boundary_causes_immediate_emergency_reduction(self):
         controller = DynamicVoltageController(DynamicVoltageConfiguration(enabled=True))
@@ -245,9 +263,9 @@ class ControllerTests(unittest.TestCase):
         controller = self.controller()
         self.activated_decision(controller, 10_000, 218)
         controller.command_applied("import", 10_000, 10_200, 218, 0)
-        decision = controller.evaluate(sample(1, 218), 10_200, 5_000)
+        decision = controller.evaluate(sample(1, 218, grid_kw=-10.2), 10_200, 5_000)
         self.assertEqual(decision.action, ControlAction.HOLDING)
-        decision = controller.evaluate(sample(2, 215.5), 10_200, 5_000)
+        decision = controller.evaluate(sample(2, 215.5, grid_kw=-10.2), 10_200, 5_000)
         self.assertEqual(decision.action, ControlAction.REDUCING)
 
     def test_stale_telemetry_never_increases_and_loss_requires_recovery_samples(self):

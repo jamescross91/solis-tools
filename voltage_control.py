@@ -571,6 +571,13 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
+        measured_ceiling_w = max(
+            c.minimum_import_w,
+            min(
+                c.maximum_import_w,
+                max(0, round(-sample.grid_kw * 1_000)) + c.import_headroom_w,
+            ),
+        )
         if self.import_demand_ceiling_w is None:
             self.import_demand_ceiling_w = max(
                 c.minimum_import_w,
@@ -579,6 +586,10 @@ class DynamicVoltageController:
                     self.import_activation_peak_w + c.import_headroom_w,
                 ),
             )
+        elif sample.age_s <= c.fresh_age_s:
+            # Released charging demand can make measured import rise, so a
+            # session ceiling may follow demand down but never ratchet upwards.
+            self.import_demand_ceiling_w = min(self.import_demand_ceiling_w, measured_ceiling_w)
         demand_ceiling_w = self.import_demand_ceiling_w
         if sample.raw_voltage_v <= c.minimum_voltage_v:
             desired = max(c.minimum_import_w, current_w - c.emergency_reduction_w)
