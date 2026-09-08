@@ -18,6 +18,15 @@ class SolisTools < Formula
     sha256 "4c5f715128bfeba59f4c9fb3542b0c32a8afd4b90081111e39c12f7af0c89aae"
   end
 
+  # BEGIN PREBUILT MACOS
+  resource "solis-menubar" do
+    on_macos do
+      url "https://github.com/jamescross91/solis-tools/releases/download/v0.5.3/solis-menubar-0.5.3-macos-universal.tar.gz"
+      sha256 "338ea1cc9ba13dc0469829f2bccdd1e25cc5a51eaea1977c0fc23b53da5ac98a"
+    end
+  end
+  # END PREBUILT MACOS
+
   def install
     prebuilt = resources.any? { |item| item.name == "solis-menubar" }
     virtualenv_install_with_resources without: (prebuilt ? ["solis-menubar"] : nil)
