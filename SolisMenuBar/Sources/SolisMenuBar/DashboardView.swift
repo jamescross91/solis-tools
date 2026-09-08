@@ -85,9 +85,13 @@ struct DashboardView: View {
         }
         .frame(width: 450, height: 680)
         .onAppear {
+            monitor.setDashboardVisible(true)
             if !host.isEmpty, !monitor.isRunning {
                 connect()
             }
+        }
+        .onDisappear {
+            monitor.setDashboardVisible(false)
         }
     }
 
@@ -642,7 +646,7 @@ private struct VoltageControlChartView: View {
         let source = timeRange == .fifteenMinutes ? liveHistory : longHistory
         guard let latest = source.last?.date else { return [] }
         let cutoff = latest.addingTimeInterval(-timeRange.seconds)
-        return source.filter { $0.date >= cutoff && $0.reading.meterVoltageV != nil }
+        return source.filter { $0.date >= cutoff && $0.meterVoltageV != nil }
     }
 
     var body: some View {
@@ -653,9 +657,9 @@ private struct VoltageControlChartView: View {
         let hoveredPowerPoint = nearestPoint(in: allPoints, to: hoveredPowerDate)
         let notablePoints = chartSamples(
             allPoints.filter {
-                $0.voltageControl?.emergency == true
-                    || $0.voltageControl?.action == "Increasing"
-                    || $0.voltageControl?.action == "Reducing"
+                $0.controlEmergency
+                    || $0.controlAction == "Increasing"
+                    || $0.controlAction == "Reducing"
             },
             maximumCount: 120
         )
@@ -690,7 +694,7 @@ private struct VoltageControlChartView: View {
             .foregroundStyle(.secondary)
             Chart {
                 if let point = hoveredVoltagePoint,
-                   let voltage = point.reading.meterVoltageV {
+                   let voltage = point.meterVoltageV {
                     RuleMark(x: .value("Selected time", point.date))
                         .foregroundStyle(.secondary.opacity(0.5))
                         .annotation(position: .top, spacing: 4) {
@@ -701,7 +705,7 @@ private struct VoltageControlChartView: View {
                         }
                 }
                 ForEach(renderedPoints) { point in
-                    if let voltage = point.reading.meterVoltageV {
+                    if let voltage = point.meterVoltageV {
                         LineMark(
                             x: .value("Time", point.date),
                             y: .value("PCC voltage", voltage)
@@ -710,7 +714,7 @@ private struct VoltageControlChartView: View {
                         .interpolationMethod(.linear)
                     }
                 }
-                if let point = latestPoint, let voltage = point.reading.meterVoltageV {
+                if let point = latestPoint, let voltage = point.meterVoltageV {
                     PointMark(
                         x: .value("Latest time", point.date),
                         y: .value("Latest PCC voltage", voltage)
@@ -770,7 +774,7 @@ private struct VoltageControlChartView: View {
                 ForEach(renderedPoints) { point in
                     LineMark(
                         x: .value("Time", point.date),
-                        y: .value("Grid flow", point.reading.gridImportPositiveKw),
+                        y: .value("Grid flow", point.gridImportPositiveKw),
                         series: .value("Series", "Grid flow")
                     )
                     .foregroundStyle(.orange)
@@ -784,24 +788,24 @@ private struct VoltageControlChartView: View {
                     }
                 }
                 ForEach(notablePoints) { point in
-                    if point.voltageControl?.emergency == true {
+                    if point.controlEmergency {
                         PointMark(
                             x: .value("Emergency", point.date),
-                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                            y: .value("Grid import", point.gridImportPositiveKw)
                         )
                         .foregroundStyle(.red)
                         .symbolSize(36)
-                    } else if point.voltageControl?.action == "Increasing" {
+                    } else if point.controlAction == "Increasing" {
                         PointMark(
                             x: .value("Increasing", point.date),
-                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                            y: .value("Grid import", point.gridImportPositiveKw)
                         )
                         .foregroundStyle(.green)
                         .symbolSize(12)
-                    } else if point.voltageControl?.action == "Reducing" {
+                    } else if point.controlAction == "Reducing" {
                         PointMark(
                             x: .value("Reducing", point.date),
-                            y: .value("Grid import", point.reading.gridImportPositiveKw)
+                            y: .value("Grid import", point.gridImportPositiveKw)
                         )
                         .foregroundStyle(.orange)
                         .symbolSize(18)
@@ -810,14 +814,14 @@ private struct VoltageControlChartView: View {
                 if let point = latestPoint {
                     PointMark(
                         x: .value("Latest time", point.date),
-                        y: .value("Latest grid flow", point.reading.gridImportPositiveKw)
+                        y: .value("Latest grid flow", point.gridImportPositiveKw)
                     )
                     .foregroundStyle(.orange)
                     .annotation(position: .topTrailing) {
                         Text(
                             String(
                                 format: "Now %+.2f kW",
-                                point.reading.gridImportPositiveKw
+                                point.gridImportPositiveKw
                             )
                         )
                         .font(.caption2.weight(.medium))
@@ -845,7 +849,7 @@ private struct VoltageControlChartView: View {
     }
 
     private func voltageDomain(_ points: [HistoryPoint]) -> ClosedRange<Double> {
-        let values = points.compactMap(\.reading.meterVoltageV)
+        let values = points.compactMap(\.meterVoltageV)
         guard let low = values.min(), let high = values.max() else {
             return minimumVoltage...maximumVoltage
         }
@@ -862,24 +866,24 @@ private struct VoltageControlChartView: View {
     }
 
     private func powerDomain(_ points: [HistoryPoint]) -> ClosedRange<Double> {
-        var values = points.map { $0.reading.gridImportPositiveKw }
+        var values = points.map(\.gridImportPositiveKw)
         values += points.compactMap(signedControlLimit)
         return paddedDomain(values, minimumPadding: 0.25, includeZero: true)
     }
 
     private func signedControlLimit(_ point: HistoryPoint) -> Double? {
-        guard let control = point.voltageControl else { return nil }
-        let mode = control.mode ?? {
-            if control.state.contains("Export") { return "export" }
-            if control.state.contains("Import") || control.state.contains("charging") {
+        let mode = point.controlMode ?? {
+            if point.controlState?.contains("Export") == true { return "export" }
+            if point.controlState?.contains("Import") == true
+                || point.controlState?.contains("charging") == true {
                 return "import"
             }
             return nil
         }()
-        if mode == "export", let watts = control.exportActuator.commandedW {
+        if mode == "export", let watts = point.exportLimitW {
             return -Double(watts) / 1_000
         }
-        if mode == "import", let watts = control.importActuator.commandedW {
+        if mode == "import", let watts = point.importLimitW {
             return Double(watts) / 1_000
         }
         return nil
@@ -891,12 +895,12 @@ private struct VoltageControlChartView: View {
     }
 
     private func powerTooltipLines(_ point: HistoryPoint) -> [String] {
-        var lines = [String(format: "Grid flow %+.2f kW", point.reading.gridImportPositiveKw)]
+        var lines = [String(format: "Grid flow %+.2f kW", point.gridImportPositiveKw)]
         if let limit = signedControlLimit(point) {
             lines.append(String(format: "Active limit %+.2f kW", limit))
         }
-        if let control = point.voltageControl {
-            lines.append("\(control.action) · \(control.reason)")
+        if let action = point.controlAction, let reason = point.controlReason {
+            lines.append("\(action) · \(reason)")
         }
         return lines
     }
@@ -1168,7 +1172,7 @@ private struct HistoryChartView: View {
 
     private var chartPoints: [ChartPoint] {
         history.compactMap { point in
-            guard let value = metric.value(from: point.reading) else { return nil }
+            guard let value = metric.value(from: point) else { return nil }
             return ChartPoint(id: point.id, date: point.date, value: value)
         }
     }

@@ -15,9 +15,16 @@ versioning](https://semver.org/spec/v2.0.0.html).
 - Plot the active export actuator with the correct sign instead of always
   showing the import actuator, and use data-driven scales that no longer flatten
   voltage and temperature against zero.
-- Reduce menu-bar energy use by calculating chart data once per refresh, limiting
-  visible marks to the display resolution, using linear paths, and updating hover
-  state only when the nearest real measurement changes.
+- Reduce menu-bar energy use by stopping closed-dashboard chart publications,
+  refreshing the compact menu-bar display at most every five seconds unless an
+  alert or control event changes, decoding telemetry away from the main actor,
+  coalescing buffered frames, retaining compact chart-only samples in amortised
+  constant-time buffers, publishing one dashboard snapshot per sample, and
+  reusing timestamp parsers. Chart data is calculated once per refresh, visible
+  marks are limited to display resolution, paths are linear, and hover state
+  changes only when the nearest real measurement changes.
+- Aggregate voltage-history samples in memory and write each minute to SQLite
+  once, instead of updating the same database row on every control sample.
 - Prevent automatic publication failing when GitHub briefly hides a newly
   created draft from both release lookup endpoints. The publisher now continues
   from the validated release object returned by the creation request.

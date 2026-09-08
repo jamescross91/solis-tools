@@ -108,6 +108,10 @@ owns telemetry, typed control and orderly restoration over one connection. A
 second poller would still open another connection and must not be run against a
 logger limited to one session.
 
+Stream framing and JSON decoding run outside the main actor. If several complete
+frames arrive together, only the newest is delivered to the presentation layer;
+the Python process has already evaluated every sample for control purposes.
+
 `MonitorStore` owns the child process: it locates the binary, streams
 newline-delimited JSON, retries with backoff, and translates stream state into
 `.connecting` / `.connected` / `.degraded` / `.failed`. See
@@ -142,6 +146,18 @@ Chart preparation runs once per SwiftUI refresh. Lines are uniformly sampled to
 at most 360 visible marks, while ranges and hover lookup retain the full history.
 Hover dates snap to real samples and only publish state when that sample changes;
 nearest-sample lookup is logarithmic because history remains time ordered.
+
+History points are compact chart projections rather than full stream envelopes,
+so repeated diagnostics and recent-event arrays are not retained per sample.
+The buffers expire points with an advancing start index and compact only
+occasionally, avoiding a full array shift on every steady-state insertion.
+
+The menu label and dashboard use separate publication paths. While the popover
+is closed, chart arrays continue accumulating privately but are not published to
+SwiftUI; the label refreshes at most every five seconds unless connection state,
+alarms, emergencies or control activity changes. Opening the popover publishes
+one current dashboard snapshot and resumes live chart updates. Control polling
+never depends on presentation visibility.
 
 Export validation is a separate endpoint-hashed JSON record in the same private
 state directory. It is installation evidence, not recovery state: changing the

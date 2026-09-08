@@ -709,6 +709,27 @@ class ExportLimitActuator(_LimitActuator):
         self.client.set_export_limit_raw(value, installation_validated=self.installation_validated)
 
 
+@dataclass
+class _PendingVoltageMinute:
+    minute: int
+    voltage_min: float
+    voltage_max: float
+    voltage_sum: float
+    grid_kw_min: float
+    grid_kw_max: float
+    grid_kw_sum: float
+    limit_w_min: int | None
+    limit_w_max: int | None
+    limit_w_sum: int
+    sample_count: int
+    seconds_import: float
+    seconds_export: float
+    seconds_increasing: float
+    seconds_holding: float
+    seconds_reducing: float
+    emergency_count: int
+
+
 class VoltageHistoryStore:
     """Minute aggregates and sparse events with bounded retention."""
 
@@ -758,6 +779,7 @@ class VoltageHistoryStore:
         self.last_sample_at: float | None = None
         self.last_retention_at = 0.0
         self.last_flush_at: float | None = None
+        self.pending_minute: _PendingVoltageMinute | None = None
 
     def record_sample(
         self,
@@ -778,9 +800,72 @@ class VoltageHistoryStore:
         increasing_s = duration if decision.action == ControlAction.INCREASING else 0.0
         holding_s = duration if decision.action == ControlAction.HOLDING else 0.0
         reducing_s = duration if decision.action == ControlAction.REDUCING else 0.0
+        if self.pending_minute is not None and self.pending_minute.minute != minute:
+            self._flush_pending_minute()
+        if self.pending_minute is None:
+            self.pending_minute = _PendingVoltageMinute(
+                minute=minute,
+                voltage_min=voltage_v,
+                voltage_max=voltage_v,
+                voltage_sum=voltage_v,
+                grid_kw_min=grid_kw,
+                grid_kw_max=grid_kw,
+                grid_kw_sum=grid_kw,
+                limit_w_min=limit_w,
+                limit_w_max=limit_w,
+                limit_w_sum=limit_w or 0,
+                sample_count=1,
+                seconds_import=import_s,
+                seconds_export=export_s,
+                seconds_increasing=increasing_s,
+                seconds_holding=holding_s,
+                seconds_reducing=reducing_s,
+                emergency_count=1 if emergency_intervention else 0,
+            )
+        else:
+            pending = self.pending_minute
+            pending.voltage_min = min(pending.voltage_min, voltage_v)
+            pending.voltage_max = max(pending.voltage_max, voltage_v)
+            pending.voltage_sum += voltage_v
+            pending.grid_kw_min = min(pending.grid_kw_min, grid_kw)
+            pending.grid_kw_max = max(pending.grid_kw_max, grid_kw)
+            pending.grid_kw_sum += grid_kw
+            if limit_w is not None:
+                pending.limit_w_min = (
+                    limit_w if pending.limit_w_min is None else min(pending.limit_w_min, limit_w)
+                )
+                pending.limit_w_max = (
+                    limit_w if pending.limit_w_max is None else max(pending.limit_w_max, limit_w)
+                )
+                pending.limit_w_sum += limit_w
+            pending.sample_count += 1
+            pending.seconds_import += import_s
+            pending.seconds_export += export_s
+            pending.seconds_increasing += increasing_s
+            pending.seconds_holding += holding_s
+            pending.seconds_reducing += reducing_s
+            pending.emergency_count += 1 if emergency_intervention else 0
+        if timestamp - self.last_retention_at >= 3600:
+            self._flush_pending_minute()
+            cutoff = timestamp - self.retention_days * 86400
+            self.connection.execute("DELETE FROM voltage_minutes WHERE minute < ?", (cutoff,))
+            self.connection.execute(
+                "DELETE FROM voltage_events WHERE timestamp < ?",
+                (datetime.fromtimestamp(cutoff).astimezone().isoformat(),),
+            )
+            self.last_retention_at = timestamp
+        if self.last_flush_at is None or timestamp - self.last_flush_at >= 60:
+            self._flush_pending_minute()
+            self.connection.commit()
+            self.last_flush_at = timestamp
+
+    def _flush_pending_minute(self) -> None:
+        pending = self.pending_minute
+        if pending is None:
+            return
         self.connection.execute(
             """
-            INSERT INTO voltage_minutes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            INSERT INTO voltage_minutes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(minute) DO UPDATE SET
                 voltage_min = min(voltage_min, excluded.voltage_min),
                 voltage_max = max(voltage_max, excluded.voltage_max),
@@ -795,7 +880,7 @@ class VoltageHistoryStore:
                     WHEN limit_w_max IS NULL THEN excluded.limit_w_max
                     ELSE max(limit_w_max, excluded.limit_w_max) END,
                 limit_w_sum = limit_w_sum + excluded.limit_w_sum,
-                sample_count = sample_count + 1,
+                sample_count = sample_count + excluded.sample_count,
                 seconds_import = seconds_import + excluded.seconds_import,
                 seconds_export = seconds_export + excluded.seconds_export,
                 seconds_increasing = seconds_increasing + excluded.seconds_increasing,
@@ -804,35 +889,26 @@ class VoltageHistoryStore:
                 emergency_count = emergency_count + excluded.emergency_count
             """,
             (
-                minute,
-                voltage_v,
-                voltage_v,
-                voltage_v,
-                grid_kw,
-                grid_kw,
-                grid_kw,
-                limit_w,
-                limit_w,
-                limit_w or 0,
-                import_s,
-                export_s,
-                increasing_s,
-                holding_s,
-                reducing_s,
-                1 if emergency_intervention else 0,
+                pending.minute,
+                pending.voltage_min,
+                pending.voltage_max,
+                pending.voltage_sum,
+                pending.grid_kw_min,
+                pending.grid_kw_max,
+                pending.grid_kw_sum,
+                pending.limit_w_min,
+                pending.limit_w_max,
+                pending.limit_w_sum,
+                pending.sample_count,
+                pending.seconds_import,
+                pending.seconds_export,
+                pending.seconds_increasing,
+                pending.seconds_holding,
+                pending.seconds_reducing,
+                pending.emergency_count,
             ),
         )
-        if timestamp - self.last_retention_at >= 3600:
-            cutoff = timestamp - self.retention_days * 86400
-            self.connection.execute("DELETE FROM voltage_minutes WHERE minute < ?", (cutoff,))
-            self.connection.execute(
-                "DELETE FROM voltage_events WHERE timestamp < ?",
-                (datetime.fromtimestamp(cutoff).astimezone().isoformat(),),
-            )
-            self.last_retention_at = timestamp
-        if self.last_flush_at is None or timestamp - self.last_flush_at >= 60:
-            self.connection.commit()
-            self.last_flush_at = timestamp
+        self.pending_minute = None
 
     def record_event(
         self,
@@ -875,6 +951,7 @@ class VoltageHistoryStore:
         return event
 
     def daily_summary(self, now: datetime) -> dict[str, Any]:
+        self._flush_pending_minute()
         start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         row = self.connection.execute(
             """
@@ -900,6 +977,7 @@ class VoltageHistoryStore:
         }
 
     def close(self) -> None:
+        self._flush_pending_minute()
         self.connection.commit()
         self.connection.close()
 

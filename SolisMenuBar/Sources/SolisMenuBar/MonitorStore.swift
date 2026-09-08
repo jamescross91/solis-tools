@@ -1,6 +1,80 @@
 import Combine
 import Foundation
 
+struct MenuBarSnapshot: Sendable {
+    let reading: InverterReading?
+    let symbol: String
+    let hasAlert: Bool
+    let statusLabel: String
+}
+
+@MainActor
+final class MenuBarPresentation: ObservableObject {
+    @Published private(set) var snapshot = MenuBarSnapshot(
+        reading: nil,
+        symbol: "bolt.house",
+        hasAlert: false,
+        statusLabel: "Solis stopped"
+    )
+
+    func update(_ snapshot: MenuBarSnapshot) {
+        self.snapshot = snapshot
+    }
+}
+
+private struct DashboardPresentation {
+    var latest: StreamEnvelope?
+    var history: [HistoryPoint] = []
+    var controlHistory: [HistoryPoint] = []
+}
+
+private enum StreamProcessingResult: Sendable {
+    case envelope(StreamEnvelope?)
+    case unsupportedSchema(Int)
+    case malformed
+}
+
+private actor StreamProcessor {
+    private var buffer = Data()
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
+    func consume(_ data: Data) -> StreamProcessingResult {
+        buffer.append(data)
+        var latest: StreamEnvelope?
+        var searchStart = buffer.startIndex
+        while searchStart < buffer.endIndex,
+              let newline = buffer[searchStart...].firstIndex(of: 0x0A) {
+            let line = buffer[searchStart..<newline]
+            searchStart = buffer.index(after: newline)
+            guard !line.isEmpty else { continue }
+            let envelope: StreamEnvelope
+            do {
+                envelope = try decoder.decode(StreamEnvelope.self, from: Data(line))
+            } catch {
+                return .malformed
+            }
+            guard envelope.schemaVersion == StreamDecoder.supportedSchemaVersion else {
+                return .unsupportedSchema(envelope.schemaVersion)
+            }
+            // UI telemetry is a snapshot. If several complete frames arrive in
+            // one read, rendering only the newest avoids replaying stale work.
+            latest = envelope
+        }
+        if searchStart > buffer.startIndex {
+            buffer.removeSubrange(buffer.startIndex..<searchStart)
+        }
+        if buffer.count > 1 << 20 {
+            buffer.removeAll(keepingCapacity: false)
+            return .malformed
+        }
+        return .envelope(latest)
+    }
+}
+
 @MainActor
 final class MonitorStore: ObservableObject {
     enum State: Equatable {
@@ -12,16 +86,19 @@ final class MonitorStore: ObservableObject {
     }
 
     @Published private(set) var state: State = .stopped
-    @Published private(set) var latest: StreamEnvelope?
-    @Published private(set) var history: [HistoryPoint] = []
-    @Published private(set) var controlHistory: [HistoryPoint] = []
+    @Published private var presentation = DashboardPresentation()
     @Published private(set) var executablePath: String?
     @Published private(set) var shutdownMessage: String?
+
+    let menuPresentation = MenuBarPresentation()
+
+    var latest: StreamEnvelope? { presentation.latest }
+    var history: [HistoryPoint] { presentation.history }
+    var controlHistory: [HistoryPoint] { presentation.controlHistory }
 
     private var process: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
-    private var outputBuffer = Data()
     private var errorBuffer = Data()
     private var activeConfiguration: MonitorConfiguration?
     private var retryTask: Task<Void, Never>?
@@ -33,9 +110,15 @@ final class MonitorStore: ObservableObject {
     private var lifecycleTask: Task<Void, Never>?
     private var lifecycleRevision = 0
     private var terminationRequested = false
+    private var latestReceived: StreamEnvelope?
+    private var streamProcessor: StreamProcessor?
+    private var dashboardVisible = false
+    private var lastMenuUpdate = Date.distantPast
+    private var lastUrgentSignature: String?
 
     private static let maximumBufferedBytes = 1 << 20
     private static let maximumRetryDelay: TimeInterval = 60
+    private static let closedMenuRefreshInterval: TimeInterval = 5
 
     var isRunning: Bool {
         switch state {
@@ -45,7 +128,7 @@ final class MonitorStore: ObservableObject {
     }
 
     var menuSymbol: String {
-        if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
+        if latestReceived?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
             return "exclamationmark.triangle.fill"
         }
         switch state {
@@ -57,7 +140,7 @@ final class MonitorStore: ObservableObject {
     }
 
     var hasMenuAlert: Bool {
-        if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
+        if latestReceived?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
             return true
         }
         switch state {
@@ -67,7 +150,7 @@ final class MonitorStore: ObservableObject {
     }
 
     var menuStatusLabel: String {
-        if latest?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
+        if latestReceived?.reading.alarms.contains(where: { $0.severity == "fault" }) == true {
             return "Solis inverter fault"
         }
         switch state {
@@ -85,7 +168,7 @@ final class MonitorStore: ObservableObject {
                 == host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             && activeConfiguration.port == port
             && activeConfiguration.slave == slave
-            && latest?.voltageControl?.exportWriteValidated == true
+            && latestReceived?.voltageControl?.exportWriteValidated == true
     }
 
     /// Start from stored settings if they are complete and nothing is running.
@@ -134,16 +217,24 @@ final class MonitorStore: ObservableObject {
         terminationRequested = false
         outputPipe = nil
         errorPipe = nil
-        outputBuffer.removeAll(keepingCapacity: true)
         errorBuffer.removeAll(keepingCapacity: true)
-        state = .stopped
+        streamProcessor = nil
+        setState(.stopped)
         if clearReading {
-            latest = nil
+            latestReceived = nil
             historyBuffer.removeAll()
-            history.removeAll(keepingCapacity: true)
             controlHistoryBuffer.removeAll()
-            controlHistory.removeAll(keepingCapacity: true)
+            presentation = DashboardPresentation()
+            publishMenu(force: true)
             lastSuccessfulPolls = 0
+        }
+    }
+
+    func setDashboardVisible(_ visible: Bool) {
+        guard dashboardVisible != visible else { return }
+        dashboardVisible = visible
+        if visible {
+            publishDashboard()
         }
     }
 
@@ -161,7 +252,7 @@ final class MonitorStore: ObservableObject {
             // SIGTERM is handled by the poller, which ownership-checks and
             // restores captured limits before closing its one Modbus session.
             running.terminationHandler = nil
-            state = .degraded
+            setState(.degraded)
             shutdownMessage = "Stopping control and checking baseline restoration…"
             if !terminationRequested {
                 terminationRequested = true
@@ -170,7 +261,7 @@ final class MonitorStore: ObservableObject {
             let deadline = Date().addingTimeInterval(15)
             while running.isRunning {
                 if Date() >= deadline {
-                    state = .failed("Restoration is still pending. The poller is retained; try stopping again.")
+                    setState(.failed("Restoration is still pending. The poller is retained; try stopping again."))
                     shutdownMessage = "Restoration is still pending; the poller has not been replaced."
                     return false
                 }
@@ -188,31 +279,42 @@ final class MonitorStore: ObservableObject {
     private func launch(configuration: MonitorConfiguration) {
         guard shouldRun else { return }
         guard let path = locatePoller() else {
-            state = .failed(
+            setState(.failed(
                 "solis-poll was not found. Install or upgrade solis-tools with Homebrew."
-            )
+            ))
             // A Homebrew upgrade replaces the binary, so this is often temporary.
             scheduleRetry()
             return
         }
 
         executablePath = path
-        state = .connecting
+        setState(.connecting)
         errorBuffer.removeAll(keepingCapacity: true)
 
         let process = Process()
         let output = Pipe()
         let errors = Pipe()
+        let streamProcessor = StreamProcessor()
+        self.streamProcessor = streamProcessor
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments(for: configuration)
         process.standardOutput = output
         process.standardError = errors
 
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        output.fileHandleForReading.readabilityHandler = { [weak self, streamProcessor] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            Task { @MainActor [weak self] in
-                self?.consumeOutput(data)
+            Task(priority: .utility) { [weak self, streamProcessor] in
+                switch await streamProcessor.consume(data) {
+                case let .envelope(envelope):
+                    if let envelope {
+                        await self?.receive(envelope)
+                    }
+                case let .unsupportedSchema(version):
+                    await self?.unsupportedStreamSchema(version)
+                case .malformed:
+                    await self?.malformedStream()
+                }
             }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -243,7 +345,7 @@ final class MonitorStore: ObservableObject {
         do {
             try process.run()
         } catch {
-            state = .failed("Could not start solis-poll: \(error.localizedDescription)")
+            setState(.failed("Could not start solis-poll: \(error.localizedDescription)"))
             scheduleRetry()
         }
     }
@@ -313,38 +415,22 @@ final class MonitorStore: ObservableObject {
         return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
     }
 
-    private func consumeOutput(_ data: Data) {
-        outputBuffer.append(data)
-        while let newline = outputBuffer.firstIndex(of: 0x0A) {
-            let line = outputBuffer[..<newline]
-            outputBuffer.removeSubrange(...newline)
-            guard !line.isEmpty else { continue }
-            do {
-                let envelope = try StreamDecoder.decode(Data(line))
-                receive(envelope)
-            } catch let error as StreamError {
-                // A schema the app cannot read will not fix itself; say so
-                // rather than sitting on "degraded" indefinitely. stop() resets
-                // state, so the message has to be set after it.
-                stop()
-                state = .failed(error.localizedDescription)
-                return
-            } catch {
-                state = .degraded
-            }
-        }
-        if outputBuffer.count > Self.maximumBufferedBytes {
-            // A sample line is a few hundred bytes. This much without a newline
-            // means the far end is not speaking the stream protocol.
-            outputBuffer.removeAll(keepingCapacity: false)
-            state = .degraded
-        }
+    private func unsupportedStreamSchema(_ version: Int) {
+        // A schema the app cannot read will not fix itself; say so rather than
+        // sitting on "degraded" indefinitely.
+        stop()
+        let error = StreamError.unsupportedSchema(version)
+        setState(.failed(error.localizedDescription))
+    }
+
+    private func malformedStream() {
+        setState(.degraded)
     }
 
     private func receive(_ envelope: StreamEnvelope) {
         retryAttempt = 0
-        latest = envelope
-        state = envelope.error == nil ? .connected : .degraded
+        latestReceived = envelope
+        setState(envelope.error == nil ? .connected : .degraded)
 
         if envelope.health.successfulPolls != lastSuccessfulPolls {
             lastSuccessfulPolls = envelope.health.successfulPolls
@@ -355,11 +441,16 @@ final class MonitorStore: ObservableObject {
                 voltageControl: envelope.voltageControl
             )
             controlHistoryBuffer.append(point)
-            controlHistory = controlHistoryBuffer.points
-            if historyBuffer.append(point) {
-                history = historyBuffer.points
-            }
+            historyBuffer.append(point)
         }
+
+        let signature = urgentSignature(envelope)
+        let urgent = signature != lastUrgentSignature
+        lastUrgentSignature = signature
+        if dashboardVisible {
+            publishDashboard()
+        }
+        publishMenu(force: urgent)
     }
 
     private func processTerminated(status: Int32) {
@@ -368,18 +459,60 @@ final class MonitorStore: ObservableObject {
         process = nil
         outputPipe = nil
         errorPipe = nil
-        // A partial line from the dead child must not be prepended to the next
-        // one's first line.
-        outputBuffer.removeAll(keepingCapacity: false)
+        streamProcessor = nil
         guard shouldRun else { return }
         let message = String(data: errorBuffer, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        state = .failed(
+        setState(.failed(
             message?.isEmpty == false
                 ? message!
                 : "solis-poll stopped unexpectedly (exit status \(status))."
-        )
+        ))
         scheduleRetry()
+    }
+
+    private func setState(_ newState: State) {
+        guard state != newState else { return }
+        state = newState
+        publishMenu(force: true)
+    }
+
+    private func publishDashboard() {
+        presentation = DashboardPresentation(
+            latest: latestReceived,
+            history: historyBuffer.points,
+            controlHistory: controlHistoryBuffer.points
+        )
+    }
+
+    private func publishMenu(force: Bool) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastMenuUpdate) >= Self.closedMenuRefreshInterval else {
+            return
+        }
+        lastMenuUpdate = now
+        menuPresentation.update(
+            MenuBarSnapshot(
+                reading: latestReceived?.reading,
+                symbol: menuSymbol,
+                hasAlert: hasMenuAlert,
+                statusLabel: menuStatusLabel
+            )
+        )
+    }
+
+    private func urgentSignature(_ envelope: StreamEnvelope) -> String {
+        let alarms = envelope.reading.alarms.map { "\($0.code):\($0.severity)" }.joined(separator: ",")
+        let control = envelope.voltageControl
+        let newestEvent = control?.recentEvents.first?.id ?? ""
+        return [
+            envelope.error ?? "",
+            alarms,
+            control?.state ?? "",
+            control?.action ?? "",
+            control?.emergency == true ? "emergency" : "normal",
+            newestEvent,
+        ].joined(separator: "|")
     }
 
     private func scheduleRetry() {

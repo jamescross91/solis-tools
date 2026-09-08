@@ -88,6 +88,13 @@ resolution. This keeps its popover responsive during long-running sessions.
 Chart history is memory-only and is cleared whenever the app is quit and
 restarted, including after an update.
 
+The safety controller continues sampling at the configured interval when the
+dashboard is closed. Presentation work is independent: the compact menu-bar
+display refreshes at most every five seconds during normal operation, while
+connection changes, alarms, emergencies and control activity appear
+immediately. Opening the dashboard publishes the latest sample and resumes its
+full live refresh.
+
 Releases prepared with the prebuilt-package workflow install a checksum-verified
 universal macOS app archive (Apple Silicon and Intel), without compiling Swift
 on your Mac. Python and PyModbus are still installed separately by Homebrew.
@@ -245,6 +252,13 @@ Long histories are sampled to the chart's visible resolution before drawing to
 avoid wasting energy on thousands of indistinguishable marks. Axis ranges and
 pointer tooltips continue to use the complete in-memory history, so peaks and
 exact hovered measurements are not rounded to the displayed line samples.
+
+Chart history stores only the numeric and control fields it plots, not repeated
+diagnostics or activity arrays. Its time-bounded buffers discard expired points
+without shifting the retained array on every sample. Telemetry is decoded away
+from the main actor, buffered frames are coalesced to the newest snapshot, and
+the dashboard receives one atomic publication per displayed sample. These
+choices keep a closed menu-bar item from continuously laying out hidden charts.
 
 ### Control options and defaults
 

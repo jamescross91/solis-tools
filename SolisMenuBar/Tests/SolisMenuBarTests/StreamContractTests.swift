@@ -350,4 +350,33 @@ final class HistoryBufferTests: XCTestCase {
         XCTAssertEqual(buffer.points.count, 2)
         XCTAssertEqual(buffer.points.last?.date, beyondRetention)
     }
+
+    func testControlHistoryRetainsOnlyItsTimeWindowAfterCompaction() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let sample = try reading()
+        var buffer = ControlHistoryBuffer()
+
+        for offset in 0...2_000 {
+            buffer.append(
+                HistoryPoint(
+                    date: start.addingTimeInterval(TimeInterval(offset)),
+                    reading: sample
+                )
+            )
+        }
+
+        XCTAssertEqual(buffer.points.count, 1_801)
+        XCTAssertEqual(buffer.points.first?.date, start.addingTimeInterval(200))
+        XCTAssertEqual(buffer.points.last?.date, start.addingTimeInterval(2_000))
+    }
+
+    func testHistoryPointProjectsOnlyChartValues() throws {
+        let sample = try reading()
+        let point = HistoryPoint(date: Date(timeIntervalSince1970: 1_000), reading: sample)
+
+        XCTAssertEqual(point.houseLoadKw, 1.58)
+        XCTAssertEqual(point.batteryFlowKw, 1.72)
+        XCTAssertEqual(point.gridImportPositiveKw, 0.5)
+        XCTAssertNil(point.controlReason)
+    }
 }
