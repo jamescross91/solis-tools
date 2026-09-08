@@ -101,7 +101,9 @@ are checked again. Retries accept matching assets, resume incomplete drafts and
 reject mismatched tags/assets rather than overwriting them. Retry before
 candidate artifacts expire; if the source changes, prepare a new version.
 Draft lookup checks both the by-tag endpoint and the release list because GitHub
-may briefly hide a newly created draft from the former.
+may hide drafts from the former. Creation continues from GitHub's returned
+release object, so a new draft does not need to become visible through either
+lookup endpoint before asset upload begins.
 
 For a broken public release, use a new patch-version release PR. Do not delete,
 retag or replace a release users may already have installed. Homebrew still

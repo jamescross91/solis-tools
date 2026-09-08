@@ -232,6 +232,32 @@ def release_for_tag(endpoint: str, tag: str) -> dict | None:
     return next((item for item in releases if item.get("tag_name") == tag), None)
 
 
+def create_draft_release(endpoint: str, tag: str, release_version: str, checksum: str) -> dict:
+    # Use the object returned by creation because GitHub can briefly omit a new
+    # draft from both its by-tag endpoint and its release list.
+    response = gh(
+        "api",
+        f"{endpoint}/releases",
+        "--method",
+        "POST",
+        "-f",
+        f"tag_name={tag}",
+        "-f",
+        f"name=solis-tools {release_version}",
+        "-F",
+        "draft=true",
+        "-f",
+        "body="
+        f"Install or upgrade with Homebrew after publication.\n\n"
+        f"See https://github.com/{REPOSITORY}/blob/{tag}/CHANGELOG.md for changes "
+        f"and upgrade precautions.\n\nArchive SHA-256: {checksum}",
+    )
+    release = json.loads(response)
+    if release.get("tag_name") != tag or not release.get("draft"):
+        raise RuntimeError("GitHub returned an unexpected created release")
+    return release
+
+
 def publish(root: Path, ref: str) -> None:
     commit = git(root, "rev-parse", f"{ref}^{{commit}}").decode().strip()
     subprocess.run(
@@ -254,22 +280,7 @@ def publish(root: Path, ref: str) -> None:
         raise ValueError("release tag already exists at a different object; never retag a release")
     release = release_for_tag(endpoint, tag)
     if release is None:
-        gh(
-            "release",
-            "create",
-            tag,
-            "--repo",
-            REPOSITORY,
-            "--verify-tag",
-            "--draft",
-            "--title",
-            f"solis-tools {release_version}",
-            "--notes",
-            f"Install or upgrade with Homebrew after publication.\n\nSee https://github.com/{REPOSITORY}/blob/{tag}/CHANGELOG.md for changes and upgrade precautions.\n\nArchive SHA-256: {checksum}",
-        )
-        release = release_for_tag(endpoint, tag)
-    if release is None:
-        raise RuntimeError("created draft release could not be retrieved")
+        release = create_draft_release(endpoint, tag, release_version, checksum)
     for asset_path, expected in ((path, checksum), (binary_path, metadata["sha256"])):
         asset = next((item for item in release["assets"] if item["name"] == asset_path.name), None)
         if asset is None:

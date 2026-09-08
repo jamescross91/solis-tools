@@ -53,6 +53,7 @@ class DynamicVoltageConfiguration:
     maximum_export_w: int = 10_000
     site_export_permission_w: int = 10_000
     minimum_import_w: int = 1_000
+    import_headroom_w: int = 2_000
     increase_step_w: int = 200
     reduction_step_w: int = 500
     near_limit_reduction_w: int = 1_000
@@ -104,6 +105,7 @@ class DynamicVoltageConfiguration:
             self.maximum_export_w,
             self.site_export_permission_w,
             self.minimum_import_w,
+            self.import_headroom_w,
             self.increase_step_w,
             self.reduction_step_w,
             self.near_limit_reduction_w,
@@ -392,6 +394,9 @@ class DynamicVoltageController:
         self.sensitivity_v_per_kw: float | None = None
         self.sensitivity_updated_at: float | None = None
         self.pending_observation: _SensitivityObservation | None = None
+        self.import_demand_ceiling_w: int | None = None
+        self.import_activation_peak_w = 0
+        self.import_controlled_demand_w = 0
 
     def communication_unavailable(self) -> ControlDecision:
         self.recovering = True
@@ -447,6 +452,14 @@ class DynamicVoltageController:
             return
         delta_kw = sample.grid_kw - pending.grid_kw
         delta_voltage = sample.raw_voltage_v - pending.voltage_v
+        if pending.mode == "import":
+            limit_delta_w = pending.new_w - pending.old_w
+            import_delta_w = round(-delta_kw * 1_000)
+            if limit_delta_w * import_delta_w > 0:
+                attributable_w = min(abs(limit_delta_w), abs(import_delta_w))
+                self.import_controlled_demand_w += (
+                    attributable_w if limit_delta_w > 0 else -attributable_w
+                )
         expected_direction = (pending.new_w - pending.old_w) * (
             -1 if pending.mode == "import" else 1
         )
@@ -487,6 +500,11 @@ class DynamicVoltageController:
         filtered = self.filter.update(sample.raw_voltage_v, sample.monotonic_s)
         self._update_sensitivity(sample)
         immediate_mode = self.detector._candidate(sample)
+        if immediate_mode == "import" and self.import_demand_ceiling_w is None:
+            self.import_activation_peak_w = max(
+                self.import_activation_peak_w,
+                max(0, round(-sample.grid_kw * 1_000)),
+            )
         if immediate_mode == "import" and sample.raw_voltage_v <= configuration.minimum_voltage_v:
             self.decision = self._evaluate_import(sample, filtered, current_import_w)
             return self.decision
@@ -514,6 +532,10 @@ class DynamicVoltageController:
         mode = self.detector.update(sample)
         if mode is None:
             candidate = self.detector.candidate
+            if candidate != "import":
+                self.import_demand_ceiling_w = None
+                self.import_activation_peak_w = 0
+                self.import_controlled_demand_w = 0
             state = (
                 VoltageControlState.GRID_CHARGING
                 if candidate == "import"
@@ -549,6 +571,9 @@ class DynamicVoltageController:
         if mode == "import":
             decision = self._evaluate_import(sample, filtered, current_import_w)
         else:
+            self.import_demand_ceiling_w = None
+            self.import_activation_peak_w = 0
+            self.import_controlled_demand_w = 0
             decision = self._evaluate_export(sample, filtered, current_export_w)
         self.decision = decision
         return decision
@@ -557,6 +582,29 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
+        measured_import_w = max(0, round(-sample.grid_kw * 1_000))
+        measured_ceiling_w = max(
+            c.minimum_import_w,
+            min(
+                c.maximum_import_w,
+                round(measured_import_w - self.import_controlled_demand_w) + c.import_headroom_w,
+            ),
+        )
+        if self.import_demand_ceiling_w is None:
+            self.import_demand_ceiling_w = max(
+                c.minimum_import_w,
+                min(
+                    c.maximum_import_w,
+                    self.import_activation_peak_w + c.import_headroom_w,
+                ),
+            )
+        elif sample.age_s <= c.fresh_age_s:
+            pending_import_response = (
+                self.pending_observation is not None and self.pending_observation.mode == "import"
+            )
+            if measured_ceiling_w < self.import_demand_ceiling_w or not pending_import_response:
+                self.import_demand_ceiling_w = measured_ceiling_w
+        demand_ceiling_w = self.import_demand_ceiling_w
         if sample.raw_voltage_v <= c.minimum_voltage_v:
             desired = max(c.minimum_import_w, current_w - c.emergency_reduction_w)
             return ControlDecision(
@@ -579,6 +627,17 @@ class DynamicVoltageController:
             return self._normal_decision(
                 "import", desired, sample, filtered, ControlAction.REDUCING
             )
+        if current_w > demand_ceiling_w:
+            return ControlDecision(
+                VoltageControlState.IMPORT_REGULATING,
+                ControlAction.REDUCING,
+                "import",
+                demand_ceiling_w,
+                sample.raw_voltage_v,
+                filtered,
+                f"trimming unused allowance to {c.import_headroom_w / 1_000:g} kW "
+                "above measured import",
+            )
         if filtered > c.import_target_v + c.deadband_v:
             if sample.age_s > c.fresh_age_s:
                 return self._hold(
@@ -597,10 +656,14 @@ class DynamicVoltageController:
                     "waiting for the previous change to settle",
                 )
             headroom = filtered - (c.import_target_v + c.deadband_v)
-            desired = min(c.maximum_import_w, current_w + self._increase_step(headroom))
+            desired = min(demand_ceiling_w, current_w + self._increase_step(headroom))
             if desired == current_w:
                 return self._hold(
-                    "import", current_w, sample, filtered, "maximum permitted import reached"
+                    "import",
+                    current_w,
+                    sample,
+                    filtered,
+                    f"{c.import_headroom_w / 1_000:g} kW demand headroom reached",
                 )
             return self._normal_decision(
                 "import", desired, sample, filtered, ControlAction.INCREASING

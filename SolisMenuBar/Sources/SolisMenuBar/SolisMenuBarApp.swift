@@ -7,7 +7,7 @@ struct SolisMenuBarApp: App {
 
     init() {
         if CommandLine.arguments.contains("--version") {
-            print("solis-menubar 0.5.2")
+            print("solis-menubar 0.5.3")
             Darwin.exit(EXIT_SUCCESS)
         }
     }
@@ -18,7 +18,7 @@ struct SolisMenuBarApp: App {
         } label: {
             // The label is the only view present before the popover is opened,
             // so this is where polling has to begin.
-            MenuBarMetricsView(monitor: monitor)
+            MenuBarMetricsView(presentation: monitor.menuPresentation)
                 .task { monitor.startIfConfigured() }
         }
         .menuBarExtraStyle(.window)
@@ -26,7 +26,7 @@ struct SolisMenuBarApp: App {
 }
 
 private struct MenuBarMetricsView: View {
-    @ObservedObject var monitor: MonitorStore
+    @ObservedObject var presentation: MenuBarPresentation
 
     @AppStorage("menuBarHouseLoad") private var showHouseLoad = true
     @AppStorage("menuBarBattery") private var showBattery = true
@@ -35,12 +35,13 @@ private struct MenuBarMetricsView: View {
     @AppStorage("menuBarPV") private var showPV = false
 
     var body: some View {
-        if let reading = monitor.latest?.reading {
+        let snapshot = presentation.snapshot
+        if let reading = snapshot.reading {
             metricsLabel(for: reading)
                 .font(.caption.weight(.medium).monospacedDigit())
-                .accessibilityLabel("Solis live metrics")
+                .accessibilityLabel(snapshot.statusLabel)
         } else {
-            Label("Solis", systemImage: monitor.menuSymbol)
+            Label("Solis", systemImage: snapshot.symbol)
         }
     }
 
@@ -48,9 +49,9 @@ private struct MenuBarMetricsView: View {
         var label = Text("")
         var hasMetric = false
 
-        if monitor.hasMenuAlert {
+        if presentation.snapshot.hasAlert {
             label = append(
-                metric(value: "", symbol: monitor.menuSymbol),
+                metric(value: "", symbol: presentation.snapshot.symbol),
                 to: label,
                 hasMetric: &hasMetric
             )
@@ -91,7 +92,7 @@ private struct MenuBarMetricsView: View {
             )
         }
 
-        return hasMetric ? label : Text(Image(systemName: monitor.menuSymbol))
+        return hasMetric ? label : Text(Image(systemName: presentation.snapshot.symbol))
     }
 
     private func append(_ metric: Text, to label: Text, hasMetric: inout Bool) -> Text {

@@ -66,6 +66,7 @@ struct VoltageControlDetails: Decodable, Sendable {
     let emergency: Bool
     let voltageSource: String
     let estimatedVoltageSensitivityVPerKw: Double?
+    let importDemandCeilingW: Int?
     let importActuator: ActuatorDetails
     let exportActuator: ActuatorDetails
     let exportWriteValidated: Bool
@@ -103,12 +104,41 @@ struct VoltageControlEvent: Decodable, Identifiable, Sendable {
     let timestamp: String
     let state: String
     let action: String
+    let mode: String?
     let message: String
     let voltageV: Double?
     let gridKw: Double?
     let limitW: Int?
+    let previousLimitW: Int?
+    let limitDeltaW: Int?
 
     var id: String { "\(timestamp)-\(state)-\(message)" }
+
+    var date: Date? { StreamDecoder.date(from: timestamp) }
+
+    var timeLabel: String {
+        date?.formatted(date: .omitted, time: .standard) ?? timestamp
+    }
+
+    var changeLabel: String {
+        let subject = mode.map { "\($0.capitalized) limit" } ?? "Control limit"
+        guard let limitW else { return state }
+        let current = Self.power(limitW)
+        guard let previousLimitW else { return "\(subject) \(current)" }
+        if previousLimitW == limitW {
+            return "\(subject) held at \(current)"
+        }
+        let delta = limitDeltaW ?? limitW - previousLimitW
+        return "\(subject) \(Self.power(previousLimitW)) → \(current) (\(Self.signedPower(delta)))"
+    }
+
+    private static func power(_ watts: Int) -> String {
+        String(format: "%.1f kW", Double(watts) / 1_000)
+    }
+
+    private static func signedPower(_ watts: Int) -> String {
+        String(format: "%+.1f kW", Double(watts) / 1_000)
+    }
 }
 
 struct InverterAlarm: Decodable, Identifiable, Sendable {
@@ -132,30 +162,87 @@ struct ConnectionDetails: Decodable, Sendable {
 struct HistoryPoint: Identifiable, Sendable {
     let id = UUID()
     let date: Date
-    let reading: InverterReading
-    let voltageControl: VoltageControlDetails?
+    let meterVoltageV: Double?
+    let inverterTemperatureC: Double
+    let houseLoadKw: Double
+    let batteryFlowKw: Double
+    let gridImportPositiveKw: Double
+    let pvKw: Double?
+    let controlState: String?
+    let controlAction: String?
+    let controlReason: String?
+    let controlEmergency: Bool
+    let controlMode: String?
+    let importLimitW: Int?
+    let exportLimitW: Int?
 
     init(date: Date, reading: InverterReading, voltageControl: VoltageControlDetails? = nil) {
         self.date = date
-        self.reading = reading
-        self.voltageControl = voltageControl
+        meterVoltageV = reading.meterVoltageV
+        inverterTemperatureC = reading.inverterTemperatureC
+        houseLoadKw = reading.houseLoadKw
+        batteryFlowKw = reading.batteryFlowKw
+        gridImportPositiveKw = reading.gridImportPositiveKw
+        pvKw = reading.pvKw
+        controlState = voltageControl?.state
+        controlAction = voltageControl?.action
+        controlReason = voltageControl?.reason
+        controlEmergency = voltageControl?.emergency ?? false
+        controlMode = voltageControl?.mode
+        importLimitW = voltageControl?.importActuator.commandedW
+        exportLimitW = voltageControl?.exportActuator.commandedW
+    }
+}
+
+private struct TimeSeriesStorage<Element: Sendable>: Sendable {
+    private var storage: [Element] = []
+    private var startIndex = 0
+
+    var elements: [Element] {
+        guard startIndex < storage.count else { return [] }
+        return Array(storage[startIndex...])
+    }
+
+    var last: Element? {
+        startIndex < storage.count ? storage.last : nil
+    }
+
+    mutating func append(_ element: Element) {
+        storage.append(element)
+    }
+
+    mutating func discardPrefix(while shouldDiscard: (Element) -> Bool) {
+        while startIndex < storage.count, shouldDiscard(storage[startIndex]) {
+            startIndex += 1
+        }
+        // Array.removeFirst shifts every retained element. Compact only
+        // occasionally so steady-state history insertion remains amortised O(1).
+        if startIndex >= 1_024, startIndex * 2 >= storage.count {
+            storage.removeFirst(startIndex)
+            startIndex = 0
+        }
+    }
+
+    mutating func removeAll() {
+        storage.removeAll(keepingCapacity: true)
+        startIndex = 0
     }
 }
 
 struct ControlHistoryBuffer: Sendable {
     static let retentionInterval: TimeInterval = 30 * 60
-    private(set) var points: [HistoryPoint] = []
+    private var storage = TimeSeriesStorage<HistoryPoint>()
+
+    var points: [HistoryPoint] { storage.elements }
 
     mutating func append(_ point: HistoryPoint) {
-        points.append(point)
+        storage.append(point)
         let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
-        if let firstRetained = points.firstIndex(where: { $0.date >= cutoff }), firstRetained > 0 {
-            points.removeFirst(firstRetained)
-        }
+        storage.discardPrefix { $0.date < cutoff }
     }
 
     mutating func removeAll() {
-        points.removeAll(keepingCapacity: true)
+        storage.removeAll()
     }
 }
 
@@ -163,25 +250,25 @@ struct HistoryBuffer: Sendable {
     static let displaySampleInterval: TimeInterval = 30
     static let retentionInterval: TimeInterval = 24 * 60 * 60
 
-    private(set) var points: [HistoryPoint] = []
+    private var storage = TimeSeriesStorage<HistoryPoint>()
+
+    var points: [HistoryPoint] { storage.elements }
 
     @discardableResult
     mutating func append(_ point: HistoryPoint) -> Bool {
-        if let last = points.last,
+        if let last = storage.last,
            point.date.timeIntervalSince(last.date) < Self.displaySampleInterval {
             return false
         }
 
-        points.append(point)
+        storage.append(point)
         let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
-        if let firstRetained = points.firstIndex(where: { $0.date >= cutoff }), firstRetained > 0 {
-            points.removeFirst(firstRetained)
-        }
+        storage.discardPrefix { $0.date < cutoff }
         return true
     }
 
     mutating func removeAll() {
-        points.removeAll(keepingCapacity: true)
+        storage.removeAll()
     }
 }
 
@@ -202,6 +289,7 @@ struct MonitorConfiguration: Equatable, Sendable {
     var voltageSafetyMargin: Double
     var voltageDeadband: Double
     var maximumImportKw: Double
+    var importHeadroomKw: Double
     var maximumExportKw: Double
     var siteExportPermissionKw: Double
     var increaseStepW: Int
@@ -240,6 +328,9 @@ struct MonitorConfiguration: Equatable, Sendable {
             voltageSafetyMargin: max(0.1, defaults.object(forKey: "voltageSafetyMargin") as? Double ?? 1.5),
             voltageDeadband: max(0.1, defaults.object(forKey: "voltageDeadband") as? Double ?? 0.75),
             maximumImportKw: max(1, defaults.object(forKey: "maximumImportKw") as? Double ?? 14),
+            importHeadroomKw: max(
+                0, defaults.object(forKey: "importHeadroomKw") as? Double ?? 2
+            ),
             maximumExportKw: max(0, defaults.object(forKey: "maximumExportKw") as? Double ?? 10),
             siteExportPermissionKw: max(0, defaults.object(forKey: "siteExportPermissionKw") as? Double ?? 10),
             increaseStepW: max(100, defaults.object(forKey: "increaseStepW") as? Int ?? 200),
@@ -274,19 +365,6 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Full-scale range this metric should show, from the configured maxima.
-    ///
-    /// Swift Charts otherwise fits the axis to whatever is on screen, so a
-    /// quarter-kilowatt wobble filled the plot and looked like an event.
-    func configuredRange(inverterMaxKw: Double, gridMaxKw: Double) -> ClosedRange<Double>? {
-        switch self {
-        case .house, .pv: 0...inverterMaxKw
-        case .battery: -inverterMaxKw...inverterMaxKw
-        case .grid: -gridMaxKw...gridMaxKw
-        case .voltage, .temperature: nil
-        }
-    }
-
     func value(from reading: InverterReading) -> Double? {
         switch self {
         case .house: reading.houseLoadKw
@@ -299,6 +377,17 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
         case .pv: reading.pvKw
         }
     }
+
+    func value(from point: HistoryPoint) -> Double? {
+        switch self {
+        case .house: point.houseLoadKw
+        case .battery: point.batteryFlowKw
+        case .grid: point.gridImportPositiveKw
+        case .voltage: point.meterVoltageV
+        case .temperature: point.inverterTemperatureC
+        case .pv: point.pvKw
+        }
+    }
 }
 
 enum StreamDecoder {
@@ -306,6 +395,12 @@ enum StreamDecoder {
     /// number; a newer poller means the app is out of date, not that the line
     /// is corrupt, and the two need telling apart in the UI.
     static let supportedSchemaVersion = 1
+    private static let fractionalDateStyle = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: true
+    )
+    private static let wholeSecondDateStyle = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: false
+    )
 
     static func decode(_ data: Data) throws -> StreamEnvelope {
         let decoder = JSONDecoder()
@@ -318,11 +413,9 @@ enum StreamDecoder {
     }
 
     static func date(from value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) {
+        if let date = try? Date(value, strategy: fractionalDateStyle) {
             return date
         }
-        return ISO8601DateFormatter().date(from: value)
+        return try? Date(value, strategy: wholeSecondDateStyle)
     }
 }

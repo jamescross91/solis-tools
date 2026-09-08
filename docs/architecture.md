@@ -108,6 +108,10 @@ owns telemetry, typed control and orderly restoration over one connection. A
 second poller would still open another connection and must not be run against a
 logger limited to one session.
 
+Stream framing and JSON decoding run outside the main actor. If several complete
+frames arrive together, only the newest is delivered to the presentation layer;
+the Python process has already evaluated every sample for control purposes.
+
 `MonitorStore` owns the child process: it locates the binary, streams
 newline-delimited JSON, retries with backoff, and translates stream state into
 `.connecting` / `.connected` / `.degraded` / `.failed`. See
@@ -132,6 +136,29 @@ one-minute aggregates and sparse state/change events in a private SQLite file,
 with 30-day retention by default. A small private JSON journal records baseline
 ownership and unclean-shutdown recovery state.
 
+Chart axes fit observed values with meaningful headroom rather than forcing
+voltage and temperature through zero. Voltage-control charts select the relevant
+high- or low-voltage operating band, distinguish signed grid flow from the active
+actuator limit, and expose exact samples on pointer hover. Activity events carry
+the previous, current and delta limit so the UI can state what changed and why.
+
+Chart preparation runs once per SwiftUI refresh. Lines are uniformly sampled to
+at most 360 visible marks, while ranges and hover lookup retain the full history.
+Hover dates snap to real samples and only publish state when that sample changes;
+nearest-sample lookup is logarithmic because history remains time ordered.
+
+History points are compact chart projections rather than full stream envelopes,
+so repeated diagnostics and recent-event arrays are not retained per sample.
+The buffers expire points with an advancing start index and compact only
+occasionally, avoiding a full array shift on every steady-state insertion.
+
+The menu label and dashboard use separate publication paths. While the popover
+is closed, chart arrays continue accumulating privately but are not published to
+SwiftUI; the label refreshes at most every five seconds unless connection state,
+alarms, emergencies or control activity changes. Opening the popover publishes
+one current dashboard snapshot and resumes live chart updates. Control polling
+never depends on presentation visibility.
+
 Export validation is a separate endpoint-hashed JSON record in the same private
 state directory. It is installation evidence, not recovery state: changing the
 endpoint selects a different record, while `--export-control-validation` may
@@ -146,6 +173,12 @@ The endpoint-scoped journal uses write-ahead pending commands, file and director
 fsync, atomic replacement and a process-lifetime endpoint lock. Readback resolves
 an interrupted write to either the prior or intended value; other values suspend
 recovery. Recovered active-session baselines constrain the actuator maximum.
+Import regulation starts a per-session ceiling at initial measured grid demand
+plus configured headroom. It trims excessive allowance immediately and follows
+genuine measured demand in both directions. Import changes record their settled
+grid response; that attributable response is removed from the demand estimate so
+the controller cannot ratchet its own ceiling. Upward tracking pauses while a
+command response is pending, while reductions remain immediate.
 
 SQLite telemetry transactions are batched for 60 seconds, with event and close
 flushes. Safety-journal writes are independent and durable before transmission.
@@ -162,7 +195,9 @@ to the same PR. Formula and metadata are excluded from the source archive to
 avoid checksum recursion. CI verifies candidate Homebrew installs before merge.
 Successful main CI triggers publication of the approved bytes, followed by
 public-URL Homebrew tests. Only publication has write permissions; there is no
-bot commit to protected main. See [releasing.md](releasing.md).
+bot commit to protected main. Draft creation uses GitHub's returned release
+object directly because its lookup endpoints are briefly eventually consistent.
+See [releasing.md](releasing.md).
 
 ## Test coverage
 
