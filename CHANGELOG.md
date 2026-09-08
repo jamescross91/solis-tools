@@ -3,12 +3,17 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.5.3
+## 0.5.4
 
 ### Fixed
 
 - Start configured monitoring from the application lifecycle so a Homebrew or
   login launch resumes polling without waiting for the menu extra to be opened.
+
+## 0.5.3
+
+### Fixed
+
 - Cap each import-regulation session at its initial measured grid demand plus a
   configurable 2 kW headroom, preventing unused grid peak-shaving allowance
   ratcheting towards the hard maximum. The ceiling tracks genuine demand down
