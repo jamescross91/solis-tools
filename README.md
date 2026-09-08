@@ -218,9 +218,12 @@ Every write first durably records a pending command. Lost replies are reconciled
 against the old and intended values before another write is allowed. After an
 unclean restart during charging, the recovered baseline caps further increases.
 Each import-control session starts with a demand ceiling from its first measured
-grid peak plus the configured headroom. The ceiling follows measured demand
-downwards during the session but cannot ratchet upwards as released charging
-demand responds; it resets only after the import condition ends.
+grid peak plus the configured headroom. The ceiling follows genuine measured
+demand down and back up, but discounts the observed response to its own recent
+commands so released charging demand cannot ratchet it towards the hard maximum.
+The controller waits for each command to settle before allowing the ceiling to
+rise, while reductions remain immediate. The estimate resets after the import
+condition ends.
 Voltage age is measured from the start of the meter request using a monotonic
 clock. Shutdown with stale or recovering telemetry leaves the current limit and
 unclean journal intact for later fresh recovery rather than raising power.
@@ -237,6 +240,11 @@ operating range, label targets and safety boundaries, and show the exact local
 time and measurements under the pointer. The activity list records when a limit
 changed, its previous and new values, the signed difference, the measured PCC
 voltage and grid flow, and the controller's reason.
+
+Long histories are sampled to the chart's visible resolution before drawing to
+avoid wasting energy on thousands of indistinguishable marks. Axis ranges and
+pointer tooltips continue to use the complete in-memory history, so peaks and
+exact hovered measurements are not rounded to the displayed line samples.
 
 ### Control options and defaults
 

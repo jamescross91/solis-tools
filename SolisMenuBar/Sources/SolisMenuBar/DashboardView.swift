@@ -646,7 +646,20 @@ private struct VoltageControlChartView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let allPoints = points
+        let renderedPoints = chartSamples(allPoints, maximumCount: 360)
+        let latestPoint = allPoints.last
+        let hoveredVoltagePoint = nearestPoint(in: allPoints, to: hoveredVoltageDate)
+        let hoveredPowerPoint = nearestPoint(in: allPoints, to: hoveredPowerDate)
+        let notablePoints = chartSamples(
+            allPoints.filter {
+                $0.voltageControl?.emergency == true
+                    || $0.voltageControl?.action == "Increasing"
+                    || $0.voltageControl?.action == "Reducing"
+            },
+            maximumCount: 120
+        )
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Voltage control").font(.headline)
                 Spacer()
@@ -676,7 +689,7 @@ private struct VoltageControlChartView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             Chart {
-                if let point = nearestPoint(to: hoveredVoltageDate),
+                if let point = hoveredVoltagePoint,
                    let voltage = point.reading.meterVoltageV {
                     RuleMark(x: .value("Selected time", point.date))
                         .foregroundStyle(.secondary.opacity(0.5))
@@ -687,7 +700,7 @@ private struct VoltageControlChartView: View {
                             )
                         }
                 }
-                ForEach(points) { point in
+                ForEach(renderedPoints) { point in
                     if let voltage = point.reading.meterVoltageV {
                         LineMark(
                             x: .value("Time", point.date),
@@ -695,17 +708,17 @@ private struct VoltageControlChartView: View {
                         )
                         .foregroundStyle(.cyan)
                         .interpolationMethod(.linear)
-                        if point.id == points.last?.id {
-                            PointMark(
-                                x: .value("Latest time", point.date),
-                                y: .value("Latest PCC voltage", voltage)
-                            )
-                            .foregroundStyle(.cyan)
-                            .annotation(position: .topTrailing) {
-                                Text(String(format: "Now %.1f V", voltage))
-                                    .font(.caption2.weight(.medium))
-                            }
-                        }
+                    }
+                }
+                if let point = latestPoint, let voltage = point.reading.meterVoltageV {
+                    PointMark(
+                        x: .value("Latest time", point.date),
+                        y: .value("Latest PCC voltage", voltage)
+                    )
+                    .foregroundStyle(.cyan)
+                    .annotation(position: .topTrailing) {
+                        Text(String(format: "Now %.1f V", voltage))
+                            .font(.caption2.weight(.medium))
                     }
                 }
                 RuleMark(y: .value("Minimum", minimumVoltage))
@@ -721,11 +734,11 @@ private struct VoltageControlChartView: View {
                     .foregroundStyle(.red)
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
-            .chartYScale(domain: voltageDomain)
+            .chartYScale(domain: voltageDomain(allPoints))
             .chartYAxisLabel("V")
             .chartXAxis { timeAxis }
             .chartOverlay { proxy in
-                hoverOverlay(proxy: proxy, selection: $hoveredVoltageDate)
+                hoverOverlay(proxy: proxy, points: allPoints, selection: $hoveredVoltageDate)
             }
             .frame(height: 145)
 
@@ -744,7 +757,7 @@ private struct VoltageControlChartView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             Chart {
-                if let point = nearestPoint(to: hoveredPowerDate) {
+                if let point = hoveredPowerPoint {
                     RuleMark(x: .value("Selected time", point.date))
                         .foregroundStyle(.secondary.opacity(0.5))
                         .annotation(position: .top, spacing: 4) {
@@ -754,7 +767,7 @@ private struct VoltageControlChartView: View {
                             )
                         }
                 }
-                ForEach(points) { point in
+                ForEach(renderedPoints) { point in
                     LineMark(
                         x: .value("Time", point.date),
                         y: .value("Grid flow", point.reading.gridImportPositiveKw),
@@ -769,6 +782,8 @@ private struct VoltageControlChartView: View {
                         )
                         .foregroundStyle(.blue)
                     }
+                }
+                ForEach(notablePoints) { point in
                     if point.voltageControl?.emergency == true {
                         PointMark(
                             x: .value("Emergency", point.date),
@@ -791,31 +806,31 @@ private struct VoltageControlChartView: View {
                         .foregroundStyle(.orange)
                         .symbolSize(18)
                     }
-                    if point.id == points.last?.id {
-                        PointMark(
-                            x: .value("Latest time", point.date),
-                            y: .value("Latest grid flow", point.reading.gridImportPositiveKw)
-                        )
-                        .foregroundStyle(.orange)
-                        .annotation(position: .topTrailing) {
-                            Text(
-                                String(
-                                    format: "Now %+.2f kW",
-                                    point.reading.gridImportPositiveKw
-                                )
+                }
+                if let point = latestPoint {
+                    PointMark(
+                        x: .value("Latest time", point.date),
+                        y: .value("Latest grid flow", point.reading.gridImportPositiveKw)
+                    )
+                    .foregroundStyle(.orange)
+                    .annotation(position: .topTrailing) {
+                        Text(
+                            String(
+                                format: "Now %+.2f kW",
+                                point.reading.gridImportPositiveKw
                             )
-                            .font(.caption2.weight(.medium))
-                        }
+                        )
+                        .font(.caption2.weight(.medium))
                     }
                 }
                 RuleMark(y: .value("Zero", 0))
                     .foregroundStyle(.secondary.opacity(0.35))
             }
-            .chartYScale(domain: powerDomain)
+            .chartYScale(domain: powerDomain(allPoints))
             .chartYAxisLabel("kW")
             .chartXAxis { timeAxis }
             .chartOverlay { proxy in
-                hoverOverlay(proxy: proxy, selection: $hoveredPowerDate)
+                hoverOverlay(proxy: proxy, points: allPoints, selection: $hoveredPowerDate)
             }
             .frame(height: 145)
         }
@@ -829,7 +844,7 @@ private struct VoltageControlChartView: View {
         }
     }
 
-    private var voltageDomain: ClosedRange<Double> {
+    private func voltageDomain(_ points: [HistoryPoint]) -> ClosedRange<Double> {
         let values = points.compactMap(\.reading.meterVoltageV)
         guard let low = values.min(), let high = values.max() else {
             return minimumVoltage...maximumVoltage
@@ -846,7 +861,7 @@ private struct VoltageControlChartView: View {
         return paddedDomain(anchors, minimumPadding: 0.4, includeZero: false)
     }
 
-    private var powerDomain: ClosedRange<Double> {
+    private func powerDomain(_ points: [HistoryPoint]) -> ClosedRange<Double> {
         var values = points.map { $0.reading.gridImportPositiveKw }
         values += points.compactMap(signedControlLimit)
         return paddedDomain(values, minimumPadding: 0.25, includeZero: true)
@@ -870,11 +885,9 @@ private struct VoltageControlChartView: View {
         return nil
     }
 
-    private func nearestPoint(to date: Date?) -> HistoryPoint? {
+    private func nearestPoint(in points: [HistoryPoint], to date: Date?) -> HistoryPoint? {
         guard let date else { return nil }
-        return points.min {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-        }
+        return nearestSortedPoint(in: points, to: date, date: \.date)
     }
 
     private func powerTooltipLines(_ point: HistoryPoint) -> [String] {
@@ -888,7 +901,11 @@ private struct VoltageControlChartView: View {
         return lines
     }
 
-    private func hoverOverlay(proxy: ChartProxy, selection: Binding<Date?>) -> some View {
+    private func hoverOverlay(
+        proxy: ChartProxy,
+        points: [HistoryPoint],
+        selection: Binding<Date?>
+    ) -> some View {
         GeometryReader { geometry in
             Rectangle()
                 .fill(.clear)
@@ -901,7 +918,11 @@ private struct VoltageControlChartView: View {
                             selection.wrappedValue = nil
                             return
                         }
-                        selection.wrappedValue = proxy.value(atX: location.x - frame.origin.x)
+                        let hovered: Date? = proxy.value(atX: location.x - frame.origin.x)
+                        let snapped = nearestPoint(in: points, to: hovered)?.date
+                        if selection.wrappedValue != snapped {
+                            selection.wrappedValue = snapped
+                        }
                     case .ended:
                         selection.wrappedValue = nil
                     }
@@ -966,6 +987,41 @@ private struct ChartTooltip: View {
     }
 }
 
+/// A chart only has a few hundred horizontal pixels. Keeping thousands of
+/// marks makes every telemetry refresh expensive without adding visible detail.
+func chartSamples<Element>(
+    _ values: [Element], maximumCount: Int
+) -> [Element] {
+    guard maximumCount > 1, values.count > maximumCount else { return values }
+    let scale = Double(values.count - 1) / Double(maximumCount - 1)
+    return (0..<maximumCount).map { values[Int((Double($0) * scale).rounded())] }
+}
+
+private func nearestSortedPoint<Element>(
+    in values: [Element],
+    to target: Date,
+    date dateKeyPath: KeyPath<Element, Date>
+) -> Element? {
+    guard !values.isEmpty else { return nil }
+    var lower = 0
+    var upper = values.count
+    while lower < upper {
+        let middle = (lower + upper) / 2
+        if values[middle][keyPath: dateKeyPath] < target {
+            lower = middle + 1
+        } else {
+            upper = middle
+        }
+    }
+    if lower == 0 { return values[0] }
+    if lower == values.count { return values[values.count - 1] }
+    let before = values[lower - 1]
+    let after = values[lower]
+    return target.timeIntervalSince(before[keyPath: dateKeyPath])
+            <= after[keyPath: dateKeyPath].timeIntervalSince(target)
+        ? before : after
+}
+
 private struct HistoryChartView: View {
     let history: [HistoryPoint]
     let pvEnabled: Bool
@@ -973,7 +1029,10 @@ private struct HistoryChartView: View {
     @State private var hoveredDate: Date?
 
     var body: some View {
-        let latestID = chartPoints.last?.id
+        let allPoints = chartPoints
+        let renderedPoints = chartSamples(allPoints, maximumCount: 360)
+        let latestPoint = allPoints.last
+        let hoveredPoint = nearestPoint(in: allPoints, to: hoveredDate)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("History")
@@ -991,7 +1050,7 @@ private struct HistoryChartView: View {
             .labelsHidden()
             .pickerStyle(.menu)
 
-            if chartPoints.isEmpty {
+            if allPoints.isEmpty {
                 PlaceholderView(
                     title: "Waiting for samples",
                     message: "History appears after the first successful polls.",
@@ -1002,13 +1061,13 @@ private struct HistoryChartView: View {
                 HStack {
                     ChartKey(colour: metricColour, label: metric.rawValue)
                     Spacer()
-                    Text(historyRangeLabel)
+                    Text(historyRangeLabel(allPoints))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
                 Chart {
-                    if let point = nearestPoint(to: hoveredDate) {
+                    if let point = hoveredPoint {
                         RuleMark(x: .value("Selected time", point.date))
                             .foregroundStyle(.secondary.opacity(0.5))
                             .annotation(position: .top, spacing: 4) {
@@ -1022,34 +1081,34 @@ private struct HistoryChartView: View {
                                 )
                             }
                     }
-                    ForEach(chartPoints) { point in
+                    ForEach(renderedPoints) { point in
                         LineMark(
                             x: .value("Time", point.date),
                             y: .value(metric.unit, point.value)
                         )
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.linear)
                         .foregroundStyle(metricColour)
-                        if point.id == latestID {
-                            PointMark(
-                                x: .value("Latest time", point.date),
-                                y: .value("Latest value", point.value)
-                            )
-                            .foregroundStyle(metricColour)
-                            .annotation(position: .topTrailing) {
-                                Text(String(format: "%.1f %@", point.value, metric.unit))
-                                    .font(.caption2.weight(.medium))
-                            }
+                    }
+                    if let point = latestPoint {
+                        PointMark(
+                            x: .value("Latest time", point.date),
+                            y: .value("Latest value", point.value)
+                        )
+                        .foregroundStyle(metricColour)
+                        .annotation(position: .topTrailing) {
+                            Text(String(format: "%.1f %@", point.value, metric.unit))
+                                .font(.caption2.weight(.medium))
                         }
                     }
                     RuleMark(y: .value("Zero", 0))
                         .foregroundStyle(.secondary.opacity(0.25))
                 }
-                .chartYScale(domain: yDomain)
+                .chartYScale(domain: yDomain(allPoints))
                 .chartYAxisLabel(metric.unit)
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) {
                         AxisGridLine()
-                        AxisValueLabel(format: axisTimeFormat)
+                        AxisValueLabel(format: axisTimeFormat(allPoints))
                     }
                 }
                 .chartOverlay { proxy in
@@ -1065,9 +1124,15 @@ private struct HistoryChartView: View {
                                         hoveredDate = nil
                                         return
                                     }
-                                    hoveredDate = proxy.value(
+                                    let hovered: Date? = proxy.value(
                                         atX: location.x - frame.origin.x
                                     )
+                                    let snapped = nearestPoint(
+                                        in: allPoints, to: hovered
+                                    )?.date
+                                    if hoveredDate != snapped {
+                                        hoveredDate = snapped
+                                    }
                                 case .ended:
                                     hoveredDate = nil
                                 }
@@ -1108,18 +1173,16 @@ private struct HistoryChartView: View {
         }
     }
 
-    private func nearestPoint(to date: Date?) -> ChartPoint? {
+    private func nearestPoint(in points: [ChartPoint], to date: Date?) -> ChartPoint? {
         guard let date else { return nil }
-        return chartPoints.min {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-        }
+        return nearestSortedPoint(in: points, to: date, date: \.date)
     }
 
     /// Fit the observed values with useful headroom. Voltage and temperature
     /// must not be pulled down to zero, while power keeps zero visible so its
     /// direction remains obvious.
-    private var yDomain: ClosedRange<Double> {
-        let values = chartPoints.map(\.value)
+    private func yDomain(_ points: [ChartPoint]) -> ClosedRange<Double> {
+        let values = points.map(\.value)
         guard var low = values.min(), var high = values.max() else { return 0...1 }
         switch metric {
         case .house, .pv:
@@ -1136,8 +1199,8 @@ private struct HistoryChartView: View {
         return lower...max(high + padding, lower + minimumPadding * 2)
     }
 
-    private var historyRangeLabel: String {
-        let values = chartPoints.map(\.value)
+    private func historyRangeLabel(_ points: [ChartPoint]) -> String {
+        let values = points.map(\.value)
         guard let low = values.min(), let high = values.max(), let latest = values.last else {
             return ""
         }
@@ -1149,8 +1212,8 @@ private struct HistoryChartView: View {
 
     /// Hours and minutes repeat every tick until the window is minutes wide, so
     /// short spans need seconds to distinguish one tick from the next.
-    private var axisTimeFormat: Date.FormatStyle {
-        guard let first = chartPoints.first?.date, let last = chartPoints.last?.date else {
+    private func axisTimeFormat(_ points: [ChartPoint]) -> Date.FormatStyle {
+        guard let first = points.first?.date, let last = points.last?.date else {
             return .dateTime.hour().minute()
         }
         return last.timeIntervalSince(first) < 600

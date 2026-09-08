@@ -138,6 +138,11 @@ high- or low-voltage operating band, distinguish signed grid flow from the activ
 actuator limit, and expose exact samples on pointer hover. Activity events carry
 the previous, current and delta limit so the UI can state what changed and why.
 
+Chart preparation runs once per SwiftUI refresh. Lines are uniformly sampled to
+at most 360 visible marks, while ranges and hover lookup retain the full history.
+Hover dates snap to real samples and only publish state when that sample changes;
+nearest-sample lookup is logarithmic because history remains time ordered.
+
 Export validation is a separate endpoint-hashed JSON record in the same private
 state directory. It is installation evidence, not recovery state: changing the
 endpoint selects a different record, while `--export-control-validation` may
@@ -154,7 +159,10 @@ an interrupted write to either the prior or intended value; other values suspend
 recovery. Recovered active-session baselines constrain the actuator maximum.
 Import regulation starts a per-session ceiling at initial measured grid demand
 plus configured headroom. It trims excessive allowance immediately and follows
-measured demand downwards, but cannot ratchet upwards as released demand changes.
+genuine measured demand in both directions. Import changes record their settled
+grid response; that attributable response is removed from the demand estimate so
+the controller cannot ratchet its own ceiling. Upward tracking pauses while a
+command response is pending, while reductions remain immediate.
 
 SQLite telemetry transactions are batched for 60 seconds, with event and close
 flushes. Safety-journal writes are independent and durable before transmission.

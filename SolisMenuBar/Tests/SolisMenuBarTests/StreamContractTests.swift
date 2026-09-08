@@ -278,6 +278,14 @@ final class StoredConfigurationTests: XCTestCase {
 }
 
 final class HistoryBufferTests: XCTestCase {
+    func testChartSamplingCapsMarksAndPreservesTheTimeBounds() {
+        let values = Array(0..<1_000)
+        let sampled = chartSamples(values, maximumCount: 360)
+        XCTAssertEqual(sampled.count, 360)
+        XCTAssertEqual(sampled.first, 0)
+        XCTAssertEqual(sampled.last, 999)
+    }
+
     private func reading() throws -> InverterReading {
         try StreamDecoder.decode(
             Data(

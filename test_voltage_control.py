@@ -208,6 +208,7 @@ class ControllerTests(unittest.TestCase):
 
         # Demand following the released allowance must not ratchet the session
         # ceiling beyond the 14 kW established from the initial 12 kW peak.
+        controller.command_applied("import", 10_000, 14_000, 220, 0, -12)
         at_ceiling = controller.evaluate(sample(10, voltage=220, grid_kw=-14), 14_000, 5_000)
         self.assertEqual(at_ceiling.action, ControlAction.HOLDING)
         self.assertEqual(at_ceiling.desired_limit_w, 14_000)
@@ -234,7 +235,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(decision.desired_limit_w, 14_000)
         self.assertIn("above measured import", decision.reason)
 
-    def test_import_ceiling_only_tracks_falling_demand(self):
+    def test_import_ceiling_tracks_falling_and_rising_external_demand(self):
         controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
         initial = sample(0, voltage=220, grid_kw=-12)
         controller.evaluate(initial, 10_000, 5_000)
@@ -246,11 +247,26 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(falling.desired_limit_w, 10_000)
         self.assertEqual(controller.import_demand_ceiling_w, 10_000)
 
-        # Later import growth must not reopen the feedback path to the hard
-        # maximum during the same control session.
         rising = controller.evaluate(sample(20, voltage=220, grid_kw=-11), 10_000, 5_000)
-        self.assertEqual(rising.desired_limit_w, 10_000)
-        self.assertEqual(controller.import_demand_ceiling_w, 10_000)
+        self.assertEqual(rising.desired_limit_w, 10_200)
+        self.assertEqual(controller.import_demand_ceiling_w, 13_000)
+
+    def test_import_ceiling_excludes_demand_released_by_its_own_command(self):
+        controller = self.controller(
+            maximum_import_w=22_000,
+            import_headroom_w=2_000,
+            settle_time_s=5,
+        )
+        initial = sample(0, voltage=220, grid_kw=-12)
+        controller.evaluate(initial, 10_000, 5_000)
+        controller.evaluate(initial, 10_000, 5_000)
+        controller.command_applied("import", 10_000, 10_200, 220, 0, -12)
+
+        controller.evaluate(sample(1, voltage=220, grid_kw=-12.2), 10_200, 5_000)
+        self.assertEqual(controller.import_demand_ceiling_w, 14_000)
+        controller.evaluate(sample(5, voltage=220, grid_kw=-12.2), 10_200, 5_000)
+        self.assertEqual(controller.import_controlled_demand_w, 200)
+        self.assertEqual(controller.import_demand_ceiling_w, 14_000)
 
     def test_raw_boundary_causes_immediate_emergency_reduction(self):
         controller = DynamicVoltageController(DynamicVoltageConfiguration(enabled=True))

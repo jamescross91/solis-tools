@@ -396,6 +396,7 @@ class DynamicVoltageController:
         self.pending_observation: _SensitivityObservation | None = None
         self.import_demand_ceiling_w: int | None = None
         self.import_activation_peak_w = 0
+        self.import_controlled_demand_w = 0
 
     def communication_unavailable(self) -> ControlDecision:
         self.recovering = True
@@ -451,6 +452,14 @@ class DynamicVoltageController:
             return
         delta_kw = sample.grid_kw - pending.grid_kw
         delta_voltage = sample.raw_voltage_v - pending.voltage_v
+        if pending.mode == "import":
+            limit_delta_w = pending.new_w - pending.old_w
+            import_delta_w = round(-delta_kw * 1_000)
+            if limit_delta_w * import_delta_w > 0:
+                attributable_w = min(abs(limit_delta_w), abs(import_delta_w))
+                self.import_controlled_demand_w += (
+                    attributable_w if limit_delta_w > 0 else -attributable_w
+                )
         expected_direction = (pending.new_w - pending.old_w) * (
             -1 if pending.mode == "import" else 1
         )
@@ -526,6 +535,7 @@ class DynamicVoltageController:
             if candidate != "import":
                 self.import_demand_ceiling_w = None
                 self.import_activation_peak_w = 0
+                self.import_controlled_demand_w = 0
             state = (
                 VoltageControlState.GRID_CHARGING
                 if candidate == "import"
@@ -563,6 +573,7 @@ class DynamicVoltageController:
         else:
             self.import_demand_ceiling_w = None
             self.import_activation_peak_w = 0
+            self.import_controlled_demand_w = 0
             decision = self._evaluate_export(sample, filtered, current_export_w)
         self.decision = decision
         return decision
@@ -571,11 +582,12 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
+        measured_import_w = max(0, round(-sample.grid_kw * 1_000))
         measured_ceiling_w = max(
             c.minimum_import_w,
             min(
                 c.maximum_import_w,
-                max(0, round(-sample.grid_kw * 1_000)) + c.import_headroom_w,
+                round(measured_import_w - self.import_controlled_demand_w) + c.import_headroom_w,
             ),
         )
         if self.import_demand_ceiling_w is None:
@@ -587,9 +599,11 @@ class DynamicVoltageController:
                 ),
             )
         elif sample.age_s <= c.fresh_age_s:
-            # Released charging demand can make measured import rise, so a
-            # session ceiling may follow demand down but never ratchet upwards.
-            self.import_demand_ceiling_w = min(self.import_demand_ceiling_w, measured_ceiling_w)
+            pending_import_response = (
+                self.pending_observation is not None and self.pending_observation.mode == "import"
+            )
+            if measured_ceiling_w < self.import_demand_ceiling_w or not pending_import_response:
+                self.import_demand_ceiling_w = measured_ceiling_w
         demand_ceiling_w = self.import_demand_ceiling_w
         if sample.raw_voltage_v <= c.minimum_voltage_v:
             desired = max(c.minimum_import_w, current_w - c.emergency_reduction_w)

@@ -9,11 +9,15 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 - Cap each import-regulation session at its initial measured grid demand plus a
   configurable 2 kW headroom, preventing unused grid peak-shaving allowance
-  ratcheting towards the hard maximum. The ceiling follows falling demand and
-  trims excess allowance without weakening voltage-triggered reductions.
+  ratcheting towards the hard maximum. The ceiling tracks genuine demand down
+  and back up, discounting settled demand caused by its own commands, and trims
+  excess allowance without weakening voltage-triggered reductions.
 - Plot the active export actuator with the correct sign instead of always
   showing the import actuator, and use data-driven scales that no longer flatten
   voltage and temperature against zero.
+- Reduce menu-bar energy use by calculating chart data once per refresh, limiting
+  visible marks to the display resolution, using linear paths, and updating hover
+  state only when the nearest real measurement changes.
 - Prevent automatic publication failing when GitHub briefly hides a newly
   created draft from both release lookup endpoints. The publisher now continues
   from the validated release object returned by the creation request.
