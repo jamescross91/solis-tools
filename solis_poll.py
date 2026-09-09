@@ -39,7 +39,7 @@ from voltage_control import (
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
@@ -562,6 +562,7 @@ class _LimitActuator:
         self.before_write: Callable[[int], None] | None = None
         self.after_write: Callable[[int], None] | None = None
         self.uncertain_raw: int | None = None
+        self.pending_external_change: tuple[int, int] | None = None
 
     def _verified_write(self, raw: int, now: float) -> None:
         if self.before_write:
@@ -601,6 +602,29 @@ class _LimitActuator:
         self.last_commanded_raw = current
         return current
 
+    def synchronise_external(self, now: float) -> tuple[int, int] | None:
+        self._reconcile()
+        current = self._read()
+        previous = self.last_commanded_raw
+        if previous is None or current == previous:
+            return None
+        current_w = current * self.resolution_w
+        if not self.minimum_w <= current_w <= self.maximum_w:
+            raise ValueError(f"external limit {current_w} W is outside configured bounds")
+        self.baseline_raw = current
+        self.last_commanded_raw = current
+        self.last_requested_raw = current
+        # Give a manual change the same dwell as a controller write so the next
+        # optimisation step cannot immediately undo it.
+        self.last_write_monotonic = now
+        self.pending_external_change = (previous, current)
+        return self.pending_external_change
+
+    def consume_external_change(self) -> tuple[int, int] | None:
+        change = self.pending_external_change
+        self.pending_external_change = None
+        return change
+
     @property
     def commanded_w(self) -> int:
         return (self.last_commanded_raw or 0) * self.resolution_w
@@ -621,6 +645,8 @@ class _LimitActuator:
             and now - self.last_write_monotonic < self.minimum_write_interval_s
         ):
             return False, "write-rate guard active"
+        if not emergency and self.synchronise_external(now) is not None:
+            return False, "manual limit change adopted"
         try:
             self._verified_write(raw, now)
         except Exception as exc:
@@ -1021,12 +1047,15 @@ class VoltageControlRuntime:
             raise
         self.events: deque[dict[str, Any]] = deque(maxlen=20)
         self.initialised = False
-        self.last_event_signature: tuple[str, str, str] | None = None
+        self.last_event_signature: tuple[str, str, bool] | None = None
         self.recovery_note: str | None = None
         self.summary: dict[str, Any] = {}
         self.summary_updated_at = 0.0
         self.active_mode: str | None = None
         self.last_meter_monotonic: float | None = None
+        self.last_external_check_monotonic = 0.0
+
+    external_check_interval_s = 5.0
 
     def _fresh(self) -> bool:
         return (
@@ -1137,6 +1166,49 @@ class VoltageControlRuntime:
             self.journal_value, mode, raw, datetime.now().astimezone().isoformat(timespec="seconds")
         )
 
+    def _adopt_external_change(
+        self,
+        mode: str,
+        actuator: _LimitActuator,
+        change: tuple[int, int],
+        sample: GridTelemetrySample,
+    ) -> None:
+        previous_raw, current_raw = change
+        if self.journal_value is None:
+            raise RuntimeError("cannot adopt an external limit without a recovery journal")
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.journal.adopt_external(self.journal_value, mode, current_raw, timestamp)
+        decision = self.controller.adopt_external_limit(
+            mode, current_raw * actuator.resolution_w, sample
+        )
+        self._event(
+            decision,
+            sample.grid_kw,
+            current_raw * actuator.resolution_w,
+            previous_raw * actuator.resolution_w,
+            f"manual {mode} limit changed from "
+            f"{previous_raw * actuator.resolution_w / 1_000:g} to "
+            f"{current_raw * actuator.resolution_w / 1_000:g} kW; adopted as new baseline",
+        )
+        self.last_event_signature = (decision.state.value, decision.mode or "", decision.emergency)
+
+    def _synchronise_external_limit(
+        self,
+        sample: GridTelemetrySample,
+        now: float,
+    ) -> None:
+        if now - self.last_external_check_monotonic < self.external_check_interval_s:
+            return
+        self.last_external_check_monotonic = now
+        mode = self.active_mode or self.controller.detector._candidate(sample)
+        if mode not in {"import", "export"}:
+            return
+        actuator = self.import_actuator if mode == "import" else self.export_actuator
+        actuator.synchronise_external(now)
+        change = actuator.consume_external_change()
+        if change is not None:
+            self._adopt_external_change(mode, actuator, change, sample)
+
     def update(self, reading: Reading, now: float, sampled_at: float) -> ControlDecision:
         age = (
             max(0.0, time.monotonic() - reading.meter_sample_monotonic)
@@ -1165,14 +1237,16 @@ class VoltageControlRuntime:
             if not self.initialise(reading, now):
                 return self.controller.decision
 
+        sample = GridTelemetrySample(
+            monotonic_s=now,
+            raw_voltage_v=reading.meter_voltage_v,
+            grid_kw=reading.grid_kw,
+            battery_status=reading.battery_status,
+            age_s=age,
+        )
+        self._synchronise_external_limit(sample, now)
         decision = self.controller.evaluate(
-            GridTelemetrySample(
-                monotonic_s=now,
-                raw_voltage_v=reading.meter_voltage_v,
-                grid_kw=reading.grid_kw,
-                battery_status=reading.battery_status,
-                age_s=age,
-            ),
+            sample,
             self.import_actuator.commanded_w,
             self.export_actuator.commanded_w,
         )
@@ -1239,6 +1313,11 @@ class VoltageControlRuntime:
             changed, command_message = actuator.command(
                 decision.desired_limit_w, now, emergency=decision.emergency
             )
+            external_change = actuator.consume_external_change()
+            if external_change is not None:
+                self._adopt_external_change(decision.mode or "", actuator, external_change, sample)
+                decision = self.controller.decision
+                command_message = None
             if changed:
                 self.controller.command_applied(
                     decision.mode or "",
@@ -1249,17 +1328,23 @@ class VoltageControlRuntime:
                     reading.grid_kw,
                 )
 
-        signature = (decision.state.value, decision.action.value, decision.reason)
+        if not changed and command_message is not None:
+            decision = replace(
+                decision,
+                action=ControlAction.HOLDING,
+                desired_limit_w=actuator.commanded_w if actuator else decision.desired_limit_w,
+                reason=f"{decision.reason}; {command_message}",
+            )
+            self.controller.decision = decision
+
+        signature = (decision.state.value, decision.mode or "", decision.emergency)
         if changed or signature != self.last_event_signature:
-            message = decision.reason
-            if command_message and not changed:
-                message = f"{message}; {command_message}"
             self._event(
                 decision,
                 reading.grid_kw,
                 actuator.commanded_w if actuator else None,
                 old_w,
-                message,
+                decision.reason,
             )
             self.last_event_signature = signature
         if self.history_store:
@@ -1275,7 +1360,7 @@ class VoltageControlRuntime:
 
     def communication_unavailable(self) -> None:
         decision = self.controller.communication_unavailable()
-        signature = (decision.state.value, decision.action.value, decision.reason)
+        signature = (decision.state.value, decision.mode or "", decision.emergency)
         if signature != self.last_event_signature:
             self._event(decision, None, None)
             self.last_event_signature = signature

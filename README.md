@@ -228,9 +228,16 @@ Each import-control session starts with a demand ceiling from its first measured
 grid peak plus the configured headroom. The ceiling follows genuine measured
 demand down and back up, but discounts the observed response to its own recent
 commands so released charging demand cannot ratchet it towards the hard maximum.
-The controller waits for each command to settle before allowing the ceiling to
-rise, while reductions remain immediate. The estimate resets after the import
-condition ends.
+Rises are accepted promptly; a 500 W change must persist for 30 seconds before
+the ceiling falls, preventing brief load dips from causing a large trim followed
+by a slow climb. Voltage-triggered safety reductions remain immediate. The
+estimate resets after the import condition ends.
+
+The controller checks the active typed limit for changes made in the Solis app.
+A manual import or export adjustment is adopted as both the current value and
+the new restoration baseline, with a fresh settle period; optimisation then
+continues from that value. A final read immediately before every normal write
+prevents a just-made manual change being overwritten between periodic checks.
 Voltage age is measured from the start of the meter request using a monotonic
 clock. Shutdown with stale or recovering telemetry leaves the current limit and
 unclean journal intact for later fresh recovery rather than raising power.
@@ -246,7 +253,9 @@ The control charts identify each series, focus their scales on the relevant
 operating range, label targets and safety boundaries, and show the exact local
 time and measurements under the pointer. The activity list records when a limit
 changed, its previous and new values, the signed difference, the measured PCC
-voltage and grid flow, and the controller's reason.
+voltage and grid flow, and the controller's reason. Proposals suppressed by the
+write-rate or unchanged-value guards are shown as holding state and do not create
+misleading increase/trim activity entries.
 
 Long histories are sampled to the chart's visible resolution before drawing to
 avoid wasting energy on thousands of indistinguishable marks. Axis ranges and
@@ -279,7 +288,7 @@ changed by capturing its baseline.
 | `--voltage-safety-margin` | 1.5 V | Working targets inside boundaries |
 | `--voltage-deadband` | 0.75 V | Holding band around working targets |
 | `--maximum-import-kw` | 14 kW | Normal import ceiling |
-| `--import-headroom-kw` | 2 kW | Unused import allowance above measured demand; the session ceiling may follow demand down but not up |
+| `--import-headroom-kw` | 2 kW | Unused import allowance above estimated external demand; rises promptly and sustained falls reduce the session ceiling |
 | `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling |
 | `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
 | `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |

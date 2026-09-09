@@ -174,11 +174,20 @@ fsync, atomic replacement and a process-lifetime endpoint lock. Readback resolve
 an interrupted write to either the prior or intended value; other values suspend
 recovery. Recovered active-session baselines constrain the actuator maximum.
 Import regulation starts a per-session ceiling at initial measured grid demand
-plus configured headroom. It trims excessive allowance immediately and follows
-genuine measured demand in both directions. Import changes record their settled
-grid response; that attributable response is removed from the demand estimate so
-the controller cannot ratchet its own ceiling. Upward tracking pauses while a
-command response is pending, while reductions remain immediate.
+plus configured headroom. It follows genuine measured demand in both directions,
+raising promptly but requiring a 500 W fall to persist for 30 seconds before
+trimming; voltage safety reductions remain immediate. Import changes record
+their settled grid response; that attributable response is removed from the
+demand estimate so the controller cannot ratchet its own ceiling. Upward tracking
+pauses while a command response is pending.
+
+While regulation is active, the runtime checks the typed actuator every five
+seconds and immediately before a normal write. A value changed by another Solis
+client is adopted as the current limit and new journal baseline, and the demand
+ceiling is re-anchored so optimisation continues from the manual value. This
+adds at most one FC03 check per five seconds for the active actuator; it never
+writes an arbitrary register. Suppressed command proposals become holding
+samples and only real writes or operating-state transitions enter the event log.
 
 SQLite telemetry transactions are batched for 60 seconds, with event and close
 flushes. Safety-journal writes are independent and durable before transmission.

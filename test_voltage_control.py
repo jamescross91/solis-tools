@@ -243,13 +243,40 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.import_demand_ceiling_w, 14_000)
 
         falling = controller.evaluate(sample(10, voltage=220, grid_kw=-8), 14_000, 5_000)
+        self.assertEqual(falling.action, ControlAction.HOLDING)
+        controller.evaluate(sample(39, voltage=220, grid_kw=-8), 14_000, 5_000)
+        falling = controller.evaluate(sample(40, voltage=220, grid_kw=-8), 14_000, 5_000)
         self.assertEqual(falling.action, ControlAction.REDUCING)
         self.assertEqual(falling.desired_limit_w, 10_000)
         self.assertEqual(controller.import_demand_ceiling_w, 10_000)
 
-        rising = controller.evaluate(sample(20, voltage=220, grid_kw=-11), 10_000, 5_000)
+        rising = controller.evaluate(sample(41, voltage=220, grid_kw=-11), 10_000, 5_000)
         self.assertEqual(rising.desired_limit_w, 10_200)
         self.assertEqual(controller.import_demand_ceiling_w, 13_000)
+
+    def test_manual_import_limit_reanchors_headroom_and_continues_from_there(self):
+        controller = self.controller(
+            maximum_import_w=22_000,
+            import_headroom_w=2_000,
+            settle_time_s=5,
+        )
+        active = sample(0, voltage=220, grid_kw=-13)
+        controller.evaluate(active, 13_000, 5_000)
+        controller.evaluate(active, 13_000, 5_000)
+
+        adopted = controller.adopt_external_limit(
+            "import", 16_000, sample(1, voltage=220, grid_kw=-13)
+        )
+        self.assertEqual(adopted.action, ControlAction.HOLDING)
+        self.assertEqual(controller.import_demand_ceiling_w, 16_000)
+        held = controller.evaluate(sample(6, voltage=220, grid_kw=-13), 16_000, 5_000)
+        self.assertEqual(held.action, ControlAction.HOLDING)
+        self.assertEqual(held.desired_limit_w, 16_000)
+
+        rising = controller.evaluate(sample(7, voltage=220, grid_kw=-14), 16_000, 5_000)
+        self.assertEqual(rising.action, ControlAction.INCREASING)
+        self.assertEqual(rising.desired_limit_w, 16_200)
+        self.assertEqual(controller.import_demand_ceiling_w, 17_000)
 
     def test_import_ceiling_excludes_demand_released_by_its_own_command(self):
         controller = self.controller(
@@ -391,7 +418,9 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
         actuator = ImportLimitActuator(client, 1_000, 14_000, 5)  # type: ignore[arg-type]
         actuator.capture()
         with patch.object(
-            client, "read_peak_shaving_limit_raw", side_effect=ConnectionError("lost reply")
+            client,
+            "read_peak_shaving_limit_raw",
+            side_effect=[100, ConnectionError("lost reply")],
         ):
             with self.assertRaises(ConnectionError):
                 actuator.command(9_000, 0)
@@ -483,7 +512,9 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             )  # type: ignore[arg-type]
             runtime.update(reading(0, "Idle"), time.monotonic(), time.time())
             with patch.object(
-                client, "read_peak_shaving_limit_raw", side_effect=ConnectionError("lost reply")
+                client,
+                "read_peak_shaving_limit_raw",
+                side_effect=[100, ConnectionError("lost reply")],
             ):
                 with self.assertRaises(ConnectionError):
                     runtime.import_actuator.command(9_000, time.monotonic())
@@ -545,6 +576,86 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
         self.assertEqual(actuator.restore(2), (True, "captured baseline restored"))
         self.assertEqual(client.writes, [102, 104, 100])
 
+    def test_actuator_adopts_external_change_before_a_controller_write(self):
+        client = FakeClient()
+        actuator = ImportLimitActuator(client, 1_000, 22_000, 5)  # type: ignore[arg-type]
+        actuator.capture()
+        client.raw = 160
+        changed, message = actuator.command(12_000, 10)
+        self.assertFalse(changed)
+        self.assertIn("manual limit change adopted", message)
+        self.assertEqual(actuator.consume_external_change(), (100, 160))
+        self.assertEqual(actuator.baseline_raw, 160)
+        self.assertEqual(actuator.commanded_w, 16_000)
+        self.assertEqual(client.writes, [])
+
+    def test_runtime_adopts_manual_limit_and_continues_optimising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.json"
+            client = FakeClient()
+            runtime = VoltageControlRuntime(
+                client,
+                DynamicVoltageConfiguration(
+                    enabled=True,
+                    maximum_import_w=22_000,
+                    activation_delay_s=0,
+                    settle_time_s=0,
+                    filter_time_constant_s=0.01,
+                ),
+                5,
+                path,
+                None,
+                30,
+            )  # type: ignore[arg-type]
+            sampled_at = time.time()
+            runtime.update(reading(-13, "Charging"), 1, sampled_at)
+            runtime.update(reading(-13, "Charging"), 1, sampled_at)
+
+            client.raw = 160
+            adopted = runtime.update(reading(-13, "Charging"), 6, sampled_at)
+            self.assertEqual(adopted.action, ControlAction.HOLDING)
+            self.assertIn("adopted as new baseline", runtime.events[0]["message"])
+            self.assertEqual(runtime.import_actuator.baseline_raw, 160)
+            journal = ControllerJournal(path).load()
+            self.assertEqual(journal["baseline_import_raw"], 160)  # type: ignore[index]
+            self.assertEqual(journal["last_commanded_import_raw"], 160)  # type: ignore[index]
+
+            continued = runtime.update(reading(-14, "Charging"), 12, sampled_at)
+            self.assertEqual(continued.action, ControlAction.INCREASING)
+            self.assertEqual(client.raw, 162)
+            self.assertEqual(client.writes, [102, 162])
+            runtime.shutdown()
+            self.assertEqual(client.raw, 160)
+            self.assertEqual(client.writes, [102, 162, 160])
+
+    def test_suppressed_proposal_is_holding_and_not_an_activity_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient()
+            runtime = VoltageControlRuntime(
+                client,
+                DynamicVoltageConfiguration(
+                    enabled=True,
+                    maximum_import_w=22_000,
+                    activation_delay_s=0,
+                    settle_time_s=0,
+                    filter_time_constant_s=0.01,
+                ),
+                60,
+                Path(directory) / "journal.json",
+                None,
+                30,
+            )  # type: ignore[arg-type]
+            sampled_at = time.time()
+            runtime.update(reading(-13, "Charging"), 1, sampled_at)
+            runtime.update(reading(-13, "Charging"), 1, sampled_at)
+            event_count = len(runtime.events)
+
+            blocked = runtime.update(reading(-13, "Charging"), 2, sampled_at)
+            self.assertEqual(blocked.action, ControlAction.HOLDING)
+            self.assertIn("write-rate guard active", blocked.reason)
+            self.assertEqual(len(runtime.events), event_count)
+            runtime.shutdown()
+
     def test_restore_does_not_overwrite_an_external_change(self):
         client = FakeClient()
         actuator = ImportLimitActuator(client, 1_000, 14_000, 5)  # type: ignore[arg-type]
@@ -592,6 +703,10 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             recovered = journal.load()
             self.assertEqual(recovered["last_commanded_import_raw"], 90)  # type: ignore[index]
             self.assertFalse(recovered["clean_shutdown"])  # type: ignore[index]
+            journal.adopt_external(value, "import", 160, "manual")
+            recovered = journal.load()
+            self.assertEqual(recovered["baseline_import_raw"], 160)  # type: ignore[index]
+            self.assertEqual(recovered["last_commanded_import_raw"], 160)  # type: ignore[index]
             journal.mark_clean(value, "stopped")
             self.assertTrue(journal.load()["clean_shutdown"])  # type: ignore[index]
 

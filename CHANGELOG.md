@@ -3,6 +3,20 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.4
+
+### Fixed
+
+- Start configured monitoring from the application lifecycle so a Homebrew or
+  login launch resumes polling without waiting for the menu extra to be opened.
+- Adopt manual import or export limit changes as the new live and recovery
+  baseline, re-anchor import headroom and continue dynamic optimisation from the
+  selected value instead of restoring or immediately overwriting it.
+- Require a 500 W demand reduction to persist for 30 seconds before trimming the
+  import ceiling, while still raising it promptly and preserving immediate
+  voltage-safety action. Suppressed proposals now appear as holding state and no
+  longer flood the activity log as increases and reductions that never occurred.
+
 ## 0.5.3
 
 ### Fixed

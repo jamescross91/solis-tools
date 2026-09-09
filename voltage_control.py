@@ -372,6 +372,9 @@ class _SensitivityObservation:
 class DynamicVoltageController:
     """Discover the current safe power limit without assuming a fixed grid model."""
 
+    import_ceiling_hysteresis_w = 500
+    import_demand_reduction_delay_s = 30.0
+
     def __init__(self, configuration: DynamicVoltageConfiguration):
         configuration.validate()
         self.configuration = configuration
@@ -397,6 +400,46 @@ class DynamicVoltageController:
         self.import_demand_ceiling_w: int | None = None
         self.import_activation_peak_w = 0
         self.import_controlled_demand_w = 0
+        self.import_manual_bias_w = 0
+        self.import_lower_ceiling_candidate_w: int | None = None
+        self.import_lower_ceiling_since: float | None = None
+
+    def _reset_import_demand_tracking(self) -> None:
+        self.import_demand_ceiling_w = None
+        self.import_activation_peak_w = 0
+        self.import_controlled_demand_w = 0
+        self.import_manual_bias_w = 0
+        self.import_lower_ceiling_candidate_w = None
+        self.import_lower_ceiling_since = None
+
+    def adopt_external_limit(
+        self,
+        mode: str,
+        limit_w: int,
+        sample: GridTelemetrySample,
+    ) -> ControlDecision:
+        """Continue safely from a limit changed outside this controller."""
+        self.pending_observation = None
+        self.settle_until = sample.monotonic_s + self.configuration.settle_time_s
+        filtered = self.filter.value if self.filter.value is not None else sample.raw_voltage_v
+        if mode == "import":
+            measured_import_w = max(0, round(-sample.grid_kw * 1_000))
+            self.import_controlled_demand_w = 0
+            self.import_manual_bias_w = limit_w - (
+                measured_import_w + self.configuration.import_headroom_w
+            )
+            self.import_demand_ceiling_w = limit_w
+            self.import_activation_peak_w = measured_import_w
+            self.import_lower_ceiling_candidate_w = None
+            self.import_lower_ceiling_since = None
+        self.decision = self._hold(
+            mode,
+            limit_w,
+            sample,
+            filtered,
+            f"manual {mode} limit adopted as the new baseline",
+        )
+        return self.decision
 
     def communication_unavailable(self) -> ControlDecision:
         self.recovering = True
@@ -533,9 +576,7 @@ class DynamicVoltageController:
         if mode is None:
             candidate = self.detector.candidate
             if candidate != "import":
-                self.import_demand_ceiling_w = None
-                self.import_activation_peak_w = 0
-                self.import_controlled_demand_w = 0
+                self._reset_import_demand_tracking()
             state = (
                 VoltageControlState.GRID_CHARGING
                 if candidate == "import"
@@ -571,9 +612,7 @@ class DynamicVoltageController:
         if mode == "import":
             decision = self._evaluate_import(sample, filtered, current_import_w)
         else:
-            self.import_demand_ceiling_w = None
-            self.import_activation_peak_w = 0
-            self.import_controlled_demand_w = 0
+            self._reset_import_demand_tracking()
             decision = self._evaluate_export(sample, filtered, current_export_w)
         self.decision = decision
         return decision
@@ -587,7 +626,9 @@ class DynamicVoltageController:
             c.minimum_import_w,
             min(
                 c.maximum_import_w,
-                round(measured_import_w - self.import_controlled_demand_w) + c.import_headroom_w,
+                round(measured_import_w - self.import_controlled_demand_w)
+                + c.import_headroom_w
+                + self.import_manual_bias_w,
             ),
         )
         if self.import_demand_ceiling_w is None:
@@ -602,8 +643,35 @@ class DynamicVoltageController:
             pending_import_response = (
                 self.pending_observation is not None and self.pending_observation.mode == "import"
             )
-            if measured_ceiling_w < self.import_demand_ceiling_w or not pending_import_response:
+            ceiling_delta_w = measured_ceiling_w - self.import_demand_ceiling_w
+            if ceiling_delta_w >= self.import_ceiling_hysteresis_w and not pending_import_response:
                 self.import_demand_ceiling_w = measured_ceiling_w
+                self.import_lower_ceiling_candidate_w = None
+                self.import_lower_ceiling_since = None
+            elif pending_import_response:
+                # Do not treat the demand response to our own command as a
+                # sustained household-demand reduction.
+                self.import_lower_ceiling_candidate_w = None
+                self.import_lower_ceiling_since = None
+            elif ceiling_delta_w <= -self.import_ceiling_hysteresis_w:
+                if (
+                    self.import_lower_ceiling_candidate_w is None
+                    or abs(measured_ceiling_w - self.import_lower_ceiling_candidate_w)
+                    >= self.import_ceiling_hysteresis_w
+                ):
+                    self.import_lower_ceiling_candidate_w = measured_ceiling_w
+                    self.import_lower_ceiling_since = sample.monotonic_s
+                elif (
+                    self.import_lower_ceiling_since is not None
+                    and sample.monotonic_s - self.import_lower_ceiling_since
+                    >= self.import_demand_reduction_delay_s
+                ):
+                    self.import_demand_ceiling_w = measured_ceiling_w
+                    self.import_lower_ceiling_candidate_w = None
+                    self.import_lower_ceiling_since = None
+            else:
+                self.import_lower_ceiling_candidate_w = None
+                self.import_lower_ceiling_since = None
         demand_ceiling_w = self.import_demand_ceiling_w
         if sample.raw_voltage_v <= c.minimum_voltage_v:
             desired = max(c.minimum_import_w, current_w - c.emergency_reduction_w)
@@ -853,6 +921,13 @@ class ControllerJournal:
         value.pop(f"pending_{mode}_raw", None)
         value[f"last_commanded_{mode}_raw"] = raw
         value[f"{mode}_control_was_active"] = True
+        value["timestamp"] = timestamp
+        self.write(value)
+
+    def adopt_external(self, value: dict[str, Any], mode: str, raw: int, timestamp: str) -> None:
+        value.pop(f"pending_{mode}_raw", None)
+        value[f"baseline_{mode}_raw"] = raw
+        value[f"last_commanded_{mode}_raw"] = raw
         value["timestamp"] = timestamp
         self.write(value)
 

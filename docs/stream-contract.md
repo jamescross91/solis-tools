@@ -84,7 +84,7 @@ optional, so an older read-only poller still decodes.
 | `estimated_voltage_sensitivity_v_per_kw` | Recent measured response estimate, or null |
 | `import_actuator`, `export_actuator` | Register diagnostics described below |
 | `export_write_validated` | Whether matching endpoint evidence permits export writes; UI may use this gate but must not infer it |
-| `import_demand_ceiling_w` | Current import-session demand ceiling; follows estimated external demand plus headroom after discounting settled controller-induced demand, or null outside a session |
+| `import_demand_ceiling_w` | Current import-session demand ceiling; follows estimated external demand plus headroom after discounting settled controller-induced demand, and is re-anchored by a manual limit change, or null outside a session |
 | `recent_events` | Up to 20 recent events from the running process |
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |
@@ -99,7 +99,9 @@ transmissions with uncertain replies and reset when the process restarts.
 Events contain `timestamp`, `state`, `action`, `mode`, `message`, `voltage_v`,
 `grid_kw`, `limit_w`, `previous_limit_w` and `limit_delta_w`. The last three
 fields make held, increased, reduced and restored limits explicit without
-parsing prose. Populated daily summaries contain `lowest_voltage_v`,
+parsing prose. Suppressed command proposals are holding samples rather than
+activity events. Manual limit adoption produces a holding event whose previous
+and new limits identify the external change. Populated daily summaries contain `lowest_voltage_v`,
 `highest_voltage_v`, `import_regulating_s`, `export_regulating_s`,
 `emergency_interventions`, `maximum_import_kw`, `maximum_export_kw` and
 `average_grid_kw`. These are observed sample aggregates, not an energy meter.
