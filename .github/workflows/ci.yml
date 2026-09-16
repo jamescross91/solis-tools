@@ -66,6 +66,21 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest -v
 
+  python-gate:
+    # Matrix jobs are displayed with their platform suffix, so the ruleset's
+    # stable required check must be a separate aggregate rather than a matrix
+    # label that GitHub never publishes verbatim.
+    name: Python tests
+    needs: python
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every supported Python test to pass
+        env:
+          RESULT: ${{ needs.python.result }}
+        run: test "$RESULT" = success
+
   pymodbus-floor:
     name: PyModbus floor
     runs-on: ubuntu-latest
