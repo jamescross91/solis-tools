@@ -143,7 +143,14 @@ jobs:
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
       - name: Register repository as a tap
+        # Homebrew 6 verifies third-party tap contents while registering a tap.
+        # Allow that one bootstrap operation, then trust only this formula before
+        # any style, audit or install command can load it.
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
         run: brew tap jamescross91/solis-tools "${{ github.workspace }}"
+      - name: Trust the formula under test
+        run: brew trust --formula jamescross91/solis-tools/solis-tools
       # Offline checks only: this runs on every pull request, and --online makes
       # it depend on GitHub and PyPI being reachable.
       - run: brew style Formula/solis-tools.rb
@@ -175,7 +182,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          brew tap jamescross91/solis-tools "$GITHUB_WORKSPACE"
+          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew tap jamescross91/solis-tools "$GITHUB_WORKSPACE"
+          brew trust --formula jamescross91/solis-tools/solis-tools
           python scripts/release.py candidate HEAD
           cp Formula/solis-tools.rb "$(brew --repository jamescross91/solis-tools)/Formula/solis-tools.rb"
       - name: Install formula
