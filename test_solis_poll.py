@@ -7,6 +7,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from pymodbus.exceptions import ModbusException
+
 from solis_poll import (
     VERSION,
     Alarm,
@@ -26,28 +28,54 @@ from solis_poll import (
 
 
 class FakeResponse:
-    def __init__(self, registers):
+    def __init__(self, registers, exception_code=0):
         self.registers = registers
+        self.exception_code = exception_code
 
     def isError(self):
-        return False
+        return self.exception_code != 0
 
 
 class FakeModbusClient:
-    def __init__(self, responses):
-        self.responses = responses
+    """Serve a raw zero-based register bank the way a data logger would."""
+
+    def __init__(
+        self, bank, *, max_count=None, missing=(), glitch_wide_reads=0, refuse_wide_reads=0
+    ):
+        self.bank = bank
+        self.max_count = max_count
+        self.missing = set(missing)
+        self.glitch_wide_reads = glitch_wide_reads
+        self.refuse_wide_reads = refuse_wide_reads
         self.calls = []
 
     def read_input_registers(self, *, address, count, device_id):
         self.calls.append((address, count, device_id))
-        return FakeResponse(self.responses[(address, count)])
+        addresses = range(address, address + count)
+        if self.missing.intersection(addresses):
+            return FakeResponse([], exception_code=2)
+        if self.max_count is not None and count > self.max_count:
+            return FakeResponse([], exception_code=3)
+        if count > 16 and self.glitch_wide_reads > 0:
+            self.glitch_wide_reads -= 1
+            raise ModbusException("no response received")
+        if count > 16 and self.refuse_wide_reads > 0:
+            self.refuse_wide_reads -= 1
+            return FakeResponse([], exception_code=0x0B)
+        return FakeResponse([self.bank.get(register, 0) for register in addresses])
 
 
-def fake_solis(responses):
-    client = SolisClient.__new__(SolisClient)
-    client.client = FakeModbusClient(responses)
-    client.slave = 1
+def fake_solis(bank, **behaviour):
+    client = SolisClient("127.0.0.1", 502, 1, 1.0)
+    client.client = FakeModbusClient(bank, **behaviour)
     return client
+
+
+def covered_addresses(calls):
+    covered = set()
+    for address, count, _ in calls:
+        covered.update(range(address, address + count))
+    return covered
 
 
 class DecoderTests(unittest.TestCase):
@@ -114,35 +142,34 @@ class DecoderTests(unittest.TestCase):
 
 class ModbusPollingTests(unittest.TestCase):
     def setUp(self):
-        status = [0] * 16
-        status[0] = 1
-        status[4] = 93
-        status[10] = 1 << 2
-        status[12] = 1580
-        status[14] = 0
-        status[15] = 1720
-        self.responses = {
-            (33000, 4): [20, 101, 202, 301],
-            (35000, 1): [2001],
-            (33093, 3): [300, 5000, 3],
-            (33116, 5): [0, 0, 0, 0, 0],
-            (33035, 1): [125],
-            (33073, 1): [2500],
-            (33135, 16): status,
-            (33263, 2): [0xFFFF, 0xFE0C],
-            (33057, 2): [0, 2500],
+        self.bank = {
+            33000: 20,
+            33001: 101,
+            33002: 202,
+            33003: 301,
+            35000: 2001,
+            33035: 125,
+            33057: 0,
+            33058: 2500,
+            33073: 2500,
+            33093: 300,
+            33094: 5000,
+            33095: 3,
+            33135: 1,
+            33139: 93,
+            33145: 1 << 2,
+            33147: 1580,
+            33149: 0,
+            33150: 1720,
+            33251: 2425,
+            33263: 0xFFFF,
+            33264: 0xFE0C,
         }
 
-    def test_identification_and_polling_with_pv(self):
-        client = fake_solis(self.responses)
-        device = client.identify()
-        slow = client.poll_slow(pv_enabled=True)
-        reading = client.poll_fast(slow, pv_enabled=True)
-
-        self.assertTrue(device.profile_validated)
-        self.assertEqual(device.model_code, 20)
+    def assert_full_reading(self, reading):
         self.assertEqual(reading.inverter_temperature_c, 30.0)
         self.assertEqual(reading.inverter_status, "Generating")
+        self.assertEqual(reading.voltage, 250.0)
         self.assertEqual(reading.state_of_charge, 93)
         self.assertEqual(reading.house_load_kw, 1.58)
         self.assertEqual(reading.battery_kw, 1.72)
@@ -152,16 +179,103 @@ class ModbusPollingTests(unittest.TestCase):
         self.assertEqual(reading.pv_today_kwh, 12.5)
         self.assertEqual(reading.alarms[0].code, "BMS1.2")
 
+    def test_identification_and_polling_with_pv(self):
+        client = fake_solis(self.bank)
+        device = client.identify()
+        slow = client.poll_slow(pv_enabled=True)
+        reading = client.poll_fast(slow, pv_enabled=True)
+
+        self.assertTrue(device.profile_validated)
+        self.assertEqual(device.model_code, 20)
+        self.assert_full_reading(reading)
+
+    def test_each_poll_is_one_block_read_per_register_region(self):
+        """Five fast reads and three slow ones used to be eight round trips."""
+        client = fake_solis(self.bank)
+        slow = client.poll_slow(pv_enabled=True)
+        client.poll_fast(slow, pv_enabled=True, meter_voltage_enabled=True)
+        client.poll_fast(slow, pv_enabled=True, meter_voltage_enabled=True)
+
+        # Raw 33035-33120, 33057-33150, the one-off meter probe at 33251, then
+        # 33251-33264; the second fast poll needs no probe.
+        self.assertEqual(
+            [(address, count) for address, count, _ in client.client.calls],
+            [(33035, 86), (33057, 94), (33251, 1), (33251, 14), (33057, 94), (33251, 14)],
+        )
+
     def test_pv_registers_are_not_read_by_default(self):
-        client = fake_solis(self.responses)
+        client = fake_solis(self.bank)
         slow = client.poll_slow(pv_enabled=False)
         reading = client.poll_fast(slow, pv_enabled=False)
 
         self.assertIsNone(reading.pv_kw)
         self.assertIsNone(reading.pv_today_kwh)
-        calls = {(address, count) for address, count, _ in client.client.calls}
-        self.assertNotIn((33035, 1), calls)
-        self.assertNotIn((33057, 2), calls)
+        covered = covered_addresses(client.client.calls)
+        self.assertNotIn(33035, covered)
+        self.assertNotIn(33057, covered)
+        self.assertNotIn(33058, covered)
+
+    def test_a_logger_that_refuses_wide_reads_is_read_span_by_span(self):
+        client = fake_solis(self.bank, max_count=20)
+        for _ in range(SolisClient.BLOCK_FAILURES_BEFORE_NARROW):
+            slow = client.poll_slow(pv_enabled=True)
+            reading = client.poll_fast(slow, pv_enabled=True)
+            self.assert_full_reading(reading)
+        self.assertEqual(
+            client.narrow_spans, {SolisClient.SLOW_PV_SPANS, SolisClient.FAST_PV_SPANS}
+        )
+
+        del client.client.calls[:]
+        slow = client.poll_slow(pv_enabled=True)
+        self.assert_full_reading(client.poll_fast(slow, pv_enabled=True))
+        # Once the device has refused twice, no further wide attempt is made.
+        self.assertEqual(
+            [(address, count) for address, count, _ in client.client.calls],
+            [(33035, 1), (33093, 3), (33116, 5), (33057, 2), (33073, 1), (33135, 16), (33263, 2)],
+        )
+
+    def test_a_transport_failure_propagates_and_keeps_coalescing(self):
+        """Only a refusal says anything about the device's block support."""
+        client = fake_solis(self.bank, glitch_wide_reads=1)
+        with self.assertRaises(ModbusException):
+            client.poll_slow(pv_enabled=True)
+        self.assertEqual(len(client.client.calls), 1)
+        self.assertEqual(client.block_failures, {})
+        self.assertEqual(client.narrow_spans, set())
+
+        del client.client.calls[:]
+        client.poll_slow(pv_enabled=True)
+        self.assertEqual([call[:2] for call in client.client.calls], [(33035, 86)])
+
+    def test_one_refusal_falls_back_without_giving_up_coalescing(self):
+        client = fake_solis(self.bank, refuse_wide_reads=1)
+        slow = client.poll_slow(pv_enabled=True)
+        self.assertEqual(slow.pv_today_kwh, 12.5)
+        self.assertEqual(client.block_failures, {SolisClient.SLOW_PV_SPANS: 1})
+        self.assertEqual(client.narrow_spans, set())
+
+        del client.client.calls[:]
+        client.poll_slow(pv_enabled=True)
+        self.assertEqual([call[:2] for call in client.client.calls], [(33035, 86)])
+        self.assertEqual(client.block_failures, {})
+
+    def test_a_missing_meter_register_is_probed_once(self):
+        del self.bank[33251]
+        client = fake_solis(self.bank, missing={33251})
+        slow = client.poll_slow(pv_enabled=False)
+        for _ in range(3):
+            reading = client.poll_fast(slow, pv_enabled=False, meter_voltage_enabled=True)
+            self.assertIsNone(reading.meter_voltage_v)
+            self.assertEqual(reading.grid_kw, -0.5)
+        probes = [call for call in client.client.calls if 33251 in range(call[0], sum(call[:2]))]
+        self.assertEqual(len(probes), 1)
+
+    def test_meter_voltage_rides_in_the_grid_block(self):
+        client = fake_solis(self.bank)
+        slow = client.poll_slow(pv_enabled=False)
+        reading = client.poll_fast(slow, pv_enabled=False, meter_voltage_enabled=True)
+        self.assertEqual(reading.meter_voltage_v, 242.5)
+        self.assertEqual(reading.grid_kw, -0.5)
 
 
 class RecorderTests(unittest.TestCase):

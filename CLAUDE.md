@@ -67,9 +67,13 @@ annotate obvious code.
 **Register numbering has two conventions.** `SolisClient._registers(reference,
 count)` takes a 1-based reference and reads PDU address `reference - 1`. Inline
 comments, the README table and `fake_inverter.py`'s bank all use the **raw**
-zero-based address. So `_registers(33136, 16)` reads raw 33135–33150, and
-`status[10]` is raw 33145. Check any register change against all four: the call,
-its comment, the README table, and the offsets indexed out of the block.
+zero-based address. The polls read raw address spans (`FAST_SPANS` and the
+rest) through `_input_registers`, which returns a mapping keyed by raw address,
+so `registers[33145]` is raw 33145 and the conversion lives only in
+`_input_block`. Check any register change against all four: the span, the
+README table, the fake inverter's bank, and the addresses looked up from the
+block. A new address must fall inside an existing span or extend one without
+taking any block past 125 registers.
 
 **Control addresses do not use that conversion.** The feature's holding
 registers and meter register are already raw zero-based PDU addresses. FC03/FC06

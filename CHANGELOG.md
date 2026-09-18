@@ -3,6 +3,28 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Wait out the reconnect backoff instead of polling through it. PyModbus dials
+  the host inside every read, so each interval of a backoff made another
+  connect attempt and blocked for the connect timeout; the displayed wait was
+  only a message.
+- Probe the optional meter/PCC voltage register once per run. Firmware without
+  it answered the same read with illegal-address on every fast poll.
+
+### Changed
+
+- Read each poll as one block per register region: two requests for the fast
+  poll and one for the slow poll, instead of up to five and three. Every request
+  is a full round trip through the data logger, so poll latency and radio time
+  fall with the request count. A logger that refuses a block is read span by
+  span and decodes the same values.
+- Keep the six-hour graph history only when the terminal dashboard is drawn.
+  The JSON stream consumer keeps its own history, so the poller behind the
+  menu-bar app no longer retains a copy.
+
 ## 0.5.4
 
 ### Fixed

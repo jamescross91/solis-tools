@@ -86,6 +86,21 @@ class SingleReadingTests(unittest.TestCase):
             values = readings("--host", "127.0.0.1", "--port", str(inverter.port))
         self.assertNotIn("pv_kw", values)
 
+    def test_a_logger_that_refuses_block_reads_decodes_the_same_values(self):
+        """The coalesced read must fall back rather than lose the reading."""
+        with FakeInverter() as inverter:
+            expected = readings(
+                "--host", "127.0.0.1", "--port", str(inverter.port), "--pv", "--meter-voltage"
+            )
+        with FakeInverter(max_read=20) as inverter:
+            values = readings(
+                "--host", "127.0.0.1", "--port", str(inverter.port), "--pv", "--meter-voltage"
+            )
+            refused = inverter.reads
+        for key in ("grid_voltage_v", "meter_voltage_v", "battery_kw", "grid_kw", "pv_kw"):
+            self.assertEqual(values[key], expected[key])
+        self.assertGreater(refused, 8)
+
 
 class StreamContractTests(unittest.TestCase):
     def test_stream_json_matches_the_documented_schema(self):
@@ -320,6 +335,57 @@ class TransientFaultTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 1)
         self.assertIn("unable to obtain an inverter reading", result.stderr)
+
+    def test_reconnect_backoff_waits_instead_of_polling_every_interval(self):
+        """PyModbus dials inside every read, so the backoff was only a message."""
+        inverter = FakeInverter()
+        inverter.serve()
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                MONITOR,
+                "--stream-json",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(inverter.port),
+                "--interval",
+                "0.02",
+                "--timeout",
+                "1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        failing: list[dict] = []
+        try:
+            assert process.stdout is not None
+            first = json.loads(process.stdout.readline())
+            self.assertIsNone(first["error"])
+            # Nothing listens on the port any more, so every reconnect is refused.
+            inverter.close()
+            deadline = time.monotonic() + TIMEOUT
+            while len(failing) < 60 and time.monotonic() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                sample = json.loads(line)
+                if sample["error"] and "reconnect" in sample["error"]:
+                    failing.append(sample)
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+        self.assertEqual(len(failing), 60)
+        # Sixty samples span over a second of backoff. Polling through it
+        # counted a failed dial on every one of them.
+        self.assertLess(failing[-1]["health"]["total_failures"], 10)
+        self.assertIn("reconnect backoff", failing[-1]["error"])
+        self.assertEqual(failing[-1]["reading"]["house_load_kw"], 2.32)
 
     def test_a_dropped_connection_reconnects(self):
         with FakeInverter(drop_after=10) as inverter:
