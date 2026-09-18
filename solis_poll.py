@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -40,6 +41,10 @@ from voltage_control import (
 
 MIN_PYTHON = (3, 10)
 VERSION = "0.5.4"
+# Bumped whenever a stream field is renamed, removed or changes meaning; the
+# menu-bar app refuses a version it does not know. Two sends configuration
+# once per run and recent_events only when they change.
+STREAM_SCHEMA_VERSION = 2
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
@@ -1128,8 +1133,29 @@ class VoltageControlRuntime:
         self.active_mode: str | None = None
         self.last_meter_monotonic: float | None = None
         self.last_external_check_monotonic = 0.0
+        self.events_revision = 0
+        self.streamed_events_revision: int | None = None
 
     external_check_interval_s = 5.0
+
+    # States in which nothing is being regulated or restored, so a slower poll
+    # loses nothing: the first sample showing controllable flow moves the
+    # controller into a candidate state and the cadence follows it.
+    IDLE_STATES = frozenset(
+        {
+            VoltageControlState.DISABLED,
+            VoltageControlState.STANDBY,
+            VoltageControlState.UNSUPPORTED,
+            VoltageControlState.SUSPENDED,
+            VoltageControlState.COMMUNICATION_UNAVAILABLE,
+        }
+    )
+
+    def needs_fast_telemetry(self) -> bool:
+        """Whether a slower idle poll would delay regulation or restoration."""
+        return (
+            self.active_mode is not None or self.controller.decision.state not in self.IDLE_STATES
+        )
 
     def _fresh(self) -> bool:
         return (
@@ -1470,27 +1496,39 @@ class VoltageControlRuntime:
                 ),
             }
         self.events.appendleft(event)
+        self.events_revision += 1
 
     def stream_dict(self, now: float) -> dict[str, Any]:
+        """One stream sample's control section; call it once per emitted sample.
+
+        The configuration never changes within a run and the event log changes
+        rarely, yet together they were two thirds of every sample the menu-bar
+        app decoded. The configuration goes out with the first sample only and
+        the events only when the log has changed since the last sample.
+        """
         decision = self.controller.decision
         if self.history_store and now - self.summary_updated_at >= 60:
             self.summary = self.history_store.daily_summary(datetime.now().astimezone())
             self.summary_updated_at = now
         result = decision.stream_dict()
+        first_sample = self.streamed_events_revision is None
+        if first_sample:
+            result["configuration"] = self.configuration_payload
         result.update(
             {
-                "configuration": self.configuration_payload,
                 "voltage_source": "meter/PCC input register, raw PDU 33251",
                 "estimated_voltage_sensitivity_v_per_kw": self.controller.sensitivity_v_per_kw,
                 "import_demand_ceiling_w": self.controller.import_demand_ceiling_w,
                 "import_actuator": self.import_actuator.diagnostics(now),
                 "export_actuator": self.export_actuator.diagnostics(now),
                 "export_write_validated": self.configuration.export_control_validated,
-                "recent_events": list(self.events),
                 "daily_summary": self.summary or None,
                 "recovery_note": self.recovery_note,
             }
         )
+        if first_sample or self.events_revision != self.streamed_events_revision:
+            result["recent_events"] = list(self.events)
+            self.streamed_events_revision = self.events_revision
         return result
 
     def shutdown(self) -> list[str]:
@@ -2149,6 +2187,7 @@ def stream_payload(
     error: str | None,
     timestamp: datetime,
     voltage_control: dict[str, Any] | None = None,
+    cadence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the versioned JSON contract consumed by the menu-bar app."""
     sampled_at = timestamp.isoformat(timespec="milliseconds")
@@ -2156,7 +2195,7 @@ def stream_payload(
     if health.last_success_at is not None:
         age = max(0.0, timestamp.timestamp() - health.last_success_at)
     return {
-        "schema_version": 1,
+        "schema_version": STREAM_SCHEMA_VERSION,
         "timestamp": sampled_at,
         "device": {
             "model_code": device.model_code,
@@ -2202,6 +2241,7 @@ def stream_payload(
             "rejected_samples": health.rejected_samples,
         },
         "voltage_control": voltage_control,
+        "cadence": cadence,
         "error": error,
     }
 
@@ -2212,6 +2252,7 @@ def print_stream_json(
     health: ConnectionHealth,
     error: str | None,
     voltage_control: dict[str, Any] | None = None,
+    cadence: dict[str, Any] | None = None,
 ) -> None:
     payload = stream_payload(
         reading,
@@ -2220,8 +2261,69 @@ def print_stream_json(
         error,
         datetime.now().astimezone(),
         voltage_control,
+        cadence,
     )
     print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+class AttentionChannel:
+    """Learn from stdin whether anyone is looking at the stream.
+
+    The menu-bar app writes ``attention on`` when its popover opens and
+    ``attention off`` when it closes. The poller waits on stdin instead of
+    sleeping between polls, so an opened popover is answered with a poll at
+    once rather than at the end of an idle interval. Without a readable stdin,
+    or once it closes, attention is assumed and the cadence never slows.
+    """
+
+    def __init__(self, stream: IO[str] | None):
+        self.attention = True
+        self.descriptor: int | None = None
+        self.pending = b""
+        if stream is not None:
+            try:
+                self.descriptor = stream.fileno()
+            except (OSError, ValueError):
+                self.descriptor = None
+
+    def wait(self, seconds: float) -> None:
+        """Sleep for `seconds`, or until an attention change arrives."""
+        deadline = time.monotonic() + seconds
+        while self.descriptor is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                ready, _, _ = select.select([self.descriptor], [], [], remaining)
+                chunk = os.read(self.descriptor, 4096) if ready else None
+            except (OSError, ValueError):
+                self.descriptor = None
+                break
+            if chunk is None:
+                return
+            if not chunk:
+                self.descriptor = None
+                break
+            if self._consume(chunk):
+                return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _consume(self, chunk: bytes) -> bool:
+        """Apply complete lines; True when the attention state changed."""
+        self.pending += chunk
+        changed = False
+        while b"\n" in self.pending:
+            line, _, self.pending = self.pending.partition(b"\n")
+            words = line.decode("utf-8", "replace").split()
+            if len(words) == 2 and words[0] == "attention" and words[1] in ("on", "off"):
+                attention = words[1] == "on"
+                changed = changed or attention != self.attention
+                self.attention = attention
+        if len(self.pending) > 4096:
+            self.pending = b""
+        return changed
 
 
 HOSTNAME_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
@@ -2258,6 +2360,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10,
         help="temperature/status poll interval in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--idle-interval",
+        type=float,
+        help=(
+            "with --stream-json, poll interval while the consumer reports no attention "
+            "and dynamic control is idle (default: same as --interval)"
+        ),
     )
     parser.add_argument(
         "--timeout", type=float, default=3, help="Modbus timeout in seconds (default: 3)"
@@ -2360,6 +2470,11 @@ def parse_args() -> argparse.Namespace:
     # the first frame then died formatting a bar.
     if any(not math.isfinite(value) or value <= 0 for value in positive):
         parser.error("poll intervals, timeout and bar maximums must be finite and above zero")
+    if args.idle_interval is not None:
+        if not args.stream_json:
+            parser.error("--idle-interval requires --stream-json")
+        if not math.isfinite(args.idle_interval) or args.idle_interval < args.interval:
+            parser.error("--idle-interval must be finite and no shorter than --interval")
     if args.csv and args.jsonl and args.csv.resolve() == args.jsonl.resolve():
         parser.error("--csv and --jsonl must name different files")
     if args.dynamic_export_control and not args.dynamic_voltage_control:
@@ -2445,6 +2560,7 @@ def main() -> int:
     voltage_runtime: VoltageControlRuntime | None = None
     reconnect_attempt = 0
     reconnect_not_before = 0.0
+    attention = AttentionChannel(sys.stdin if args.stream_json else None)
 
     try:
         recorder = Recorder(args.csv, args.jsonl)
@@ -2580,14 +2696,21 @@ def main() -> int:
                 print_once(last_reading, device, health)
                 return 0
             if args.stream_json:
+                idle = (
+                    args.idle_interval is not None
+                    and not attention.attention
+                    and not (voltage_runtime and voltage_runtime.needs_fast_telemetry())
+                )
+                interval = args.idle_interval if idle else args.interval
                 print_stream_json(
                     last_reading,
                     device,
                     health,
                     last_error,
                     voltage_runtime.stream_dict(time.monotonic()) if voltage_runtime else None,
+                    {"interval_s": interval, "idle": idle},
                 )
-                time.sleep(args.interval)
+                attention.wait(interval)
                 continue
             output = render(
                 last_reading, device, health, args, palette, last_error, history, started_at

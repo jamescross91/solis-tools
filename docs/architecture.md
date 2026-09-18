@@ -91,6 +91,17 @@ After a connection failure the reconnect delay doubles from 1 s to 60 s. The
 loop does not poll during that wait: PyModbus dials the host inside every read,
 so polling through the backoff made a connect attempt every interval.
 
+In stream mode the cadence adapts. `--idle-interval` names a slower interval
+the poller uses while the consumer has written `attention off` to stdin and
+`VoltageControlRuntime.needs_fast_telemetry()` is false, which is any state in
+which nothing is being regulated or restored. The first sample showing
+controllable flow puts the controller into a candidate state and the next wait
+is already the fast one. `AttentionChannel` waits on stdin with `select` in
+place of sleeping, so `attention on` ends the wait and the next poll happens
+at once. Every sample carries the cadence it chose. Wakeups, not per-sample
+CPU, decide the power draw of the poller, the Wi-Fi radio and the logger, so
+this is the largest energy lever the app has.
+
 A slow-metric failure sets `slow_metrics = None`, so the next iteration refetches
 rather than carrying stale state forward.
 
@@ -123,13 +134,20 @@ invalidating every existing recording.
 
 The menu-bar app runs `solis-poll --stream-json` and parses its stdout. The app
 holds no Modbus transport code: it supplies validated settings, while the poller
-owns telemetry, typed control and orderly restoration over one connection. A
-second poller would still open another connection and must not be run against a
-logger limited to one session.
+owns telemetry, typed control and orderly restoration over one connection. The
+only traffic in the other direction is the attention hint: the app writes
+`attention on` or `attention off` to the poller's stdin as its popover opens
+and closes, and passes `--idle-interval` from its settings. SIGPIPE is ignored
+in the app so a hint written to a poller that has just exited is an error to
+drop rather than a crash. A second poller would still open another connection
+and must not be run against a logger limited to one session.
 
 Stream framing and JSON decoding run outside the main actor. If several complete
 frames arrive together, only the newest is delivered to the presentation layer;
 the Python process has already evaluated every sample for control purposes.
+The control section of a sample carries its configuration once per run and its
+event log only when the log changes; `MonitorStore.receive` carries the last
+event list forward so views never see the gap.
 
 `MonitorStore` owns the child process: it locates the binary, streams
 newline-delimited JSON, retries with backoff, and translates stream state into

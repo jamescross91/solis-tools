@@ -10,8 +10,10 @@ from pathlib import Path
 from pymodbus.exceptions import ModbusException
 
 from solis_poll import (
+    STREAM_SCHEMA_VERSION,
     VERSION,
     Alarm,
+    AttentionChannel,
     ConnectionHealth,
     DeviceInfo,
     Reading,
@@ -133,11 +135,50 @@ class DecoderTests(unittest.TestCase):
             datetime.fromtimestamp(1_700_000_001.0).astimezone(),
         )
 
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], STREAM_SCHEMA_VERSION)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["reading"]["battery_flow_kw"], 1.72)
         self.assertEqual(payload["reading"]["alarms"][0]["severity"], "fault")
         self.assertEqual(payload["health"]["last_sample_age_s"], 1.0)
+        self.assertIsNone(payload["cadence"])
         json.dumps(payload)
+
+    def test_attention_channel_reads_commands_and_ends_the_wait_early(self):
+        import os
+
+        reader, writer = os.pipe()
+        stream = os.fdopen(reader, "r")
+        channel = AttentionChannel(stream)
+        self.assertTrue(channel.attention)
+
+        started = time.monotonic()
+        channel.wait(0.05)
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+        os.write(writer, b"attention off\n")
+        started = time.monotonic()
+        channel.wait(5)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertFalse(channel.attention)
+
+        # Two lines in one chunk, a repeat and rubbish are all handled; only a
+        # change ends the wait early.
+        os.write(writer, b"attention off\nnonsense here\nattention on\n")
+        channel.wait(5)
+        self.assertTrue(channel.attention)
+        os.write(writer, b"attention on\n")
+        started = time.monotonic()
+        channel.wait(0.05)
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+        # EOF means the consumer has gone; keep the last state and just sleep.
+        os.close(writer)
+        started = time.monotonic()
+        channel.wait(0.05)
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+        self.assertIsNone(channel.descriptor)
+        self.assertTrue(channel.attention)
+        stream.close()
 
 
 class ModbusPollingTests(unittest.TestCase):

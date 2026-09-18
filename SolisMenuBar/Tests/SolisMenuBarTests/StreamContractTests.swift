@@ -6,7 +6,7 @@ import XCTest
 /// expects so a change on either side fails here rather than in the menu bar.
 final class StreamContractTests: XCTestCase {
     private func envelopeJSON(
-        schemaVersion: Int = 1,
+        schemaVersion: Int = 2,
         voltageControl: String = "null",
         health: String = """
             {
@@ -51,6 +51,7 @@ final class StreamContractTests: XCTestCase {
               },
               "health": \(health),
               "voltage_control": \(voltageControl),
+              "cadence": { "interval_s": 2.0, "idle": false },
               "error": null
             }
             """.utf8
@@ -60,7 +61,9 @@ final class StreamContractTests: XCTestCase {
     func testEnvelopeDecodesEveryFieldTheDashboardReads() throws {
         let envelope = try StreamDecoder.decode(envelopeJSON())
 
-        XCTAssertEqual(envelope.schemaVersion, 1)
+        XCTAssertEqual(envelope.schemaVersion, 2)
+        XCTAssertEqual(envelope.cadence?.intervalS, 2.0)
+        XCTAssertEqual(envelope.cadence?.idle, false)
         XCTAssertEqual(envelope.device.modelCode, 20)
         XCTAssertEqual(envelope.device.typeDefinition, 2001)
         XCTAssertTrue(envelope.device.profileValidated)
@@ -120,12 +123,45 @@ final class StreamContractTests: XCTestCase {
         XCTAssertEqual(details.importActuator.pduAddress, 43488)
         XCTAssertEqual(details.importActuator.commandedW, 12_000)
         XCTAssertFalse(details.exportWriteValidated)
-        XCTAssertEqual(details.recentEvents.count, 1)
+        XCTAssertEqual(details.recentEvents?.count, 1)
         XCTAssertEqual(
-            details.recentEvents[0].changeLabel,
+            details.recentEvents?[0].changeLabel,
             "Import limit 12.5 kW → 12.0 kW (-0.5 kW)"
         )
         XCTAssertNil(details.dailySummary)
+    }
+
+    /// Between changes the poller leaves out the event log and, after the
+    /// first sample, the configuration; a delta sample must still decode.
+    func testDeltaSampleDecodesWithoutEventsOrConfiguration() throws {
+        let control = """
+            {
+              "state": "Import regulating", "action": "Holding", "mode": "import",
+              "desired_limit_w": 12000, "raw_voltage_v": 216.4,
+              "filtered_voltage_v": 216.8, "reason": "inside deadband",
+              "emergency": false,
+              "voltage_source": "meter/PCC input register, raw PDU 33251",
+              "estimated_voltage_sensitivity_v_per_kw": null,
+              "import_actuator": {
+                "pdu_address": 43488, "resolution_w": 100, "baseline_raw": 140,
+                "last_commanded_raw": 120, "last_requested_raw": 120,
+                "last_write_at": null, "writes_last_hour": 3, "last_error": null
+              },
+              "export_actuator": {
+                "pdu_address": 43074, "resolution_w": 100, "baseline_raw": 50,
+                "last_commanded_raw": 50, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_write_validated": false,
+              "daily_summary": null,
+              "recovery_note": null
+            }
+            """
+        let details = try XCTUnwrap(
+            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
+        )
+        XCTAssertNil(details.recentEvents)
+        XCTAssertEqual(details.importActuator.commandedW, 12_000)
     }
 
     func testActivityDescriptionExplainsHeldLimit() throws {
@@ -158,8 +194,9 @@ final class StreamContractTests: XCTestCase {
             }
             """
         let event = try XCTUnwrap(
-            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
-        ).recentEvents[0]
+            StreamDecoder.decode(envelopeJSON(voltageControl: control))
+                .voltageControl?.recentEvents?.first
+        )
         XCTAssertEqual(event.changeLabel, "Export limit held at 4.3 kW")
         XCTAssertFalse(event.timeLabel.isEmpty)
     }
@@ -208,11 +245,11 @@ final class StreamContractTests: XCTestCase {
     /// A newer poller means this app is out of date. Failing loudly beats
     /// rendering fields that no longer mean what they used to.
     func testUnsupportedSchemaVersionIsRejected() {
-        XCTAssertThrowsError(try StreamDecoder.decode(envelopeJSON(schemaVersion: 2))) { error in
+        XCTAssertThrowsError(try StreamDecoder.decode(envelopeJSON(schemaVersion: 3))) { error in
             guard case StreamError.unsupportedSchema(let version) = error else {
                 return XCTFail("expected StreamError.unsupportedSchema, got \(error)")
             }
-            XCTAssertEqual(version, 2)
+            XCTAssertEqual(version, 3)
         }
     }
 }
@@ -240,6 +277,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.slave, 1)
         XCTAssertEqual(configuration.interval, 2)
         XCTAssertEqual(configuration.slowInterval, 10)
+        XCTAssertEqual(configuration.idleInterval, 5)
         XCTAssertEqual(configuration.inverterMaxKw, 10)
         XCTAssertEqual(configuration.gridMaxKw, 23)
         XCTAssertFalse(configuration.pvEnabled)
@@ -259,6 +297,7 @@ final class StoredConfigurationTests: XCTestCase {
                 defaults([
                     "host": "inverter.local",
                     "pollInterval": 0.01,
+                    "idlePollInterval": 0.1,
                     "slowInterval": 0.0,
                     "inverterMaxKw": 0.0,
                     "gridMaxKw": -5.0,
@@ -269,6 +308,8 @@ final class StoredConfigurationTests: XCTestCase {
         )
         XCTAssertEqual(configuration.host, "inverter.local")
         XCTAssertEqual(configuration.interval, 0.5)
+        // The idle interval can never undercut the fast one.
+        XCTAssertEqual(configuration.idleInterval, 0.5)
         XCTAssertEqual(configuration.slowInterval, 1)
         XCTAssertEqual(configuration.inverterMaxKw, 0.1)
         XCTAssertEqual(configuration.gridMaxKw, 0.1)
@@ -291,7 +332,7 @@ final class HistoryBufferTests: XCTestCase {
             Data(
                 """
                 {
-                  "schema_version": 1,
+                  "schema_version": 2,
                   "timestamp": "2026-08-19T16:30:00.123+01:00",
                   "device": {
                     "model_code": 20, "dsp_version": 1, "hmi_version": 1,

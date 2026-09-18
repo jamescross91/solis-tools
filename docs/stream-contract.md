@@ -19,7 +19,7 @@ the types in `SolisMenuBar/Sources/SolisMenuBar/Models.swift`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "timestamp": "2026-08-19T16:30:00.123+01:00",
   "device": {
     "model_code": 12695, "dsp_version": 26, "hmi_version": 46,
@@ -42,6 +42,7 @@ the types in `SolisMenuBar/Sources/SolisMenuBar/Models.swift`.
     "rejected_samples": 0
   },
   "voltage_control": null,
+  "cadence": { "interval_s": 2.0, "idle": false },
   "error": null
 }
 ```
@@ -79,13 +80,13 @@ optional, so an older read-only poller still decodes.
 | `desired_limit_w` | Requested limit in watts, or null; not proof of an applied write |
 | `raw_voltage_v`, `filtered_voltage_v` | PCC voltage in volts, nullable when unavailable |
 | `emergency` | Whether the decision requests emergency intervention |
-| `configuration` | Effective controller configuration in snake_case; see README control defaults |
+| `configuration` | Effective controller configuration in snake_case; see README control defaults. **Present in the first sample of a run only**: it cannot change while the process runs |
 | `voltage_source` | Description of the meter/PCC register source |
 | `estimated_voltage_sensitivity_v_per_kw` | Recent measured response estimate, or null |
 | `import_actuator`, `export_actuator` | Register diagnostics described below |
 | `export_write_validated` | Whether matching endpoint evidence permits export writes; UI may use this gate but must not infer it |
 | `import_demand_ceiling_w` | Current import-session demand ceiling; follows estimated external demand plus headroom after discounting settled controller-induced demand, and is re-anchored by a manual limit change, or null outside a session |
-| `recent_events` | Up to 20 recent events from the running process |
+| `recent_events` | Up to 20 recent events from the running process. **Present in the first sample and whenever the log has changed since the previous sample; absent otherwise.** Consumers keep the last list they received; the menu-bar app does this in `MonitorStore` |
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |
 
@@ -113,9 +114,20 @@ permission from envelope age alone. Additive decoding compatibility does not
 imply executable compatibility: deploy the app and poller together so all CLI
 flags passed by the app are recognised.
 
-**Cadence.** One object per `--interval`, emitted whether or not the poll
-succeeded — a failed poll re-emits the last good reading with `error` set. Fields
-sourced from the slow poll only change every `--slow-interval`.
+**Cadence.** One object per poll, emitted whether or not the poll succeeded — a
+failed poll re-emits the last good reading with `error` set. Fields sourced from
+the slow poll only change every `--slow-interval`. The top-level `cadence`
+object reports the interval the poller will wait before its next sample and
+whether it is idling.
+
+The interval is `--interval` unless `--idle-interval` is given, in which case
+the poller idles at that longer interval while both of these hold: the
+consumer has written `attention off` to the poller's stdin and dynamic control
+has nothing to regulate or restore. The menu-bar app writes `attention on`
+when its popover opens and `attention off` when it closes. The poller waits on
+stdin rather than sleeping, so `attention on` is answered with a poll at once.
+Lines other than `attention on` and `attention off` are ignored; a closed
+stdin means attention is assumed for the rest of the run.
 
 ## Changing it
 
@@ -131,9 +143,14 @@ message rather than silently mis-rendering.
 | Rename or remove a field | **Yes** | Breaks every existing consumer |
 | Change a unit, scale or sign | **Yes** | Silently wrong is worse than broken |
 
-When you bump it, change `VERSION`-adjacent constants in both places:
-`schema_version` in `stream_payload`, and
+When you bump it, change the constant in both places:
+`STREAM_SCHEMA_VERSION` in `solis_poll.py`, and
 `StreamDecoder.supportedSchemaVersion` in `Models.swift`.
+
+| Version | Change |
+| --- | --- |
+| 1 | Original contract |
+| 2 | `cadence` added; `voltage_control.configuration` sent in the first sample only; `voltage_control.recent_events` sent only when changed |
 
 Every field is pinned in
 `SolisMenuBar/Tests/SolisMenuBarTests/StreamContractTests.swift`, including a

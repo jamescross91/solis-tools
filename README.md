@@ -174,6 +174,13 @@ the integration interface used by the menu-bar app:
 ./solis_poll.py --host 192.168.1.57 --stream-json
 ```
 
+With `--idle-interval SECONDS` the stream slows to that interval while the
+consumer has written `attention off` to the poller's stdin and dynamic control
+has nothing to regulate; `attention on` restores `--interval` and is answered
+with a poll immediately. The menu-bar app sends these as its popover closes and
+opens, so a closed menu bar polls the inverter every 5 s by default instead of
+every 2 s. Each sample reports the cadence in use.
+
 ## Optional PV monitoring
 
 PV registers are not read unless `--pv` is supplied:
@@ -399,7 +406,7 @@ The standard graphs are:
 
 Battery history is positive when discharging and negative when charging. Grid history is positive when exporting and negative when importing. Battery SoC remains a live gauge and is deliberately excluded from history.
 
-Power-flow registers are read every `--interval` seconds. Temperature, inverter state, inverter faults and daily PV energy are refreshed every `--slow-interval` seconds. Each poll reads the registers it needs as one block per register region rather than one request per value, because every request is a full round trip through the data logger: the fast poll is two requests and the slow poll one. A logger that refuses a block is read span by span instead, so the values are the same either way. After a connection failure, reconnect attempts back off from 1 s to 60 s and the health line shows the wait.
+Power-flow registers are read every `--interval` seconds, or every `--idle-interval` seconds while a stream consumer reports no attention and control is idle. Temperature, inverter state, inverter faults and daily PV energy are refreshed every `--slow-interval` seconds. Each poll reads the registers it needs as one block per register region rather than one request per value, because every request is a full round trip through the data logger: the fast poll is two requests and the slow poll one. A logger that refuses a block is read span by span instead, so the values are the same either way. After a connection failure, reconnect attempts back off from 1 s to 60 s and the health line shows the wait.
 
 ## Register assumptions
 

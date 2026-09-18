@@ -16,6 +16,18 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Slow the stream while nobody is watching. With `--idle-interval`, the poller
+  idles at that interval while the consumer has written `attention off` to its
+  stdin and dynamic control has nothing to regulate or restore; `attention on`
+  is answered with a poll at once. The menu-bar app sends these as its popover
+  closes and opens and gains an "Idle refresh" setting, 5 s by default, so a
+  closed menu bar polls the inverter and wakes the app less than half as often.
+  Control activity always uses the fast interval.
+- Stream schema 2: every sample carries a `cadence` object, the control
+  `configuration` is sent in the first sample of a run only, and
+  `recent_events` only when the event log changes, which removes about two
+  thirds of the bytes the app decoded per sample. Deploy the app and poller
+  together; an older app refuses the new schema with an upgrade message.
 - Read each poll as one block per register region: two requests for the fast
   poll and one for the slow poll, instead of up to five and three. Every request
   is a full round trip through the data logger, so poll latency and radio time

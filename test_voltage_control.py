@@ -628,6 +628,48 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             self.assertEqual(client.raw, 160)
             self.assertEqual(client.writes, [102, 162, 160])
 
+    def test_stream_sends_configuration_once_and_events_only_when_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient()
+            runtime = VoltageControlRuntime(
+                client,
+                DynamicVoltageConfiguration(
+                    enabled=True,
+                    maximum_import_w=22_000,
+                    activation_delay_s=0,
+                    settle_time_s=0,
+                    filter_time_constant_s=0.01,
+                ),
+                5,
+                Path(directory) / "journal.json",
+                None,
+                30,
+            )  # type: ignore[arg-type]
+            self.assertFalse(runtime.needs_fast_telemetry())
+            sampled_at = time.time()
+            runtime.update(reading(-13, "Charging"), 1, sampled_at)
+            self.assertTrue(runtime.needs_fast_telemetry())
+
+            first = runtime.stream_dict(1)
+            self.assertIn("configuration", first)
+            self.assertEqual(first["recent_events"], list(runtime.events))
+
+            second = runtime.stream_dict(2)
+            self.assertNotIn("configuration", second)
+            self.assertNotIn("recent_events", second)
+
+            # A step that writes is an event; a sample with nothing new is not.
+            runtime.update(reading(-13, "Charging"), 6, sampled_at)
+            self.assertEqual(runtime.stream_dict(6)["recent_events"][0]["limit_delta_w"], 200)
+            self.assertNotIn("recent_events", runtime.stream_dict(7))
+            client.raw = 160
+            runtime.update(reading(-13, "Charging"), 12, sampled_at)
+            third = runtime.stream_dict(12)
+            self.assertNotIn("configuration", third)
+            self.assertIn("adopted as new baseline", third["recent_events"][0]["message"])
+            self.assertNotIn("recent_events", runtime.stream_dict(13))
+            runtime.shutdown()
+
     def test_suppressed_proposal_is_holding_and_not_an_activity_event(self):
         with tempfile.TemporaryDirectory() as directory:
             client = FakeClient()
