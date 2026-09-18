@@ -1092,6 +1092,9 @@ class VoltageControlRuntime:
         retention_days: int,
     ):
         self.configuration = configuration
+        # The configuration is frozen, and asdict() on it cost more per stream
+        # sample than encoding the whole JSON payload did.
+        self.configuration_payload = configuration_dict(configuration)
         self.controller = DynamicVoltageController(configuration)
         self.import_actuator = ImportLimitActuator(
             client,
@@ -1476,7 +1479,7 @@ class VoltageControlRuntime:
         result = decision.stream_dict()
         result.update(
             {
-                "configuration": configuration_dict(self.configuration),
+                "configuration": self.configuration_payload,
                 "voltage_source": "meter/PCC input register, raw PDU 33251",
                 "estimated_voltage_sensitivity_v_per_kw": self.controller.sensitivity_v_per_kw,
                 "import_demand_ceiling_w": self.controller.import_demand_ceiling_w,
