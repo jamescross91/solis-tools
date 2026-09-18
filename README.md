@@ -31,6 +31,14 @@ PV monitoring is **off by default**, so installations without panels do not read
 
 <img src="docs/images/solis-menubar.png" alt="Solis Live macOS menu-bar dashboard" width="418">
 
+The dashboard surfaces the current PCC voltage, filtered control value, active
+limit, recent activity and an annotated voltage chart with selectable time
+ranges.
+
+### Compact menu-bar metrics
+
+<img src="docs/images/solis-menubar-metrics.png" alt="Solis Live compact menu-bar metrics showing house load, battery state of charge, grid flow and inverter temperature" width="476">
+
 ## Install with Homebrew
 
 On macOS or Linux, add this repository as a Homebrew tap, then install the
