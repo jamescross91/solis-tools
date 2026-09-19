@@ -14,8 +14,9 @@ Run it to drive the real monitor with no hardware:
     ./solis_poll.py --host 127.0.0.1 --port 5020 --pv
 
 It can also inject the faults that are otherwise impossible to reproduce:
-``--corrupt-after`` starts returning a nonsense battery-power register, and
-``--drop-after`` closes the connection, so the reconnect path can be tested.
+``--corrupt-after`` starts returning a nonsense battery-power register,
+``--drop-after`` closes the connection, so the reconnect path can be tested, and
+``--max-read`` refuses wide block reads the way a limited logger would.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ READ_INPUT_REGISTERS = 4
 READ_HOLDING_REGISTERS = 3
 WRITE_SINGLE_REGISTER = 6
 ILLEGAL_DATA_ADDRESS = 0x02
+ILLEGAL_DATA_VALUE = 0x03
 MBAP_HEADER = 7
 CONTROL_HOLDING_ADDRESSES = {43074, 43488}
 
@@ -77,11 +79,13 @@ class FakeInverter:
         corrupt_after: int | None = None,
         corrupt_until: int | None = None,
         drop_after: int | None = None,
+        max_read: int | None = None,
     ):
         self.bank = dict(hybrid_bank() if bank is None else bank)
         self.corrupt_after = corrupt_after
         self.corrupt_until = corrupt_until
         self.drop_after = drop_after
+        self.max_read = max_read
         self.reads = 0
         self.writes: list[tuple[int, int]] = []
         self.connections = 0
@@ -142,7 +146,10 @@ class FakeInverter:
                     if self.drop_after is not None and self.reads > self.drop_after:
                         return
                     if function == READ_INPUT_REGISTERS:
-                        self._send_registers(connection, header, unit, function, address, value)
+                        if self.max_read is not None and value > self.max_read:
+                            self._send_error(connection, header, unit, function, ILLEGAL_DATA_VALUE)
+                        else:
+                            self._send_registers(connection, header, unit, function, address, value)
                     elif function == READ_HOLDING_REGISTERS:
                         if any(
                             address + offset not in CONTROL_HOLDING_ADDRESSES
@@ -184,10 +191,14 @@ class FakeInverter:
         connection.sendall(header[:4] + struct.pack(">HB", len(payload) + 1, unit) + payload)
 
     @staticmethod
-    def _send_error(connection: socket.socket, header: bytes, unit: int, function: int) -> None:
-        connection.sendall(
-            header[:4] + struct.pack(">HBBB", 3, unit, function | 0x80, ILLEGAL_DATA_ADDRESS)
-        )
+    def _send_error(
+        connection: socket.socket,
+        header: bytes,
+        unit: int,
+        function: int,
+        code: int = ILLEGAL_DATA_ADDRESS,
+    ) -> None:
+        connection.sendall(header[:4] + struct.pack(">HBBB", 3, unit, function | 0x80, code))
 
     def _value(self, address: int) -> int:
         # 33149 is the high word of battery power; 0xFFFF decodes to ~4.29e6 kW,
@@ -227,6 +238,11 @@ def main() -> int:
     )
     parser.add_argument("--drop-after", type=int, help="close the connection after this many reads")
     parser.add_argument(
+        "--max-read",
+        type=int,
+        help="refuse input-register reads wider than this many registers",
+    )
+    parser.add_argument(
         "--string-inverter",
         action="store_true",
         help="report the string-inverter family in register 35000",
@@ -242,6 +258,7 @@ def main() -> int:
         corrupt_after=arguments.corrupt_after,
         corrupt_until=arguments.corrupt_until,
         drop_after=arguments.drop_after,
+        max_read=arguments.max_read,
     )
     inverter.serve()
     print(f"fake Solis inverter listening on 127.0.0.1:{inverter.port}", flush=True)

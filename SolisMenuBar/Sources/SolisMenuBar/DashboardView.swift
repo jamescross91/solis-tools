@@ -9,6 +9,7 @@ struct DashboardView: View {
     @AppStorage("slave") private var slave = 1
     @AppStorage("pollInterval") private var pollInterval = 2.0
     @AppStorage("slowInterval") private var slowInterval = 10.0
+    @AppStorage("idlePollInterval") private var idlePollInterval = 5.0
     @AppStorage("inverterMaxKw") private var inverterMaxKw = 10.0
     @AppStorage("gridMaxKw") private var gridMaxKw = 23.0
     @AppStorage("pvEnabled") private var pvEnabled = false
@@ -262,13 +263,14 @@ struct DashboardView: View {
                             )
                         )
                     }
-                    if !control.recentEvents.isEmpty {
+                    let events = control.recentEvents ?? []
+                    if !events.isEmpty {
                         Divider().padding(.vertical, 2)
                         Text("Recent activity")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.primary)
                     }
-                    ForEach(control.recentEvents.prefix(8)) { event in
+                    ForEach(events.prefix(8)) { event in
                         VoltageControlEventRow(event: event)
                     }
                 }
@@ -394,6 +396,12 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 70)
                 Text("seconds").foregroundStyle(.secondary)
+            }
+            LabeledContent("Idle refresh") {
+                TextField("5", value: $idlePollInterval, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                Text("seconds, while closed and idle").foregroundStyle(.secondary)
             }
             LabeledContent("Inverter maximum") {
                 TextField("10", value: $inverterMaxKw, format: .number)

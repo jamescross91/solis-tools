@@ -21,7 +21,7 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 
 | Layer | What it holds |
 | --- | --- |
-| Register map | `INVERTER_FAULTS`, `STATUS_LABELS`, and the addresses inside `poll_slow` / `poll_fast` |
+| Register map | `INVERTER_FAULTS`, `STATUS_LABELS`, the `*_SPANS` on `SolisClient` and the addresses inside `poll_slow` / `poll_fast` |
 | Client | `SolisClient` — connect, read, decode, range-check |
 | Recording | `Recorder` — CSV/JSONL append, bounded history restore |
 | Presentation | `render`, `sparkline`, `bar`, `fit`, `Palette` |
@@ -52,8 +52,11 @@ closed. No arbitrary address/value operation is exposed to controller or UI code
 `SolisClient._registers(reference, count)` takes a **1-based reference** and
 reads PDU address `reference - 1`. Everything else in the project — inline
 comments, the README table, `fake_inverter.py` — uses the **raw** zero-based
-address. `_registers(33136, 16)` therefore reads raw 33135–33150, and
-`status[10]` is raw 33145.
+address. The polls do not call `_registers` directly: they pass raw address
+spans to `_input_registers`, which reads them as one block through
+`_input_block(first, last)` (itself `_registers(first + 1, last - first + 1)`)
+and returns a mapping keyed by raw address, so `registers[33145]` is raw 33145.
+The conversion is confined to that one helper.
 
 The conversion exists because the original `mbpoll` shell prototype used 1-based
 references, and preserving them made the Python port checkable line by line
@@ -68,9 +71,36 @@ still passes through `_registers`, so its call-site reference is 33252.
 Power flows change continuously; temperature, inverter state, fault words and
 daily energy do not. `--interval` (0.5 s) drives the fast read;
 new menu-bar configurations explicitly select 2 s instead.
-`--slow-interval` (10 s) drives the rest. Contiguous registers are read in one
-request: the 16-register block at raw 33135 carries battery direction, state of
-charge, BMS fault words, house load and battery power together.
+`--slow-interval` (10 s) drives the rest.
+
+Each poll is as few requests as the Modbus limit of 125 registers allows,
+because a request through a Wi-Fi data logger is a round trip of tens of
+milliseconds however few registers it carries. The fast poll reads raw
+33073–33150 (33057–33150 with `--pv`), covering grid voltage, battery direction,
+state of charge, BMS fault words, house load and battery power, then 33263–33264
+(33251–33264 with meter voltage). Grid power cannot join the first block: 33073
+to 33264 is 192 registers. The slow poll reads 33093–33120 (33035–33120 with
+`--pv`) as one block. A device that answers a block read with a Modbus
+exception is read span by span for that poll, and after two consecutive
+refusals for the rest of the run; a transport failure propagates unchanged, so
+a dead link is detected no later than before. The meter/PCC register is probed
+once per run rather than on every fast poll, because firmware without it
+answered the same read with illegal-address every half second.
+
+After a connection failure the reconnect delay doubles from 1 s to 60 s. The
+loop does not poll during that wait: PyModbus dials the host inside every read,
+so polling through the backoff made a connect attempt every interval.
+
+In stream mode the cadence adapts. `--idle-interval` names a slower interval
+the poller uses while the consumer has written `attention off` to stdin and
+`VoltageControlRuntime.needs_fast_telemetry()` is false, which is any state in
+which nothing is being regulated or restored. The first sample showing
+controllable flow puts the controller into a candidate state and the next wait
+is already the fast one. `AttentionChannel` waits on stdin with `select` in
+place of sleeping, so `attention on` ends the wait and the next poll happens
+at once. Every sample carries the cadence it chose. Wakeups, not per-sample
+CPU, decide the power draw of the poller, the Wi-Fi radio and the logger, so
+this is the largest energy lever the app has.
 
 A slow-metric failure sets `slow_metrics = None`, so the next iteration refetches
 rather than carrying stale state forward.
@@ -104,13 +134,20 @@ invalidating every existing recording.
 
 The menu-bar app runs `solis-poll --stream-json` and parses its stdout. The app
 holds no Modbus transport code: it supplies validated settings, while the poller
-owns telemetry, typed control and orderly restoration over one connection. A
-second poller would still open another connection and must not be run against a
-logger limited to one session.
+owns telemetry, typed control and orderly restoration over one connection. The
+only traffic in the other direction is the attention hint: the app writes
+`attention on` or `attention off` to the poller's stdin as its popover opens
+and closes, and passes `--idle-interval` from its settings. SIGPIPE is ignored
+in the app so a hint written to a poller that has just exited is an error to
+drop rather than a crash. A second poller would still open another connection
+and must not be run against a logger limited to one session.
 
 Stream framing and JSON decoding run outside the main actor. If several complete
 frames arrive together, only the newest is delivered to the presentation layer;
 the Python process has already evaluated every sample for control purposes.
+The control section of a sample carries its configuration once per run and its
+event log only when the log changes; `MonitorStore.receive` carries the last
+event list forward so views never see the gap.
 
 `MonitorStore` owns the child process: it locates the binary, streams
 newline-delimited JSON, retries with backoff, and translates stream state into

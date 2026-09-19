@@ -13,6 +13,8 @@ import subprocess
 import sys
 import time
 import unittest
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 from fake_inverter import FakeInverter, hybrid_bank
@@ -31,17 +33,42 @@ def run_monitor(*arguments: str, timeout: int = TIMEOUT) -> subprocess.Completed
     )
 
 
-def stream_samples(*arguments: str, wanted: int, timeout: int = TIMEOUT) -> list[dict]:
-    """Collect at least `wanted` stream samples, then stop the monitor."""
-    process = subprocess.Popen(
+def start_stream(*arguments: str) -> subprocess.Popen[str]:
+    """Run the monitor in stream mode with a writable stdin, as the app does."""
+    return subprocess.Popen(
         [sys.executable, MONITOR, "--stream-json", *arguments],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+def send(process: subprocess.Popen[str], line: str) -> float:
+    assert process.stdin is not None
+    process.stdin.write(line + "\n")
+    process.stdin.flush()
+    return time.monotonic()
+
+
+def stop(process: subprocess.Popen[str]) -> None:
+    process.terminate()
+    process.wait(timeout=10)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+def stream_samples(
+    *arguments: str, wanted: int, timeout: int = TIMEOUT, commands: Sequence[str] = ()
+) -> list[dict]:
+    """Collect at least `wanted` stream samples, then stop the monitor."""
+    process = start_stream(*arguments)
     samples: list[dict] = []
     deadline = time.monotonic() + timeout
     try:
+        for command in commands:
+            send(process, command)
         assert process.stdout is not None
         while len(samples) < wanted and time.monotonic() < deadline:
             line = process.stdout.readline()
@@ -49,12 +76,16 @@ def stream_samples(*arguments: str, wanted: int, timeout: int = TIMEOUT) -> list
                 break
             samples.append(json.loads(line))
     finally:
-        process.terminate()
-        process.wait(timeout=10)
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
+        stop(process)
     return samples
+
+
+def latest_events(samples: list[dict]) -> list[dict]:
+    """The event log as a consumer sees it: the last list that was sent."""
+    for sample in reversed(samples):
+        if "recent_events" in sample["voltage_control"]:
+            return sample["voltage_control"]["recent_events"]
+    raise AssertionError("no sample carried recent_events")
 
 
 def readings(*arguments: str) -> dict[str, str]:
@@ -86,6 +117,21 @@ class SingleReadingTests(unittest.TestCase):
             values = readings("--host", "127.0.0.1", "--port", str(inverter.port))
         self.assertNotIn("pv_kw", values)
 
+    def test_a_logger_that_refuses_block_reads_decodes_the_same_values(self):
+        """The coalesced read must fall back rather than lose the reading."""
+        with FakeInverter() as inverter:
+            expected = readings(
+                "--host", "127.0.0.1", "--port", str(inverter.port), "--pv", "--meter-voltage"
+            )
+        with FakeInverter(max_read=20) as inverter:
+            values = readings(
+                "--host", "127.0.0.1", "--port", str(inverter.port), "--pv", "--meter-voltage"
+            )
+            refused = inverter.reads
+        for key in ("grid_voltage_v", "meter_voltage_v", "battery_kw", "grid_kw", "pv_kw"):
+            self.assertEqual(values[key], expected[key])
+        self.assertGreater(refused, 8)
+
 
 class StreamContractTests(unittest.TestCase):
     def test_stream_json_matches_the_documented_schema(self):
@@ -102,7 +148,7 @@ class StreamContractTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(samples), 3)
         sample = samples[-1]
-        self.assertEqual(sample["schema_version"], 1)
+        self.assertEqual(sample["schema_version"], 2)
         self.assertEqual(
             set(sample),
             {
@@ -112,9 +158,11 @@ class StreamContractTests(unittest.TestCase):
                 "reading",
                 "health",
                 "voltage_control",
+                "cadence",
                 "error",
             },
         )
+        self.assertEqual(sample["cadence"], {"interval_s": 0.05, "idle": False})
         self.assertEqual(sample["reading"]["battery_flow_kw"], sample["reading"]["battery_kw"])
         self.assertEqual(sample["health"]["rejected_samples"], 0)
         self.assertIsNone(sample["error"])
@@ -169,13 +217,60 @@ class StreamContractTests(unittest.TestCase):
         self.assertEqual(final_import_limit, 100)
         self.assertEqual(maximum_connections, 1)
         self.assertEqual(samples[-1]["voltage_control"]["voltage_source"].split()[-1], "33251")
-        activity = samples[-1]["voltage_control"]["recent_events"]
+        # The configuration goes out once and the event log only when it grows.
+        self.assertIn("configuration", samples[0]["voltage_control"])
+        self.assertNotIn("configuration", samples[-1]["voltage_control"])
+        self.assertLess(
+            sum("recent_events" in sample["voltage_control"] for sample in samples), len(samples)
+        )
+        activity = latest_events(samples)
         trimmed = next(event for event in activity if event["limit_delta_w"] == -6_000)
         self.assertEqual(trimmed["previous_limit_w"], 10_000)
         self.assertEqual(trimmed["limit_delta_w"], -6_000)
         self.assertIn("2 kW above measured import", trimmed["message"])
         self.assertTrue(samples[-1]["device"]["remote_dispatch_supported"])
         self.assertEqual(samples[-1]["device"]["remote_dispatch_version"], 1)
+
+    def test_regulation_keeps_the_fast_cadence_without_attention(self):
+        import tempfile
+
+        bank = hybrid_bank()
+        bank[33135] = 0  # charging
+        bank[33251] = 2300
+        bank[33263] = 0xFFFF
+        bank[33264] = 0xF830  # -2.0 kW import
+        bank[43488] = 100
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter:
+                samples = stream_samples(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--interval",
+                    "0.05",
+                    "--idle-interval",
+                    "1",
+                    "--slow-interval",
+                    "30",
+                    "--dynamic-voltage-control",
+                    "--control-activation-delay",
+                    "0.1",
+                    "--control-settle-time",
+                    "0.1",
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                    wanted=8,
+                    commands=["attention off"],
+                )
+        self.assertEqual(samples[-1]["voltage_control"]["state"], "Import regulating")
+        # Nobody is watching, but a limit is being regulated: never idle.
+        self.assertEqual(
+            {json.dumps(sample["cadence"]) for sample in samples},
+            {json.dumps({"interval_s": 0.05, "idle": False})},
+        )
 
     def test_dynamic_export_requires_matching_live_validation_and_restores(self):
         import tempfile
@@ -252,6 +347,63 @@ class StreamContractTests(unittest.TestCase):
         self.assertEqual(writes, [])
 
 
+class CadenceTests(unittest.TestCase):
+    def test_idle_interval_applies_without_attention_and_lifts_at_once(self):
+        with FakeInverter() as inverter:
+            process = start_stream(
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(inverter.port),
+                "--interval",
+                "0.02",
+                "--idle-interval",
+                "0.4",
+            )
+            try:
+                assert process.stdout is not None
+                for _ in range(3):
+                    sample = json.loads(process.stdout.readline())
+                    self.assertEqual(sample["cadence"], {"interval_s": 0.02, "idle": False})
+
+                send(process, "attention off")
+                idle: list[dict] = []
+                deadline = time.monotonic() + TIMEOUT
+                while len(idle) < 3 and time.monotonic() < deadline:
+                    sample = json.loads(process.stdout.readline())
+                    if sample["cadence"]["idle"]:
+                        idle.append(sample)
+                self.assertEqual(len(idle), 3)
+                self.assertEqual(idle[-1]["cadence"]["interval_s"], 0.4)
+                stamps = [datetime.fromisoformat(sample["timestamp"]) for sample in idle]
+                gaps = [
+                    (later - earlier).total_seconds()
+                    for earlier, later in zip(stamps, stamps[1:], strict=False)
+                ]
+                self.assertTrue(all(gap >= 0.35 for gap in gaps), gaps)
+
+                # Opening the popover must not wait out the idle interval.
+                sent_at = send(process, "attention on")
+                while True:
+                    sample = json.loads(process.stdout.readline())
+                    if not sample["cadence"]["idle"]:
+                        break
+                self.assertLess(time.monotonic() - sent_at, 0.3)
+                self.assertEqual(sample["cadence"]["interval_s"], 0.02)
+            finally:
+                stop(process)
+
+    def test_idle_interval_needs_the_stream_and_a_sane_length(self):
+        result = run_monitor("--host", "127.0.0.1", "--idle-interval", "5")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--idle-interval requires --stream-json", result.stderr)
+        result = run_monitor(
+            "--host", "127.0.0.1", "--stream-json", "--interval", "2", "--idle-interval", "1"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no shorter than --interval", result.stderr)
+
+
 class TransientFaultTests(unittest.TestCase):
     def test_a_corrupt_frame_mid_run_does_not_end_the_process(self):
         """This exact case used to exit 1 after a single sample."""
@@ -320,6 +472,57 @@ class TransientFaultTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 1)
         self.assertIn("unable to obtain an inverter reading", result.stderr)
+
+    def test_reconnect_backoff_waits_instead_of_polling_every_interval(self):
+        """PyModbus dials inside every read, so the backoff was only a message."""
+        inverter = FakeInverter()
+        inverter.serve()
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                MONITOR,
+                "--stream-json",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(inverter.port),
+                "--interval",
+                "0.02",
+                "--timeout",
+                "1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        failing: list[dict] = []
+        try:
+            assert process.stdout is not None
+            first = json.loads(process.stdout.readline())
+            self.assertIsNone(first["error"])
+            # Nothing listens on the port any more, so every reconnect is refused.
+            inverter.close()
+            deadline = time.monotonic() + TIMEOUT
+            while len(failing) < 60 and time.monotonic() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                sample = json.loads(line)
+                if sample["error"] and "reconnect" in sample["error"]:
+                    failing.append(sample)
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+        self.assertEqual(len(failing), 60)
+        # Sixty samples span over a second of backoff. Polling through it
+        # counted a failed dial on every one of them.
+        self.assertLess(failing[-1]["health"]["total_failures"], 10)
+        self.assertIn("reconnect backoff", failing[-1]["error"])
+        self.assertEqual(failing[-1]["reading"]["house_load_kw"], 2.32)
 
     def test_a_dropped_connection_reconnects(self):
         with FakeInverter(drop_after=10) as inverter:

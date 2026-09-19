@@ -11,6 +11,9 @@ struct SolisMenuBarApp: App {
             Darwin.exit(EXIT_SUCCESS)
         }
 
+        // Attention hints are written to the poller's stdin. If the poller
+        // has just exited, that write would otherwise kill this process.
+        signal(SIGPIPE, SIG_IGN)
         let monitor = MonitorStore()
         _monitor = StateObject(wrappedValue: monitor)
         // MenuBarExtra label tasks are not guaranteed to run until macOS

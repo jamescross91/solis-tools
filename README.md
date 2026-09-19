@@ -174,6 +174,13 @@ the integration interface used by the menu-bar app:
 ./solis_poll.py --host 192.168.1.57 --stream-json
 ```
 
+With `--idle-interval SECONDS` the stream slows to that interval while the
+consumer has written `attention off` to the poller's stdin and dynamic control
+has nothing to regulate; `attention on` restores `--interval` and is answered
+with a poll immediately. The menu-bar app sends these as its popover closes and
+opens, so a closed menu bar polls the inverter every 5 s by default instead of
+every 2 s. Each sample reports the cadence in use.
+
 ## Optional PV monitoring
 
 PV registers are not read unless `--pv` is supplied:
@@ -399,7 +406,7 @@ The standard graphs are:
 
 Battery history is positive when discharging and negative when charging. Grid history is positive when exporting and negative when importing. Battery SoC remains a live gauge and is deliberately excluded from history.
 
-Power-flow registers are read every `--interval` seconds. Temperature, inverter state, inverter faults and daily PV energy are refreshed every `--slow-interval` seconds. Contiguous slow registers are read together to reduce request count.
+Power-flow registers are read every `--interval` seconds, or every `--idle-interval` seconds while a stream consumer reports no attention and control is idle. Temperature, inverter state, inverter faults and daily PV energy are refreshed every `--slow-interval` seconds. Each poll reads the registers it needs as one block per register region rather than one request per value, because every request is a full round trip through the data logger: the fast poll is two requests and the slow poll one. A logger that refuses a block is read span by span instead, so the values are the same either way. After a connection failure, reconnect attempts back off from 1 s to 60 s and the health line shows the wait.
 
 ## Register assumptions
 
@@ -421,6 +428,8 @@ The monitor uses the Solis hybrid ESINV-33000 **input-register** map. The `mbpol
 | `33147` | `33148` | House load, scaled by 1000 |
 | `33149–33150` | `33150–33151` | Battery power, scaled by 1000 |
 | `33263–33264` | `33264–33265` | Grid power, signed and scaled by 1000 |
+
+The fast poll reads raw `33073–33150` (`33057–33150` with `--pv`) and `33263–33264` (`33251–33264` with meter voltage) as two blocks; the slow poll reads `33093–33120` (`33035–33120` with `--pv`) as one. The widest block is 94 registers, inside the Modbus limit of 125. Only the addresses in the table are decoded; the registers between them are read and ignored.
 | `35000` | `35001` | Inverter register-family definition, where supported |
 
 Control holding registers use raw PDU addresses directly; they do not use the
@@ -465,6 +474,7 @@ hardware:
 ```sh
 make demo                                                # dashboard against a fake inverter
 python3 fake_inverter.py --port 5020 --drop-after 10      # forces a reconnect
+python3 fake_inverter.py --port 5020 --max-read 20        # refuses block reads
 python3 fake_inverter.py --port 5020 --corrupt-after 8    # a bad register mid-run
 python3 fake_inverter.py --port 5020 --string-inverter    # the wrong register family
 ```

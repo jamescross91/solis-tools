@@ -97,6 +97,7 @@ final class MonitorStore: ObservableObject {
     var controlHistory: [HistoryPoint] { presentation.controlHistory }
 
     private var process: Process?
+    private var inputPipe: Pipe?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
     private var errorBuffer = Data()
@@ -115,6 +116,7 @@ final class MonitorStore: ObservableObject {
     private var dashboardVisible = false
     private var lastMenuUpdate = Date.distantPast
     private var lastUrgentSignature: String?
+    private var retainedEvents: [VoltageControlEvent] = []
 
     private static let maximumBufferedBytes = 1 << 20
     private static let maximumRetryDelay: TimeInterval = 60
@@ -215,6 +217,7 @@ final class MonitorStore: ObservableObject {
         process?.terminationHandler = nil
         process = nil
         terminationRequested = false
+        inputPipe = nil
         outputPipe = nil
         errorPipe = nil
         errorBuffer.removeAll(keepingCapacity: true)
@@ -222,6 +225,7 @@ final class MonitorStore: ObservableObject {
         setState(.stopped)
         if clearReading {
             latestReceived = nil
+            retainedEvents = []
             historyBuffer.removeAll()
             controlHistoryBuffer.removeAll()
             presentation = DashboardPresentation()
@@ -233,9 +237,21 @@ final class MonitorStore: ObservableObject {
     func setDashboardVisible(_ visible: Bool) {
         guard dashboardVisible != visible else { return }
         dashboardVisible = visible
+        sendAttention()
         if visible {
             publishDashboard()
         }
+    }
+
+    /// Tell the poller whether anyone is looking, so it can slow its cadence
+    /// while the popover is closed and nothing is being regulated.
+    private func sendAttention() {
+        guard let handle = inputPipe?.fileHandleForWriting else { return }
+        let line = Data("attention \(dashboardVisible ? "on" : "off")\n".utf8)
+        // A poller that has just exited leaves a broken pipe. SIGPIPE is
+        // ignored at launch, so that surfaces here as an error to drop, and
+        // the restart path sends the state again.
+        try? handle.write(contentsOf: line)
     }
 
     func stopForApplicationTermination() async -> Bool {
@@ -292,12 +308,14 @@ final class MonitorStore: ObservableObject {
         errorBuffer.removeAll(keepingCapacity: true)
 
         let process = Process()
+        let input = Pipe()
         let output = Pipe()
         let errors = Pipe()
         let streamProcessor = StreamProcessor()
         self.streamProcessor = streamProcessor
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments(for: configuration)
+        process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
 
@@ -340,10 +358,12 @@ final class MonitorStore: ObservableObject {
         }
 
         self.process = process
+        inputPipe = input
         outputPipe = output
         errorPipe = errors
         do {
             try process.run()
+            sendAttention()
         } catch {
             setState(.failed("Could not start solis-poll: \(error.localizedDescription)"))
             scheduleRetry()
@@ -357,6 +377,7 @@ final class MonitorStore: ObservableObject {
             "--slave", String(configuration.slave),
             "--interval", String(configuration.interval),
             "--slow-interval", String(configuration.slowInterval),
+            "--idle-interval", String(configuration.idleInterval),
             "--meter-voltage",
             "--stream-json",
         ]
@@ -427,8 +448,21 @@ final class MonitorStore: ObservableObject {
         setState(.degraded)
     }
 
-    private func receive(_ envelope: StreamEnvelope) {
+    private func receive(_ received: StreamEnvelope) {
         retryAttempt = 0
+        var envelope = received
+        // The poller sends the event log only when it changes; carry the last
+        // list forward so the dashboard never shows an empty activity section
+        // between changes.
+        if let control = envelope.voltageControl {
+            if let events = control.recentEvents {
+                retainedEvents = events
+            } else {
+                envelope.voltageControl?.recentEvents = retainedEvents
+            }
+        } else {
+            retainedEvents = []
+        }
         latestReceived = envelope
         setState(envelope.error == nil ? .connected : .degraded)
 
@@ -457,6 +491,7 @@ final class MonitorStore: ObservableObject {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
+        inputPipe = nil
         outputPipe = nil
         errorPipe = nil
         streamProcessor = nil
@@ -504,7 +539,7 @@ final class MonitorStore: ObservableObject {
     private func urgentSignature(_ envelope: StreamEnvelope) -> String {
         let alarms = envelope.reading.alarms.map { "\($0.code):\($0.severity)" }.joined(separator: ",")
         let control = envelope.voltageControl
-        let newestEvent = control?.recentEvents.first?.id ?? ""
+        let newestEvent = control?.recentEvents?.first?.id ?? ""
         return [
             envelope.error ?? "",
             alarms,

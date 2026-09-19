@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -40,11 +41,17 @@ from voltage_control import (
 
 MIN_PYTHON = (3, 10)
 VERSION = "0.5.4"
+# Bumped whenever a stream field is renamed, removed or changes meaning; the
+# menu-bar app refuses a version it does not know. Two sends configuration
+# once per run and recent_events only when they change.
+STREAM_SCHEMA_VERSION = 2
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+# Inclusive raw zero-based address ranges, ordered and non-overlapping.
+RegisterSpans = tuple[tuple[int, int], ...]
 
 # ESINV fault registers 33116-33120. Bit numbers run from the least-significant
 # bit of the first register through to the most-significant bit of the fifth.
@@ -251,6 +258,14 @@ class RecordingError(OSError):
     """A local recording file could not be opened, read or written."""
 
 
+class ModbusResponseError(ConnectionError):
+    """The device answered a read with an exception response or a short frame.
+
+    Distinct from a transport failure because it proves the device is reachable
+    and objects to the request itself.
+    """
+
+
 def decode_inverter_status(code: int) -> str:
     if code in STATUS_LABELS:
         return STATUS_LABELS[code]
@@ -306,6 +321,9 @@ class SolisClient:
         self.client = ModbusTcpClient(host=host, port=port, timeout=timeout)
         self.slave = slave
         self.control_identity = f"{host.strip().lower()}:{port}/{slave}"
+        self.narrow_spans: set[RegisterSpans] = set()
+        self.block_failures: dict[RegisterSpans, int] = {}
+        self.meter_register_available: bool | None = None
 
     def connect(self) -> None:
         if not self.client.connect():
@@ -323,10 +341,10 @@ class SolisClient:
             device_id=self.slave,
         )
         if response.isError():
-            raise ConnectionError(f"Modbus error reading register {reference}: {response}")
+            raise ModbusResponseError(f"Modbus error reading register {reference}: {response}")
         registers = response.registers
         if len(registers) != count:
-            raise ConnectionError(
+            raise ModbusResponseError(
                 f"incomplete response at register {reference} "
                 f"(expected {count}, received {len(registers)})"
             )
@@ -348,6 +366,53 @@ class SolisClient:
                 f"(expected {count}, received {len(registers)})"
             )
         return registers
+
+    def _input_block(self, first: int, last: int) -> dict[int, int]:
+        """Read raw zero-based input registers first..last, keyed by raw address."""
+        words = self._registers(first + 1, last - first + 1)
+        return dict(zip(range(first, last + 1), words, strict=True))
+
+    def _input_registers(self, spans: RegisterSpans) -> dict[int, int]:
+        """Read every span, in one request wherever the device allows it.
+
+        Each request is a full round trip through the data logger, and a Wi-Fi
+        logger takes tens of milliseconds over each one, so a poll made of
+        several small reads spent most of its latency waiting rather than
+        transferring. Covering the gap between two spans costs a few bytes.
+
+        A device that refuses the covering block is read span by span, and
+        after refusing twice in a row it is read that way for the rest of the
+        run; a single refusal may be a gateway hiccup rather than a limit.
+        A transport failure is left to propagate. It says nothing about block
+        support, and retrying narrowly on a dead link would only lengthen the
+        stall before the reconnect path runs.
+        """
+        wide = len(spans) > 1 and spans not in self.narrow_spans
+        if wide:
+            try:
+                registers = self._input_block(spans[0][0], spans[-1][1])
+            except ModbusResponseError:
+                failures = self.block_failures.get(spans, 0) + 1
+                self.block_failures[spans] = failures
+                if failures >= self.BLOCK_FAILURES_BEFORE_NARROW:
+                    self.narrow_spans.add(spans)
+            else:
+                self.block_failures.pop(spans, None)
+                return registers
+        registers = {}
+        for first, last in spans:
+            registers.update(self._input_block(first, last))
+        return registers
+
+    def _meter_register_available(self) -> bool:
+        """Probe raw 33251 once; older firmware answers it with illegal address.
+
+        The probe used to run on every fast poll, so an inverter without the
+        register paid a rejected round trip every half second for the whole run.
+        """
+        if self.meter_register_available is None:
+            self.meter_register_available = self._optional_input_register(33252) is not None
+        return self.meter_register_available
 
     def _optional_input_register(self, reference: int) -> int | None:
         response = self.client.read_input_registers(
@@ -472,15 +537,27 @@ class SolisClient:
             remote_dispatch_version=remote_dispatch_version,
         )
 
+    # Raw zero-based spans the polls need. Each tuple is read by
+    # _input_registers as one block from its first to its last address; the
+    # widest, 33057-33150, is 94 registers, inside the Modbus limit of 125.
+    # Grid power at 33263 cannot join the fast block: 33073-33264 is 192.
+    FAST_SPANS: RegisterSpans = ((33073, 33073), (33135, 33150))
+    FAST_PV_SPANS: RegisterSpans = ((33057, 33058), *FAST_SPANS)
+    GRID_SPANS: RegisterSpans = ((33263, 33264),)
+    GRID_METER_SPANS: RegisterSpans = ((33251, 33251), *GRID_SPANS)
+    SLOW_SPANS: RegisterSpans = ((33093, 33095), (33116, 33120))
+    SLOW_PV_SPANS: RegisterSpans = ((33035, 33035), *SLOW_SPANS)
+    BLOCK_FAILURES_BEFORE_NARROW = 2
+
     def poll_slow(self, pv_enabled: bool) -> SlowMetrics:
-        operational = self._registers(33094, 3)  # Raw 33093-33095.
-        temperature = self._signed_16(operational[0]) / 10
+        registers = self._input_registers(self.SLOW_PV_SPANS if pv_enabled else self.SLOW_SPANS)
+        temperature = self._signed_16(registers[33093]) / 10
         checked(temperature, -50, 150, "inverter temperature")
-        status_code = operational[2]
-        fault_words = self._registers(33117, 5)  # Raw 33116-33120.
+        status_code = registers[33095]
+        fault_words = [registers[address] for address in range(33116, 33121)]
         pv_today = None
         if pv_enabled:
-            pv_today = self._registers(33036, 1)[0] / 10  # Raw 33035.
+            pv_today = registers[33035] / 10
             checked(pv_today, 0, 1000, "PV energy today")
         return SlowMetrics(
             inverter_temperature_c=temperature,
@@ -493,17 +570,17 @@ class SolisClient:
     def poll_fast(
         self, slow: SlowMetrics, pv_enabled: bool, meter_voltage_enabled: bool = False
     ) -> Reading:
-        voltage = self._registers(33074, 1)[0] / 10
+        registers = self._input_registers(self.FAST_PV_SPANS if pv_enabled else self.FAST_SPANS)
+        meter_enabled = meter_voltage_enabled and self._meter_register_available()
         meter_sample_monotonic = time.monotonic()
-        meter_raw = self._optional_input_register(33252) if meter_voltage_enabled else None
-        meter_voltage = meter_raw / 10 if meter_raw is not None else None
-        status = self._registers(33136, 16)
-        grid = self._registers(33264, 2)
+        grid = self._input_registers(self.GRID_METER_SPANS if meter_enabled else self.GRID_SPANS)
 
-        state_of_charge = status[4]
-        house_load_kw = status[12] / 1000
-        battery_kw = self._unsigned_32(status[14], status[15]) / 1000
-        grid_kw = self._signed_32(grid[0], grid[1]) / 1000
+        voltage = registers[33073] / 10
+        meter_voltage = grid[33251] / 10 if meter_enabled else None
+        state_of_charge = registers[33139]
+        house_load_kw = registers[33147] / 1000
+        battery_kw = self._unsigned_32(registers[33149], registers[33150]) / 1000
+        grid_kw = self._signed_32(grid[33263], grid[33264]) / 1000
         checked(voltage, 0, 300, "grid voltage")
         if meter_voltage is not None:
             checked(meter_voltage, 100, 300, "meter/PCC voltage")
@@ -513,13 +590,12 @@ class SolisClient:
         checked(grid_kw, -500, 500, "grid power")
 
         battery_status = (
-            "Idle" if battery_kw < 0.05 else "Discharging" if status[0] == 1 else "Charging"
+            "Idle" if battery_kw < 0.05 else "Discharging" if registers[33135] == 1 else "Charging"
         )
         grid_status = "Exporting" if grid_kw > 0.05 else "Importing" if grid_kw < -0.05 else "Idle"
         pv_kw = None
         if pv_enabled:
-            pv_words = self._registers(33058, 2)  # Raw 33057-33058.
-            pv_kw = self._unsigned_32(*pv_words) / 1000
+            pv_kw = self._unsigned_32(registers[33057], registers[33058]) / 1000
             checked(pv_kw, 0, 250, "PV power")
 
         return Reading(
@@ -533,7 +609,7 @@ class SolisClient:
             battery_status=battery_status,
             grid_kw=grid_kw,
             grid_status=grid_status,
-            alarms=slow.inverter_alarms + decode_bms_faults(status[10:12]),
+            alarms=slow.inverter_alarms + decode_bms_faults([registers[33145], registers[33146]]),
             pv_kw=pv_kw,
             pv_today_kwh=slow.pv_today_kwh,
             meter_voltage_v=meter_voltage,
@@ -1021,6 +1097,9 @@ class VoltageControlRuntime:
         retention_days: int,
     ):
         self.configuration = configuration
+        # The configuration is frozen, and asdict() on it cost more per stream
+        # sample than encoding the whole JSON payload did.
+        self.configuration_payload = configuration_dict(configuration)
         self.controller = DynamicVoltageController(configuration)
         self.import_actuator = ImportLimitActuator(
             client,
@@ -1054,8 +1133,29 @@ class VoltageControlRuntime:
         self.active_mode: str | None = None
         self.last_meter_monotonic: float | None = None
         self.last_external_check_monotonic = 0.0
+        self.events_revision = 0
+        self.streamed_events_revision: int | None = None
 
     external_check_interval_s = 5.0
+
+    # States in which nothing is being regulated or restored, so a slower poll
+    # loses nothing: the first sample showing controllable flow moves the
+    # controller into a candidate state and the cadence follows it.
+    IDLE_STATES = frozenset(
+        {
+            VoltageControlState.DISABLED,
+            VoltageControlState.STANDBY,
+            VoltageControlState.UNSUPPORTED,
+            VoltageControlState.SUSPENDED,
+            VoltageControlState.COMMUNICATION_UNAVAILABLE,
+        }
+    )
+
+    def needs_fast_telemetry(self) -> bool:
+        """Whether a slower idle poll would delay regulation or restoration."""
+        return (
+            self.active_mode is not None or self.controller.decision.state not in self.IDLE_STATES
+        )
 
     def _fresh(self) -> bool:
         return (
@@ -1396,27 +1496,39 @@ class VoltageControlRuntime:
                 ),
             }
         self.events.appendleft(event)
+        self.events_revision += 1
 
     def stream_dict(self, now: float) -> dict[str, Any]:
+        """One stream sample's control section; call it once per emitted sample.
+
+        The configuration never changes within a run and the event log changes
+        rarely, yet together they were two thirds of every sample the menu-bar
+        app decoded. The configuration goes out with the first sample only and
+        the events only when the log has changed since the last sample.
+        """
         decision = self.controller.decision
         if self.history_store and now - self.summary_updated_at >= 60:
             self.summary = self.history_store.daily_summary(datetime.now().astimezone())
             self.summary_updated_at = now
         result = decision.stream_dict()
+        first_sample = self.streamed_events_revision is None
+        if first_sample:
+            result["configuration"] = self.configuration_payload
         result.update(
             {
-                "configuration": configuration_dict(self.configuration),
                 "voltage_source": "meter/PCC input register, raw PDU 33251",
                 "estimated_voltage_sensitivity_v_per_kw": self.controller.sensitivity_v_per_kw,
                 "import_demand_ceiling_w": self.controller.import_demand_ceiling_w,
                 "import_actuator": self.import_actuator.diagnostics(now),
                 "export_actuator": self.export_actuator.diagnostics(now),
                 "export_write_validated": self.configuration.export_control_validated,
-                "recent_events": list(self.events),
                 "daily_summary": self.summary or None,
                 "recovery_note": self.recovery_note,
             }
         )
+        if first_sample or self.events_revision != self.streamed_events_revision:
+            result["recent_events"] = list(self.events)
+            self.streamed_events_revision = self.events_revision
         return result
 
     def shutdown(self) -> list[str]:
@@ -2075,6 +2187,7 @@ def stream_payload(
     error: str | None,
     timestamp: datetime,
     voltage_control: dict[str, Any] | None = None,
+    cadence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the versioned JSON contract consumed by the menu-bar app."""
     sampled_at = timestamp.isoformat(timespec="milliseconds")
@@ -2082,7 +2195,7 @@ def stream_payload(
     if health.last_success_at is not None:
         age = max(0.0, timestamp.timestamp() - health.last_success_at)
     return {
-        "schema_version": 1,
+        "schema_version": STREAM_SCHEMA_VERSION,
         "timestamp": sampled_at,
         "device": {
             "model_code": device.model_code,
@@ -2128,6 +2241,7 @@ def stream_payload(
             "rejected_samples": health.rejected_samples,
         },
         "voltage_control": voltage_control,
+        "cadence": cadence,
         "error": error,
     }
 
@@ -2138,6 +2252,7 @@ def print_stream_json(
     health: ConnectionHealth,
     error: str | None,
     voltage_control: dict[str, Any] | None = None,
+    cadence: dict[str, Any] | None = None,
 ) -> None:
     payload = stream_payload(
         reading,
@@ -2146,8 +2261,69 @@ def print_stream_json(
         error,
         datetime.now().astimezone(),
         voltage_control,
+        cadence,
     )
     print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+class AttentionChannel:
+    """Learn from stdin whether anyone is looking at the stream.
+
+    The menu-bar app writes ``attention on`` when its popover opens and
+    ``attention off`` when it closes. The poller waits on stdin instead of
+    sleeping between polls, so an opened popover is answered with a poll at
+    once rather than at the end of an idle interval. Without a readable stdin,
+    or once it closes, attention is assumed and the cadence never slows.
+    """
+
+    def __init__(self, stream: IO[str] | None):
+        self.attention = True
+        self.descriptor: int | None = None
+        self.pending = b""
+        if stream is not None:
+            try:
+                self.descriptor = stream.fileno()
+            except (OSError, ValueError):
+                self.descriptor = None
+
+    def wait(self, seconds: float) -> None:
+        """Sleep for `seconds`, or until an attention change arrives."""
+        deadline = time.monotonic() + seconds
+        while self.descriptor is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                ready, _, _ = select.select([self.descriptor], [], [], remaining)
+                chunk = os.read(self.descriptor, 4096) if ready else None
+            except (OSError, ValueError):
+                self.descriptor = None
+                break
+            if chunk is None:
+                return
+            if not chunk:
+                self.descriptor = None
+                break
+            if self._consume(chunk):
+                return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _consume(self, chunk: bytes) -> bool:
+        """Apply complete lines; True when the attention state changed."""
+        self.pending += chunk
+        changed = False
+        while b"\n" in self.pending:
+            line, _, self.pending = self.pending.partition(b"\n")
+            words = line.decode("utf-8", "replace").split()
+            if len(words) == 2 and words[0] == "attention" and words[1] in ("on", "off"):
+                attention = words[1] == "on"
+                changed = changed or attention != self.attention
+                self.attention = attention
+        if len(self.pending) > 4096:
+            self.pending = b""
+        return changed
 
 
 HOSTNAME_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
@@ -2184,6 +2360,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10,
         help="temperature/status poll interval in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--idle-interval",
+        type=float,
+        help=(
+            "with --stream-json, poll interval while the consumer reports no attention "
+            "and dynamic control is idle (default: same as --interval)"
+        ),
     )
     parser.add_argument(
         "--timeout", type=float, default=3, help="Modbus timeout in seconds (default: 3)"
@@ -2286,6 +2470,11 @@ def parse_args() -> argparse.Namespace:
     # the first frame then died formatting a bar.
     if any(not math.isfinite(value) or value <= 0 for value in positive):
         parser.error("poll intervals, timeout and bar maximums must be finite and above zero")
+    if args.idle_interval is not None:
+        if not args.stream_json:
+            parser.error("--idle-interval requires --stream-json")
+        if not math.isfinite(args.idle_interval) or args.idle_interval < args.interval:
+            parser.error("--idle-interval must be finite and no shorter than --interval")
     if args.csv and args.jsonl and args.csv.resolve() == args.jsonl.resolve():
         parser.error("--csv and --jsonl must name different files")
     if args.dynamic_export_control and not args.dynamic_voltage_control:
@@ -2355,7 +2544,8 @@ def main() -> int:
     for name in ("SIGTERM", "SIGHUP"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), _interrupt)
-    dashboard = sys.stdout.isatty() and not args.once and not args.stream_json
+    graphs = not args.once and not args.stream_json
+    dashboard = sys.stdout.isatty() and graphs
     palette = Palette(dashboard and not args.no_colour)
     client = SolisClient(args.host, args.port, args.slave, args.timeout)
     recorder: Recorder | None = None
@@ -2363,16 +2553,18 @@ def main() -> int:
     slow_metrics: SlowMetrics | None = None
     last_slow_poll = 0.0
     last_error: str | None = None
+    connection_error = ""
     health = ConnectionHealth()
     started_at = time.time()
     history: deque[tuple[float, Reading]] = deque()
     voltage_runtime: VoltageControlRuntime | None = None
     reconnect_attempt = 0
     reconnect_not_before = 0.0
+    attention = AttentionChannel(sys.stdin if args.stream_json else None)
 
     try:
         recorder = Recorder(args.csv, args.jsonl)
-        if not args.once and not args.stream_json:
+        if graphs:
             history = recorder.load_history(started_at)
         client.connect()
         device = client.identify(
@@ -2420,68 +2612,77 @@ def main() -> int:
             print("\033[?25l", end="")
         while True:
             poll_started = time.perf_counter()
-            try:
-                now_monotonic = time.monotonic()
-                if slow_metrics is None or now_monotonic - last_slow_poll >= args.slow_interval:
-                    slow_metrics = client.poll_slow(args.pv)
-                    last_slow_poll = now_monotonic
-                last_reading = client.poll_fast(
-                    slow_metrics,
-                    args.pv,
-                    meter_voltage_enabled=args.meter_voltage or args.dynamic_voltage_control,
+            now_monotonic = time.monotonic()
+            if now_monotonic < reconnect_not_before:
+                # PyModbus dials the host again inside every read, so polling
+                # through the backoff made a connect attempt every interval and
+                # blocked for the connect timeout each time; the backoff was
+                # only ever a message. Keep the display alive and wait it out.
+                last_error = (
+                    f"{connection_error}; reconnect backoff "
+                    f"{reconnect_not_before - now_monotonic:.1f}s"
                 )
-                sampled_at = time.time()
-                health.succeeded(sampled_at, (time.perf_counter() - poll_started) * 1000)
-                reconnect_attempt = 0
-                reconnect_not_before = 0.0
-                last_error = None
-                if voltage_runtime:
-                    voltage_runtime.update(last_reading, time.monotonic(), sampled_at)
-                history.append((sampled_at, for_history(last_reading)))
-                cutoff = sampled_at - HISTORY_SECONDS
-                while history and history[0][0] < cutoff:
-                    history.popleft()
-                recorder.write(last_reading, health, datetime.now().astimezone())
-            except (UnsupportedProfileError, RecordingError, sqlite3.Error):
-                raise
-            except ImplausibleReadingError as exc:
-                # Before the first good sample this means the register map is
-                # wrong, so stop rather than retry a decode that cannot work.
-                # Afterwards the map is proven and this is a corrupt frame:
-                # drop the sample and keep the connection.
-                if health.successful_polls == 0 and not args.skip_profile_check:
-                    raise UnsupportedProfileError(
-                        f"{exc}; this inverter may use an unsupported register map. "
-                        "Re-run with --skip-profile-check to continue anyway."
-                    ) from exc
-                last_error = f"implausible sample discarded: {exc}"
-                health.failed(rejected=True)
-                slow_metrics = None
-                if voltage_runtime:
-                    voltage_runtime.communication_unavailable()
-            except (ConnectionError, OSError, client.modbus_exception) as exc:
-                last_error = str(exc)
-                health.failed()
-                slow_metrics = None
-                if voltage_runtime:
-                    voltage_runtime.communication_unavailable()
-                client.close()
-                reconnect_now = time.monotonic()
-                if reconnect_now >= reconnect_not_before:
+            else:
+                try:
+                    if slow_metrics is None or now_monotonic - last_slow_poll >= args.slow_interval:
+                        slow_metrics = client.poll_slow(args.pv)
+                        last_slow_poll = now_monotonic
+                    last_reading = client.poll_fast(
+                        slow_metrics,
+                        args.pv,
+                        meter_voltage_enabled=args.meter_voltage or args.dynamic_voltage_control,
+                    )
+                    sampled_at = time.time()
+                    health.succeeded(sampled_at, (time.perf_counter() - poll_started) * 1000)
+                    reconnect_attempt = 0
+                    reconnect_not_before = 0.0
+                    last_error = None
+                    if voltage_runtime:
+                        voltage_runtime.update(last_reading, time.monotonic(), sampled_at)
+                    if graphs:
+                        # Only the terminal graphs read this. The menu-bar app
+                        # keeps its own history, so retaining six hours here as
+                        # well cost its poller about 11 MB for nothing.
+                        history.append((sampled_at, for_history(last_reading)))
+                        cutoff = sampled_at - HISTORY_SECONDS
+                        while history and history[0][0] < cutoff:
+                            history.popleft()
+                    recorder.write(last_reading, health, datetime.now().astimezone())
+                except (UnsupportedProfileError, RecordingError, sqlite3.Error):
+                    raise
+                except ImplausibleReadingError as exc:
+                    # Before the first good sample this means the register map is
+                    # wrong, so stop rather than retry a decode that cannot work.
+                    # Afterwards the map is proven and this is a corrupt frame:
+                    # drop the sample and keep the connection.
+                    if health.successful_polls == 0 and not args.skip_profile_check:
+                        raise UnsupportedProfileError(
+                            f"{exc}; this inverter may use an unsupported register map. "
+                            "Re-run with --skip-profile-check to continue anyway."
+                        ) from exc
+                    last_error = f"implausible sample discarded: {exc}"
+                    health.failed(rejected=True)
+                    slow_metrics = None
+                    if voltage_runtime:
+                        voltage_runtime.communication_unavailable()
+                except (ConnectionError, OSError, client.modbus_exception) as exc:
+                    connection_error = last_error = str(exc)
+                    health.failed()
+                    slow_metrics = None
+                    if voltage_runtime:
+                        voltage_runtime.communication_unavailable()
+                    client.close()
                     try:
                         client.connect()
                         health.reconnects += 1
                     except (ConnectionError, OSError, client.modbus_exception) as reconnect_error:
                         delay = min(60.0, 2 ** min(reconnect_attempt, 6))
                         reconnect_attempt += 1
-                        reconnect_not_before = reconnect_now + delay
+                        reconnect_not_before = time.monotonic() + delay
                         last_error = (
                             f"{last_error}; reconnect failed: {reconnect_error}; "
                             f"retrying in {delay:g}s"
                         )
-                else:
-                    wait = reconnect_not_before - reconnect_now
-                    last_error = f"{last_error}; reconnect backoff {wait:.1f}s"
 
             if last_reading is None:
                 # The connection and identity block already succeeded, so a
@@ -2495,14 +2696,21 @@ def main() -> int:
                 print_once(last_reading, device, health)
                 return 0
             if args.stream_json:
+                idle = (
+                    args.idle_interval is not None
+                    and not attention.attention
+                    and not (voltage_runtime and voltage_runtime.needs_fast_telemetry())
+                )
+                interval = args.idle_interval if idle else args.interval
                 print_stream_json(
                     last_reading,
                     device,
                     health,
                     last_error,
                     voltage_runtime.stream_dict(time.monotonic()) if voltage_runtime else None,
+                    {"interval_s": interval, "idle": idle},
                 )
-                time.sleep(args.interval)
+                attention.wait(interval)
                 continue
             output = render(
                 last_reading, device, health, args, palette, last_error, history, started_at

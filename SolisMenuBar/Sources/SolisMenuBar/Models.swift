@@ -19,8 +19,16 @@ struct StreamEnvelope: Decodable, Sendable {
     let device: DeviceDetails
     let reading: InverterReading
     let health: ConnectionDetails
-    let voltageControl: VoltageControlDetails?
+    var voltageControl: VoltageControlDetails?
+    let cadence: StreamCadence?
     let error: String?
+}
+
+/// How often the poller is sampling. `idle` is true while nobody is watching
+/// and dynamic control has nothing to regulate or restore.
+struct StreamCadence: Decodable, Sendable {
+    let intervalS: Double
+    let idle: Bool
 }
 
 struct DeviceDetails: Decodable, Sendable {
@@ -70,7 +78,10 @@ struct VoltageControlDetails: Decodable, Sendable {
     let importActuator: ActuatorDetails
     let exportActuator: ActuatorDetails
     let exportWriteValidated: Bool
-    let recentEvents: [VoltageControlEvent]
+    /// Sent only when the log has changed since the previous sample.
+    /// MonitorStore carries the last list forward, so views see nil only
+    /// before the first control sample of a run.
+    var recentEvents: [VoltageControlEvent]?
     let dailySummary: VoltageControlDailySummary?
     let recoveryNote: String?
 }
@@ -278,6 +289,7 @@ struct MonitorConfiguration: Equatable, Sendable {
     var slave: Int
     var interval: Double
     var slowInterval: Double
+    var idleInterval: Double
     var inverterMaxKw: Double
     var gridMaxKw: Double
     var pvEnabled: Bool
@@ -311,12 +323,15 @@ struct MonitorConfiguration: Equatable, Sendable {
         let host = (defaults.string(forKey: "host") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return nil }
+        let interval = max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 2)
         return MonitorConfiguration(
             host: host,
             port: defaults.object(forKey: "port") as? Int ?? 502,
             slave: defaults.object(forKey: "slave") as? Int ?? 1,
-            interval: max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 2),
+            interval: interval,
             slowInterval: max(1, defaults.object(forKey: "slowInterval") as? Double ?? 10),
+            // The poller rejects an idle interval shorter than the fast one.
+            idleInterval: max(interval, defaults.object(forKey: "idlePollInterval") as? Double ?? 5),
             inverterMaxKw: max(0.1, defaults.object(forKey: "inverterMaxKw") as? Double ?? 10),
             gridMaxKw: max(0.1, defaults.object(forKey: "gridMaxKw") as? Double ?? 23),
             pvEnabled: defaults.bool(forKey: "pvEnabled"),
@@ -394,7 +409,7 @@ enum StreamDecoder {
     /// Stream schema this build knows how to read. solis_poll.py emits the same
     /// number; a newer poller means the app is out of date, not that the line
     /// is corrupt, and the two need telling apart in the UI.
-    static let supportedSchemaVersion = 1
+    static let supportedSchemaVersion = 2
     private static let fractionalDateStyle = Date.ISO8601FormatStyle(
         includingFractionalSeconds: true
     )
