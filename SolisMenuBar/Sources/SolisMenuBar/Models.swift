@@ -338,8 +338,18 @@ struct MonitorConfiguration: Equatable, Sendable {
     var hypervoltEnabled: Bool
     var evPriority: String
     /// Empty means the poller's own default, <state dir>/hypervolt.json,
-    /// written once by scripts/hypervolt_login.py.
+    /// written once by hypervolt-login.
     var hypervoltCredentialsPath: String
+
+    /// Where hypervolt-login writes credentials when the user has not
+    /// overridden the path, matching solis_poll.py's own default exactly so
+    /// a poller launched without --hypervolt-credentials finds them.
+    static var defaultHypervoltCredentialsPath: String {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SolisTools", isDirectory: true)
+            .appendingPathComponent("hypervolt.json")
+            .path
+    }
 
     /// Read the settings the dashboard stores, or nil if no host is set yet.
     ///

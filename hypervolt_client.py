@@ -71,7 +71,7 @@ class HypervoltCredentials:
     """What is persisted between runs: a refresh token only, never a password.
 
     A Hypervolt account password is exchanged for a refresh token exactly
-    once, interactively, by scripts/hypervolt_login.py. Everything after that
+    once, interactively, by hypervolt_login.py (installed as hypervolt-login). Everything after that
     — including this client's own token refreshes — rotates the refresh token
     without ever touching the password again, so a leaked credentials file
     exposes charger control, not the account's email/password.
@@ -86,7 +86,7 @@ class HypervoltCredentials:
             raw = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise HypervoltAuthError(
-                f"no Hypervolt credentials at {path}; run scripts/hypervolt_login.py first"
+                f"no Hypervolt credentials at {path}; run hypervolt-login first"
             ) from None
         except OSError as exc:
             raise HypervoltAuthError(f"Hypervolt credentials file is unreadable: {exc}") from exc
@@ -198,9 +198,19 @@ class _WebSocket:
         if expected not in response:
             raise HypervoltProtocolError("Hypervolt websocket handshake accept key did not match")
 
+    def _recv(self) -> bytes:
+        # A peer that closes with unread data queued sends a TCP reset
+        # instead of a clean FIN, which surfaces here as ConnectionResetError
+        # rather than an empty read; either way the socket is gone, so both
+        # collapse to the same typed error the rest of this client expects.
+        try:
+            return self.sock.recv(4096)
+        except OSError as exc:
+            raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
+
     def _read_until(self, marker: bytes) -> bytes:
         while marker not in self._buffer:
-            chunk = self.sock.recv(4096)
+            chunk = self._recv()
             if not chunk:
                 raise HypervoltProtocolError("Hypervolt websocket closed during handshake")
             self._buffer += chunk
@@ -210,7 +220,7 @@ class _WebSocket:
 
     def _read_exact(self, count: int) -> bytes:
         while len(self._buffer) < count:
-            chunk = self.sock.recv(4096)
+            chunk = self._recv()
             if not chunk:
                 raise HypervoltProtocolError("Hypervolt websocket closed unexpectedly")
             self._buffer += chunk
@@ -410,7 +420,7 @@ class HypervoltClient:
         """Look up the account's charger id, without opening a websocket.
 
         Used both by `connect()` (when no charger id is already known) and by
-        scripts/hypervolt_login.py, which needs one to write into a fresh
+        hypervolt_login.py, which needs one to write into a fresh
         credentials file but has no reason to open a live connection yet.
         """
         self._ensure_access_token()

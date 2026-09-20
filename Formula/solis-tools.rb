@@ -65,6 +65,7 @@ class SolisTools < Formula
     version_pattern = build.head? ? /\d+\.\d+\.\d+/ : /#{Regexp.escape(version.to_s)}/
     assert_match(/solis-poll #{version_pattern}/, shell_output("#{bin}/solis-poll --version"))
     assert_match "--host HOST", shell_output("#{bin}/solis-poll --help")
+    assert_match "--credentials", shell_output("#{bin}/hypervolt-login --help")
     return unless OS.mac?
 
     assert_path_exists prefix/"SolisMenuBar.app/Contents/Info.plist"

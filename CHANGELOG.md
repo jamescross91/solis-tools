@@ -15,11 +15,12 @@ versioning](https://semver.org/spec/v2.0.0.html).
   and `--ev-maximum-voltage` narrow the operating band to Hypervolt's own
   tighter protection limits, and the car charging is on its own enough to
   activate import regulation. Credentials are a Hypervolt refresh token only,
-  saved at 0600 permissions and obtained once with
-  `scripts/hypervolt_login.py`; a lost cloud connection is read as "not
-  charging" and a failed command leaves battery regulation unaffected. See
-  `docs/hypervolt-integration.md`. The menu-bar app gained matching settings
-  and a status line showing EV charging state and commanded current.
+  saved at 0600 permissions and obtained once with the `hypervolt-login`
+  command, either from a terminal or the menu-bar app's own sign-in form; a
+  lost cloud connection is read as "not charging" and a failed command leaves
+  battery regulation unaffected. See `docs/hypervolt-integration.md`. The
+  menu-bar app gained matching settings, a sign-in form and a status line
+  showing EV charging state and commanded current.
 
 ### Fixed
 
@@ -29,6 +30,10 @@ versioning](https://semver.org/spec/v2.0.0.html).
   only a message.
 - Probe the optional meter/PCC voltage register once per run. Firmware without
   it answered the same read with illegal-address on every fast poll.
+- Treat a Hypervolt WebSocket connection reset by the peer the same as a
+  clean close. A TCP reset (rather than a graceful FIN) surfaced as a bare
+  `ConnectionResetError` that escaped the poller's `HypervoltError` handling
+  instead of the intended fail-closed "not charging" state.
 
 ### Changed
 

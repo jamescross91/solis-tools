@@ -316,7 +316,7 @@ changed by capturing its baseline.
 | `--voltage-history-db` | `voltage-history.sqlite3` in state directory | Override private SQLite history path |
 | `--voltage-history-retention-days` | 30 days | Retention for minute aggregates and control events |
 | `--hypervolt-enable` | Off | Enable the Hypervolt EV charger lever; requires `--dynamic-voltage-control` |
-| `--hypervolt-credentials` | `hypervolt.json` in state directory | Refresh-token file written by `scripts/hypervolt_login.py` |
+| `--hypervolt-credentials` | `hypervolt.json` in state directory | Refresh-token file written by `hypervolt-login` |
 | `--ev-priority` | `battery` | `battery`, `ev` or `balanced` — which side is cut and restored first; see below |
 | `--ev-minimum-voltage` / `--ev-maximum-voltage` | 216 / 253 V | Tightened voltage bounds applied only while the car is charging |
 | `--ev-minimum-current` / `--ev-maximum-current` | 6 / 32 A | Clamp for the commanded charging current |
@@ -389,10 +389,11 @@ solis-poll --host 192.168.1.57 --dynamic-voltage-control --dynamic-import-contro
 
 Credentials are a Hypervolt refresh token, never the account password, saved
 at 0600 permissions to `--hypervolt-credentials` (default `hypervolt.json` in
-the state directory). Obtain one once with:
+the state directory). The menu-bar app's settings have a "Sign in to
+Hypervolt" form that obtains one for you; from the CLI, obtain one once with:
 
 ```sh
-python3 scripts/hypervolt_login.py
+hypervolt-login --credentials ~/.local/state/solis-tools/hypervolt.json
 ```
 
 A lost or stale Hypervolt cloud connection is read as "the car is not

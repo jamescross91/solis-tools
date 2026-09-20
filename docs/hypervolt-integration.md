@@ -47,7 +47,7 @@ server-to-client text frames, ping/pong, a clean close — and nothing more.
 | `voltage_control.py` | Stays transport-independent. Holds the EV configuration fields, the tightened voltage bounds, and `allocate_import_step`, the pure function that decides how much of a change in import headroom falls on the battery versus the car. Knows nothing about WebSockets. |
 | `solis_poll.py` | The integration layer: `HypervoltCurrentActuator` (mirrors the existing `ImportLimitActuator`/`ExportLimitActuator` pattern), the CLI flags, the independent Hypervolt poll/reconnect loop, and the wiring that calls `allocate_import_step` with live values and turns its output into a command. |
 | `fake_hypervolt.py` | A stdlib test double serving the token endpoint, the discovery endpoint and both WebSockets on one port, in the same spirit as `fake_inverter.py`. |
-| `scripts/hypervolt_login.py` | A one-time interactive script that performs the password grant and writes a refresh-token credentials file. Not imported by anything else. |
+| `hypervolt_login.py` | A one-time interactive script that performs the password grant and writes a refresh-token credentials file. Installed as the `hypervolt-login` command; not imported by anything else. |
 
 This split exists so the delicate, already-tested Solis-only controller
 state machine in `voltage_control.py` did not need to be rewritten. The EV
@@ -141,7 +141,7 @@ activate EV-aware behaviour unless the feature was actually turned on.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--hypervolt-enable` | Off | Master opt-in; requires `--dynamic-voltage-control` |
-| `--hypervolt-credentials` | `<state dir>/hypervolt.json` | Refresh-token file written by `scripts/hypervolt_login.py` |
+| `--hypervolt-credentials` | `<state dir>/hypervolt.json` | Refresh-token file written by `hypervolt-login` |
 | `--ev-priority` | `battery` | `battery`, `ev` or `balanced` — see above |
 | `--ev-minimum-voltage` / `--ev-maximum-voltage` | 216.0 / 253.0 V | Tightened bounds applied only while the car is charging |
 | `--ev-minimum-current` / `--ev-maximum-current` | 6.0 / 32.0 A | Clamp for the commanded charging current |
@@ -160,12 +160,24 @@ closed-whitelist rule concerns itself with.
 ## Credentials
 
 Only a refresh token is ever persisted, at 0600 permissions, never the
-account password. `scripts/hypervolt_login.py` is the one place the password
-is used: it prompts interactively (`getpass`, never a CLI argument), performs
-the password grant once, discovers the charger ID, and writes the resulting
+account password. `hypervolt_login.py` (installed as the `hypervolt-login`
+command) is the one place the password is used: it performs the password
+grant once, discovers the charger ID, and writes the resulting
 `HypervoltCredentials` to the credentials file. `HypervoltClient` rotates and
 re-saves the refresh token on every run after that; the password itself is
 never stored or logged anywhere.
+
+When run from a terminal with `--email` omitted, it prompts interactively
+(`getpass`, never a CLI argument, so the password never lands in shell
+history or a process listing). The menu-bar app's own "Sign in to Hypervolt"
+form drives the same command as a subprocess instead of a terminal prompt: it
+always passes `--email` as an argument (not a secret) and writes the password
+followed by a newline to the subprocess's stdin pipe, which `getpass.getpass`
+falls back to reading directly whenever stdin is not a terminal. Either way
+the password exists only for the lifetime of that one short-lived process,
+and `HypervoltLoginRunner.swift` never stores it — only the transient
+`SecureField` state in `DashboardView`, cleared immediately after the
+subprocess is launched.
 
 ## Testing without a real charger or cloud account
 
@@ -185,6 +197,25 @@ bounds as pure logic, with no network involved. `test_end_to_end.py`'s
 to end: `battery` priority cuts the car and leaves the inverter's holding
 register untouched; `ev` priority cuts the inverter and leaves the car's
 commanded current untouched.
+
+`hypervolt_login.py` carries the same hidden `--token-host`/`--token-port`/
+`--api-host`/`--api-port`/`--insecure` overrides as `solis_poll.py`, so
+`test_hypervolt_login.py` can run the real `hypervolt-login` command as a
+subprocess against `fake_hypervolt.py`, piping a password to its stdin
+exactly as `HypervoltLoginRunner.swift` does, and pin its exit codes and the
+exact stdout/stderr text the Swift side parses.
+
+## Menu-bar sign-in UI
+
+The dashboard's Hypervolt settings section has its own "Sign in to
+Hypervolt" form (email field, `SecureField` for the password, a status line
+reading the credentials file's `charger_id` to show whether an account is
+already signed in). `HypervoltLoginRunner` drives `hypervolt-login` as a
+one-shot subprocess exactly as described in "Credentials" above, and reports
+success or failure by parsing that process's stdout/stderr rather than
+duplicating any auth logic in Swift. `ExecutableLocator` is shared with
+`MonitorStore`'s own `solis-poll` lookup, since Homebrew installs both
+commands into the same `bin` directory.
 
 ## Stream contract
 

@@ -2622,8 +2622,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hypervolt-credentials",
         type=Path,
-        help="refresh-token file written by scripts/hypervolt_login.py "
-        "(default: <state dir>/hypervolt.json)",
+        help="refresh-token file written by hypervolt-login (default: <state dir>/hypervolt.json)",
     )
     parser.add_argument(
         "--ev-priority",

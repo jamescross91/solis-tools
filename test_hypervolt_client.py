@@ -40,7 +40,7 @@ def make_client(fake: FakeHypervoltCloud, **overrides) -> HypervoltClient:
 class CredentialsTests(unittest.TestCase):
     def test_missing_file_fails_closed_with_a_setup_hint(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(HypervoltAuthError, "hypervolt_login.py"):
+            with self.assertRaisesRegex(HypervoltAuthError, "hypervolt-login"):
                 HypervoltCredentials.load(Path(directory) / "missing.json")
 
     def test_round_trips_and_is_written_owner_only(self):

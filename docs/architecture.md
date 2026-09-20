@@ -187,6 +187,8 @@ newline-delimited JSON, retries with backoff, and translates stream state into
 | `MonitorStore.swift` | Child-process lifecycle and observable state |
 | `DashboardView.swift` | Popover: metric cards, chart, alarms, settings |
 | `SolisMenuBarApp.swift` | `MenuBarExtra` scene and the compact menu-bar label |
+| `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `MonitorStore` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
+| `HypervoltLoginRunner.swift` | Drives `hypervolt-login` as a one-shot subprocess for the dashboard's own sign-in form — see docs/hypervolt-integration.md |
 
 General chart history is memory-only and downsampled to one point per 30 seconds
 over a 24-hour window — about 2,880 points. Retaining every poll sample for that

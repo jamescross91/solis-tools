@@ -59,12 +59,14 @@ register address to protect, only a current command (`set_max_current_ma`,
 clamped to `--ev-minimum-current`/`--ev-maximum-current` within Hypervolt's
 own 6–32 A hardware range) and a pause. Only ever persist a Hypervolt refresh
 token, at 0600 permissions, never the account password; the password is used
-exactly once, interactively, in `scripts/hypervolt_login.py`. A stale or
-unreachable Hypervolt connection must read as "the car is not charging",
-never be guessed as charging — see `HypervoltState.is_charging()` — and a
-failed Hypervolt command must fall back to the controller's original
-decision so Solis-side voltage safety never depends on the cloud link being
-up. Full design in docs/hypervolt-integration.md.
+exactly once, in `hypervolt_login.py` (installed as `hypervolt-login`), either
+typed at a terminal prompt or entered into the menu bar app's own sign-in
+form, which drives that same command as a subprocess. A stale or unreachable
+Hypervolt connection must read as "the car is not charging", never be guessed
+as charging — see `HypervoltState.is_charging()` — and a failed Hypervolt
+command must fall back to the controller's original decision so Solis-side
+voltage safety never depends on the cloud link being up. Full design in
+docs/hypervolt-integration.md.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.

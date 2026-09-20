@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Exchange a Hypervolt account password for a refresh token, once.
 
-    scripts/hypervolt_login.py --credentials ~/.local/state/solis-tools/hypervolt.json
+    hypervolt-login --credentials ~/.local/state/solis-tools/hypervolt.json
+
+Installed as the `hypervolt-login` command by Homebrew, and runnable directly
+as `python3 hypervolt_login.py` from a source checkout. The SolisMenuBar app's
+own sign-in form drives this exact command as a subprocess, piping the
+password to its stdin, so the account password only ever passes through this
+one short-lived process.
 
 The password is entered interactively (never as a command-line argument, so
 it never lands in shell history or a process listing) and used exactly once,
 here. Only the resulting refresh token is written to the credentials file;
 solis_poll.py's --hypervolt-enable reads that file at runtime and rotates the
 refresh token itself as it expires, and never asks for the password again. If
-the refresh token is ever revoked, re-run this script rather than expecting
+the refresh token is ever revoked, re-run this command rather than expecting
 the poller to recover on its own — that failure is deliberately not silent,
 so control does not resume against a stale identity.
 
-Re-running this script overwrites any charger ID already stored in the file
+Re-running this command overwrites any charger ID already stored in the file
 with a freshly discovered one, in case the account's charger has changed.
 """
 
@@ -23,12 +29,18 @@ import getpass
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from hypervolt_client import HypervoltAuthError, HypervoltClient, HypervoltCredentials  # noqa: E402
+from hypervolt_client import HypervoltAuthError, HypervoltClient, HypervoltCredentials
 
 
-def login(email: str, password: str, *, timeout: float = 10.0) -> HypervoltCredentials:
+def login(
+    email: str,
+    password: str,
+    *,
+    timeout: float = 10.0,
+    token_host: str = "kc.prod.hypervolt.co.uk",
+    token_port: int = 443,
+    use_tls: bool = True,
+) -> HypervoltCredentials:
     import http.client
     import json
     import urllib.parse
@@ -42,7 +54,8 @@ def login(email: str, password: str, *, timeout: float = 10.0) -> HypervoltCrede
             "password": password,
         }
     ).encode("ascii")
-    connection = http.client.HTTPSConnection("kc.prod.hypervolt.co.uk", timeout=timeout)
+    connection_cls = http.client.HTTPSConnection if use_tls else http.client.HTTPConnection
+    connection = connection_cls(token_host, token_port, timeout=timeout)
     try:
         connection.request(
             "POST",
@@ -71,6 +84,13 @@ def main() -> int:
         "--credentials", type=Path, required=True, help="where to write the resulting refresh token"
     )
     parser.add_argument("--email", help="Hypervolt account email (prompted if omitted)")
+    # end-to-end tests can redirect to a local fake_hypervolt.py instead of
+    # Hypervolt's real cloud API, the same hidden flags solis_poll.py exposes.
+    parser.add_argument("--token-host", default="kc.prod.hypervolt.co.uk", help=argparse.SUPPRESS)
+    parser.add_argument("--token-port", type=int, default=443, help=argparse.SUPPRESS)
+    parser.add_argument("--api-host", default="api.hypervolt.co.uk", help=argparse.SUPPRESS)
+    parser.add_argument("--api-port", type=int, default=443, help=argparse.SUPPRESS)
+    parser.add_argument("--insecure", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     email = args.email or input("Hypervolt account email: ").strip()
@@ -80,8 +100,21 @@ def main() -> int:
         return 2
 
     try:
-        credentials = login(email, password)
-        HypervoltClient(credentials).discover_charger_id()
+        credentials = login(
+            email,
+            password,
+            token_host=args.token_host,
+            token_port=args.token_port,
+            use_tls=not args.insecure,
+        )
+        HypervoltClient(
+            credentials,
+            token_host=args.token_host,
+            token_port=args.token_port,
+            api_host=args.api_host,
+            api_port=args.api_port,
+            use_tls=not args.insecure,
+        ).discover_charger_id()
     except HypervoltAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

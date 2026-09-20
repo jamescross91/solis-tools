@@ -43,8 +43,12 @@ struct DashboardView: View {
     @AppStorage("evPriority") private var evPriority = "battery"
     @AppStorage("hypervoltCredentialsPath") private var hypervoltCredentialsPath = ""
 
+    @StateObject private var hypervoltLogin = HypervoltLoginRunner()
+
     @State private var showingSettings = false
     @State private var selectedMetric: HistoryMetric = .house
+    @State private var hypervoltEmail = ""
+    @State private var hypervoltPassword = ""
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -497,10 +501,11 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
             }
             .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
+            hypervoltSignIn
+                .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
             Text(
                 "Whichever side is not protected is trimmed first to hold voltage, then "
-                    + "restored first once headroom returns. Run scripts/hypervolt_login.py "
-                    + "once to create the credentials file before enabling this."
+                    + "restored first once headroom returns."
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -539,6 +544,78 @@ struct DashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var hypervoltCredentialsResolvedPath: String {
+        hypervoltCredentialsPath.isEmpty
+            ? MonitorConfiguration.defaultHypervoltCredentialsPath : hypervoltCredentialsPath
+    }
+
+    private var hypervoltAccountChargerID: String? {
+        guard let data = FileManager.default.contents(atPath: hypervoltCredentialsResolvedPath),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let chargerID = json["charger_id"] as? String, !chargerID.isEmpty
+        else { return nil }
+        return chargerID
+    }
+
+    @ViewBuilder
+    private var hypervoltSignIn: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let chargerID = hypervoltAccountChargerID {
+                Label("Signed in — charger \(chargerID)", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Label("Not signed in to Hypervolt yet", systemImage: "person.crop.circle.badge.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            TextField("Hypervolt account email", text: $hypervoltEmail)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+            SecureField("Hypervolt account password", text: $hypervoltPassword)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                Button("Sign in to Hypervolt") {
+                    signInToHypervolt()
+                }
+                .disabled(
+                    hypervoltEmail.trimmingCharacters(in: .whitespaces).isEmpty
+                        || hypervoltPassword.isEmpty
+                        || hypervoltLogin.outcome == .running
+                )
+                if hypervoltLogin.outcome == .running {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            if case let .succeeded(message) = hypervoltLogin.outcome {
+                Label(message, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if case let .failed(message) = hypervoltLogin.outcome {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Text(
+                "The password is sent once to Hypervolt to obtain a refresh token and is "
+                    + "never stored; only that token is saved to the credentials file above, "
+                    + "at owner-only permissions."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func signInToHypervolt() {
+        hypervoltLogin.signIn(
+            email: hypervoltEmail.trimmingCharacters(in: .whitespaces),
+            password: hypervoltPassword,
+            credentialsPath: hypervoltCredentialsResolvedPath
+        )
+        hypervoltPassword = ""
     }
 
     private func numericSetting(
