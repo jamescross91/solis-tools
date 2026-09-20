@@ -1,5 +1,14 @@
 import Foundation
 
+/// Reads a pipe to EOF. A plain function, not a method on
+/// HypervoltLoginRunner, so it stays outside that class's @MainActor
+/// isolation: it runs from Process.terminationHandler, which fires on an
+/// arbitrary thread, not the main actor.
+private func readAll(_ handle: FileHandle) -> String {
+    let data = (try? handle.readToEnd()).flatMap { $0 } ?? Data()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
 /// Drives `hypervolt-login` as a one-shot subprocess for the dashboard's own
 /// sign-in form, so the account password only ever passes through that one
 /// short-lived process — never written to UserDefaults, a file, or logged by
@@ -40,8 +49,8 @@ final class HypervoltLoginRunner: ObservableObject {
         process.standardError = errors
 
         process.terminationHandler = { [weak self] terminated in
-            let stdout = Self.readAll(output.fileHandleForReading)
-            let stderr = Self.readAll(errors.fileHandleForReading)
+            let stdout = readAll(output.fileHandleForReading)
+            let stderr = readAll(errors.fileHandleForReading)
             Task { @MainActor [weak self] in
                 self?.finished(status: terminated.terminationStatus, stdout: stdout, stderr: stderr)
             }
@@ -59,11 +68,6 @@ final class HypervoltLoginRunner: ObservableObject {
         // termination handler above reports, not as a crash.
         try? input.fileHandleForWriting.write(contentsOf: Data("\(password)\n".utf8))
         try? input.fileHandleForWriting.close()
-    }
-
-    private static func readAll(_ handle: FileHandle) -> String {
-        let data = (try? handle.readToEnd()).flatMap { $0 } ?? Data()
-        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private func finished(status: Int32, stdout: String, stderr: String) {
