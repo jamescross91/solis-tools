@@ -161,6 +161,12 @@ class _WebSocket:
         self.sock: socket.socket
         if use_tls:
             context = ssl.create_default_context()
+            # create_default_context() already excludes SSLv2/SSLv3, but does
+            # not raise its own minimum on older Python; TLS 1.0/1.1 are
+            # broken protocols and the flow carries a Hypervolt account's
+            # bearer token, so require 1.2+ explicitly rather than relying on
+            # the interpreter's default.
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             self.sock = context.wrap_socket(raw, server_hostname=host)
         else:
             # Only ever False in tests, against a local fake server: production
