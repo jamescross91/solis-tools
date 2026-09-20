@@ -5,10 +5,14 @@ Two programs, one repository, one interface between them.
 ```
              Modbus TCP: FC04 telemetry; typed FC03/FC06 control
    inverter  <───────────────────────────────────────  solis_poll.py
-   / logger                                                 │
-                                                            │ one JSON object
-                                                            │ per sample, stdout
-                                                            ▼
+   / logger                                                 │    ▲
+                                                              │    │ cloud auth + WebSocket
+                                                              │    │ (hypervolt_client.py)
+                                                              │    ▼
+                                                              │  Hypervolt charger
+                                                              │ one JSON object
+                                                              │ per sample, stdout
+                                                              ▼
                                                      SolisMenuBar.app
 ```
 
@@ -27,6 +31,7 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 | Presentation | `render`, `sparkline`, `bar`, `fit`, `Palette` |
 | Interfaces | `parse_args`, `print_once`, `stream_payload`, `main` |
 | Voltage control | Typed actuators, baseline ownership, SQLite minute history and event log |
+| Hypervolt | `hypervolt_client.py` — cloud auth and WebSocket transport for the EV charger, independent of Modbus |
 
 ### Dynamic-voltage path
 
@@ -46,6 +51,26 @@ scoped to the normalised host, port and Modbus unit. The record must describe a
 reduced limit, observed physical response and successful restoration using the
 expected address and 100 W scale. Missing, invalid or mismatched evidence fails
 closed. No arbitrary address/value operation is exposed to controller or UI code.
+
+### Hypervolt EV charger path
+
+A Hypervolt charger has no local protocol, so it is not part of the Modbus
+transaction above. `hypervolt_client.py` is a separate, independent transport
+speaking Hypervolt's cloud API — Keycloak OAuth2 plus a hand-rolled WebSocket
+client, described in full in `docs/hypervolt-integration.md`. `solis_poll.py`
+polls it every loop iteration alongside, not instead of, the Modbus poll, with
+its own reconnect/backoff state.
+
+`voltage_control.py` stays transport-independent: it gained EV configuration
+fields, a `_voltage_bounds()` resolver that tightens the operating band while
+the car is charging, and `allocate_import_step`, a pure function that decides
+how a change in import headroom splits between the battery and the car
+according to `--ev-priority`. `VoltageControlRuntime` composes the existing
+Solis import/export actuators with a new `HypervoltCurrentActuator`, calling
+`allocate_import_step` as a post-processing step on the controller's existing
+decision rather than changing how that decision is made. A failed Hypervolt
+command falls back to the controller's original, un-reallocated decision, so
+battery regulation never depends on the Hypervolt cloud link being up.
 
 ### Register addressing
 

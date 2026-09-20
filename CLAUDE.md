@@ -11,6 +11,8 @@ Two deliverables from one repository:
 - `solis_poll.py` — the terminal monitor: register map, Modbus client, decoders,
   recorder, typed actuators, ANSI renderer, JSON stream contract and CLI.
   `voltage_control.py` contains the transport-independent controller and journal.
+  `hypervolt_client.py` is a second, independent transport for an optional
+  Hypervolt EV charger — see docs/hypervolt-integration.md.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
   `solis-poll --stream-json` as a subprocess and renders its stdout.
 
@@ -50,6 +52,19 @@ when the user explicitly enables control. Export register 43074 remains blocked
 by the installation-validation gate. Never expose an arbitrary register writer,
 write 43073/43291/43292/44100+, or widen the whitelist without a deliberate
 security-policy change and hardware evidence.
+
+**Hypervolt has no local protocol and no comparable whitelist to widen.**
+`hypervolt_client.py` talks to Hypervolt's cloud API, not Modbus; there is no
+register address to protect, only a current command (`set_max_current_ma`,
+clamped to `--ev-minimum-current`/`--ev-maximum-current` within Hypervolt's
+own 6–32 A hardware range) and a pause. Only ever persist a Hypervolt refresh
+token, at 0600 permissions, never the account password; the password is used
+exactly once, interactively, in `scripts/hypervolt_login.py`. A stale or
+unreachable Hypervolt connection must read as "the car is not charging",
+never be guessed as charging — see `HypervoltState.is_charging()` — and a
+failed Hypervolt command must fall back to the controller's original
+decision so Solis-side voltage safety never depends on the cloud link being
+up. Full design in docs/hypervolt-integration.md.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
@@ -121,6 +136,9 @@ narrowest supported width.
 
 - `README.md` — the register table, defaults and flags all appear there.
 - `docs/architecture.md` — module layout and the subprocess boundary.
+- `docs/stream-contract.md` — the `--stream-json` payload and its versioning rules.
+- `docs/hypervolt-integration.md` — the Hypervolt cloud protocol, priority
+  arbitration and credential handling.
 - `docs/releasing.md` — the release runbook.
 - `CHANGELOG.md` — user-visible changes.
 

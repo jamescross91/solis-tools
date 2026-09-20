@@ -418,6 +418,14 @@ final class MonitorStore: ObservableObject {
             if configuration.dynamicExportEnabled {
                 result.append("--dynamic-export-control")
             }
+            if configuration.hypervoltEnabled {
+                result.append(contentsOf: ["--hypervolt-enable", "--ev-priority", configuration.evPriority])
+                if !configuration.hypervoltCredentialsPath.isEmpty {
+                    result.append(contentsOf: [
+                        "--hypervolt-credentials", configuration.hypervoltCredentialsPath,
+                    ])
+                }
+            }
         }
         return result
     }

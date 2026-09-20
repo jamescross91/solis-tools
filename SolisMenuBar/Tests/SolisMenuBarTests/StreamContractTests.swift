@@ -129,6 +129,52 @@ final class StreamContractTests: XCTestCase {
             "Import limit 12.5 kW → 12.0 kW (-0.5 kW)"
         )
         XCTAssertNil(details.dailySummary)
+        // Absent because this poller has no Hypervolt enabled; must decode as
+        // nil, not fail, so an older poller's stream still works.
+        XCTAssertNil(details.evPriority)
+        XCTAssertNil(details.evCharging)
+        XCTAssertNil(details.hypervoltActuator)
+    }
+
+    func testHypervoltDiagnosticsDecode() throws {
+        let control = """
+            {
+              "state": "Import regulating", "action": "Holding", "mode": "import",
+              "desired_limit_w": 12000, "raw_voltage_v": 216.4,
+              "filtered_voltage_v": 216.8, "reason": "inside deadband",
+              "emergency": false, "voltage_source": "meter/PCC input register, raw PDU 33251",
+              "estimated_voltage_sensitivity_v_per_kw": null,
+              "import_actuator": {
+                "pdu_address": 43488, "resolution_w": 100, "baseline_raw": 140,
+                "last_commanded_raw": 140, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_actuator": {
+                "pdu_address": 43074, "resolution_w": 100, "baseline_raw": 50,
+                "last_commanded_raw": 50, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_write_validated": false,
+              "daily_summary": null, "recovery_note": null,
+              "ev_priority": "battery", "ev_charging": true,
+              "hypervolt_actuator": {
+                "connected": true, "commanded_current_a": 22.5,
+                "minimum_current_a": 6.0, "maximum_current_a": 32.0,
+                "total_write_count": 3, "last_error": null
+              }
+            }
+            """
+        let details = try XCTUnwrap(
+            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
+        )
+        XCTAssertEqual(details.evPriority, "battery")
+        XCTAssertEqual(details.evCharging, true)
+        let hypervolt = try XCTUnwrap(details.hypervoltActuator)
+        XCTAssertTrue(hypervolt.connected)
+        XCTAssertEqual(hypervolt.commandedCurrentA, 22.5)
+        XCTAssertEqual(hypervolt.maximumCurrentA, 32.0)
+        XCTAssertEqual(hypervolt.totalWriteCount, 3)
+        XCTAssertNil(hypervolt.lastError)
     }
 
     /// Between changes the poller leaves out the event log and, after the
@@ -288,6 +334,9 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.maximumVoltage, 258)
         XCTAssertEqual(configuration.importHeadroomKw, 2)
         XCTAssertEqual(configuration.minimumWriteInterval, 5)
+        XCTAssertFalse(configuration.hypervoltEnabled)
+        XCTAssertEqual(configuration.evPriority, "battery")
+        XCTAssertEqual(configuration.hypervoltCredentialsPath, "")
     }
 
     /// A too-short interval would make the poller hammer the inverter.

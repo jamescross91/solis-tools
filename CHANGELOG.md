@@ -5,6 +5,22 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- Optional Hypervolt EV charger integration for dynamic voltage control.
+  `--hypervolt-enable` adds a second, cloud-connected lever alongside the
+  existing Solis import limit; `--ev-priority` (`battery`, `ev` or
+  `balanced`) decides which side is cut and restored first when grid voltage
+  needs protecting. While the car is confirmed charging, `--ev-minimum-voltage`
+  and `--ev-maximum-voltage` narrow the operating band to Hypervolt's own
+  tighter protection limits, and the car charging is on its own enough to
+  activate import regulation. Credentials are a Hypervolt refresh token only,
+  saved at 0600 permissions and obtained once with
+  `scripts/hypervolt_login.py`; a lost cloud connection is read as "not
+  charging" and a failed command leaves battery regulation unaffected. See
+  `docs/hypervolt-integration.md`. The menu-bar app gained matching settings
+  and a status line showing EV charging state and commanded current.
+
 ### Fixed
 
 - Wait out the reconnect backoff instead of polling through it. PyModbus dials

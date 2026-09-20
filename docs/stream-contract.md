@@ -89,6 +89,9 @@ optional, so an older read-only poller still decodes.
 | `recent_events` | Up to 20 recent events from the running process. **Present in the first sample and whenever the log has changed since the previous sample; absent otherwise.** Consumers keep the last list they received; the menu-bar app does this in `MonitorStore` |
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |
+| `ev_priority` | `battery`, `ev` or `balanced`, or null when `--hypervolt-enable` is off; see `docs/hypervolt-integration.md` |
+| `ev_charging` | Whether the Hypervolt charger is confirmed charging, or null when the feature is off; a stale or unreachable cloud link reads as `false`, never guessed `true` |
+| `hypervolt_actuator` | EV charger current diagnostics, described below, or null when the feature is off |
 
 Actuator diagnostics contain `pdu_address`, `resolution_w`, `baseline_raw`,
 `last_commanded_raw`, `last_requested_raw`, `last_write_at`, `writes_last_hour`,
@@ -96,6 +99,15 @@ Actuator diagnostics contain `pdu_address`, `resolution_w`, `baseline_raw`,
 `resolution_w`. Requested values may be suppressed by write guards; command
 values reflect confirmed or reconciled readback. Write counts include attempted
 transmissions with uncertain replies and reset when the process restarts.
+
+`hypervolt_actuator` diagnostics have a different, unrelated shape — there is
+no PDU address or register scale, because the charger is a cloud device, not
+a Modbus one. It contains `connected`, `commanded_current_a`,
+`minimum_current_a`, `maximum_current_a`, `total_write_count` and
+`last_error`. `commanded_current_a` is the last current requested of the
+charger, not a confirmed readback; `connected` reflects the state of the
+Hypervolt WebSocket connection, independent of the Modbus connection health
+reported elsewhere in the envelope.
 
 Events contain `timestamp`, `state`, `action`, `mode`, `message`, `voltage_v`,
 `grid_kw`, `limit_w`, `previous_limit_w` and `limit_delta_w`. The last three

@@ -315,6 +315,12 @@ changed by capturing its baseline.
 | `--control-journal` | Endpoint-hashed JSON in state directory | Override recovery path, not device identity |
 | `--voltage-history-db` | `voltage-history.sqlite3` in state directory | Override private SQLite history path |
 | `--voltage-history-retention-days` | 30 days | Retention for minute aggregates and control events |
+| `--hypervolt-enable` | Off | Enable the Hypervolt EV charger lever; requires `--dynamic-voltage-control` |
+| `--hypervolt-credentials` | `hypervolt.json` in state directory | Refresh-token file written by `scripts/hypervolt_login.py` |
+| `--ev-priority` | `battery` | `battery`, `ev` or `balanced` — which side is cut and restored first; see below |
+| `--ev-minimum-voltage` / `--ev-maximum-voltage` | 216 / 253 V | Tightened voltage bounds applied only while the car is charging |
+| `--ev-minimum-current` / `--ev-maximum-current` | 6 / 32 A | Clamp for the commanded charging current |
+| `--ev-stale-age` | 30 s | Telemetry older than this reads as "not charging", never guessed |
 
 The state directory is `~/Library/Application Support/SolisTools` on macOS and
 `$XDG_STATE_HOME/solis-tools` (or `~/.local/state/solis-tools`) on Linux. If using
@@ -342,6 +348,58 @@ unconfirmed: retain the write-rate guard and inspect write counts. The export
 validation record is scoped to the exact normalised host, port and Modbus unit;
 revalidate after an endpoint or inverter change. Automated tests exercise
 simulated hardware and never create evidence for physical installations.
+
+## Hypervolt EV charger priority
+
+Dynamic voltage control can also see and control a Hypervolt home EV charger,
+giving it a second lever to protect grid voltage alongside the existing Solis
+import limit. A Hypervolt charger has no local protocol, so this talks to
+Hypervolt's cloud API rather than the inverter; the full protocol and design
+notes are in [docs/hypervolt-integration.md](docs/hypervolt-integration.md).
+
+`--ev-priority` decides which side gets backed off first when voltage needs
+protecting, and which side is restored first once it no longer does:
+
+- `battery` (default) — the car absorbs cuts first; the home battery keeps
+  charging at full rate until the car alone cannot give back enough.
+- `ev` — the home battery absorbs cuts first; the car keeps charging at full
+  rate until the battery alone cannot give back enough.
+- `balanced` — a cut or restore is split 50/50 between the two, with any
+  amount one side cannot take spilling over to the other.
+
+Whichever side is cut or restored, it is a step on top of the existing
+Solis-only decision, not a replacement for it: raw-voltage emergency
+protection, the deadband and the import ceiling all work exactly as before,
+just divided between two actuators instead of one.
+
+Hypervolt's own charger enforces tighter voltage protection than most
+household loads need. While the car is confirmed charging, `--ev-minimum-voltage`
+and `--ev-maximum-voltage` (216 V / 253 V by default) narrow the operating
+band on top of `--minimum-voltage` / `--maximum-voltage` — whichever bound is
+tighter always wins. The car being confirmed charging is, on its own, also
+enough to activate import regulation, in addition to the existing
+battery-charging signal.
+
+Enable it with:
+
+```sh
+solis-poll --host 192.168.1.57 --dynamic-voltage-control --dynamic-import-control \
+  --hypervolt-enable --ev-priority battery
+```
+
+Credentials are a Hypervolt refresh token, never the account password, saved
+at 0600 permissions to `--hypervolt-credentials` (default `hypervolt.json` in
+the state directory). Obtain one once with:
+
+```sh
+python3 scripts/hypervolt_login.py
+```
+
+A lost or stale Hypervolt cloud connection is read as "the car is not
+charging", never guessed as charging: it cannot silently disable the tighter
+voltage protection charging is supposed to get, and a failed command to the
+charger leaves home battery regulation running exactly as it would without
+the feature enabled.
 
 ## Recording and restored history
 
@@ -487,6 +545,8 @@ Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
   addressing, the subprocess boundary
 - [docs/stream-contract.md](docs/stream-contract.md) — the `--stream-json`
   payload and how to change it
+- [docs/hypervolt-integration.md](docs/hypervolt-integration.md) — the
+  Hypervolt EV charger cloud protocol and priority arbitration design
 - [docs/releasing.md](docs/releasing.md) — the release runbook
 - [CLAUDE.md](CLAUDE.md) — conventions and traps, for contributors and coding
   agents
