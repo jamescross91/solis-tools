@@ -418,22 +418,20 @@ final class MonitorStore: ObservableObject {
             if configuration.dynamicExportEnabled {
                 result.append("--dynamic-export-control")
             }
+            if configuration.hypervoltEnabled {
+                result.append(contentsOf: ["--hypervolt-enable", "--ev-priority", configuration.evPriority])
+                if !configuration.hypervoltCredentialsPath.isEmpty {
+                    result.append(contentsOf: [
+                        "--hypervolt-credentials", configuration.hypervoltCredentialsPath,
+                    ])
+                }
+            }
         }
         return result
     }
 
     private func locatePoller() -> String? {
-        var candidates: [String] = []
-        if let override = ProcessInfo.processInfo.environment["SOLIS_POLL_PATH"] {
-            candidates.append(override)
-        }
-        let bundlePrefix = Bundle.main.bundleURL.deletingLastPathComponent()
-        candidates.append(bundlePrefix.appendingPathComponent("bin/solis-poll").path)
-        candidates.append(contentsOf: [
-            "/opt/homebrew/bin/solis-poll",
-            "/usr/local/bin/solis-poll",
-        ])
-        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        ExecutableLocator.locate(named: "solis-poll", environmentOverride: "SOLIS_POLL_PATH")
     }
 
     private func unsupportedStreamSchema(_ version: Int) {

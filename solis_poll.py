@@ -26,6 +26,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, NoReturn
 
+from hypervolt_client import (
+    HYPERVOLT_MAX_CURRENT_A,
+    HYPERVOLT_MIN_CURRENT_A,
+    HypervoltClient,
+    HypervoltCredentials,
+    HypervoltError,
+)
 from voltage_control import (
     ControlAction,
     ControlDecision,
@@ -35,6 +42,7 @@ from voltage_control import (
     ExportControlValidation,
     GridTelemetrySample,
     VoltageControlState,
+    allocate_import_step,
     configuration_dict,
     export_validation_path,
 )
@@ -811,6 +819,86 @@ class ExportLimitActuator(_LimitActuator):
         self.client.set_export_limit_raw(value, installation_validated=self.installation_validated)
 
 
+class HypervoltCurrentActuator:
+    """Typed, rate-limited control of a Hypervolt charger's maximum current.
+
+    Deliberately not a subclass of `_LimitActuator`: that class's unit is a
+    Solis register value at a fixed watt-per-tick resolution, while
+    Hypervolt's own control surface is a current in milliamps with a
+    hardware-enforced 6-32 A range, so the two do not share a representation.
+    The safety shape is the same: a write-rate guard, and reasoning only from
+    a CONFIRMED value, never an optimistically-assumed one — see
+    HypervoltState's own docstring for why a Hypervolt write cannot be
+    verified the synchronous way the Solis actuators are.
+
+    Unlike the Solis import/export actuators, this deliberately has no
+    baseline capture or shutdown restore: there is no universally-correct
+    current to return an EV charger to (unlike Solis, where the pre-session
+    register value is known and safe to restore), and an un-restored current
+    limit has no ongoing safety or cost exposure the way a mis-set grid
+    import register would. See docs/hypervolt-integration.md.
+    """
+
+    def __init__(
+        self,
+        client: HypervoltClient,
+        minimum_a: float,
+        maximum_a: float,
+        minimum_write_interval_s: float,
+    ):
+        self.client = client
+        self.minimum_ma = round(max(HYPERVOLT_MIN_CURRENT_A, minimum_a) * 1000)
+        self.maximum_ma = round(min(HYPERVOLT_MAX_CURRENT_A, maximum_a) * 1000)
+        self.minimum_write_interval_s = minimum_write_interval_s
+        self.last_write_monotonic: float | None = None
+        self.last_error: str | None = None
+        self.total_write_count = 0
+
+    @property
+    def commanded_ma(self) -> int | None:
+        return self.client.state.max_current_ma
+
+    def commanded_w(self, voltage_v: float) -> int:
+        return round((self.commanded_ma or 0) / 1000 * voltage_v)
+
+    def command_ma(
+        self, milliamps: int, now: float, *, emergency: bool = False
+    ) -> tuple[bool, str]:
+        clamped = min(self.maximum_ma, max(self.minimum_ma, round(milliamps)))
+        if self.commanded_ma == clamped:
+            return False, "unchanged command suppressed"
+        if (
+            not emergency
+            and self.last_write_monotonic is not None
+            and now - self.last_write_monotonic < self.minimum_write_interval_s
+        ):
+            return False, "write-rate guard active"
+        try:
+            self.client.set_max_current_ma(clamped)
+        except HypervoltError as exc:
+            self.last_error = str(exc)
+            raise
+        self.last_write_monotonic = now
+        self.total_write_count += 1
+        self.last_error = None
+        return True, "write submitted"
+
+    def note_connection_error(self, message: str | None) -> None:
+        """Record a poll/reconnect failure alongside write failures in
+        diagnostics(), even though no write was attempted."""
+        self.last_error = message
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "connected": self.client.state.connected,
+            "commanded_current_a": (self.commanded_ma or 0) / 1000,
+            "minimum_current_a": self.minimum_ma / 1000,
+            "maximum_current_a": self.maximum_ma / 1000,
+            "total_write_count": self.total_write_count,
+            "last_error": self.last_error,
+        }
+
+
 @dataclass
 class _PendingVoltageMinute:
     minute: int
@@ -1095,8 +1183,10 @@ class VoltageControlRuntime:
         journal_path: Path,
         history_path: Path | None,
         retention_days: int,
+        hypervolt_actuator: HypervoltCurrentActuator | None = None,
     ):
         self.configuration = configuration
+        self.hypervolt_actuator = hypervolt_actuator
         # The configuration is frozen, and asdict() on it cost more per stream
         # sample than encoding the whole JSON payload did.
         self.configuration_payload = configuration_dict(configuration)
@@ -1337,12 +1427,25 @@ class VoltageControlRuntime:
             if not self.initialise(reading, now):
                 return self.controller.decision
 
+        ev_charging = False
+        ev_power_w = 0.0
+        if self.hypervolt_actuator is not None:
+            hypervolt_state = self.hypervolt_actuator.client.state
+            ev_charging = hypervolt_state.is_charging(
+                time.monotonic(), self.configuration.ev_stale_age_s
+            )
+            if ev_charging and hypervolt_state.true_milli_amps is not None:
+                ev_power_w = max(
+                    0.0, hypervolt_state.true_milli_amps / 1000 * reading.meter_voltage_v
+                )
         sample = GridTelemetrySample(
             monotonic_s=now,
             raw_voltage_v=reading.meter_voltage_v,
             grid_kw=reading.grid_kw,
             battery_status=reading.battery_status,
             age_s=age,
+            ev_charging=ev_charging,
+            ev_power_w=ev_power_w,
         )
         self._synchronise_external_limit(sample, now)
         decision = self.controller.evaluate(
@@ -1350,6 +1453,15 @@ class VoltageControlRuntime:
             self.import_actuator.commanded_w,
             self.export_actuator.commanded_w,
         )
+        if (
+            self.hypervolt_actuator is not None
+            and ev_charging
+            and decision.mode == "import"
+            and decision.desired_limit_w is not None
+            and decision.action
+            in (ControlAction.REDUCING, ControlAction.EMERGENCY, ControlAction.INCREASING)
+        ):
+            decision = self._allocate_ev_priority(decision, sample, now)
         regulating_states = {
             VoltageControlState.IMPORT_REGULATING,
             VoltageControlState.EXPORT_REGULATING,
@@ -1458,6 +1570,56 @@ class VoltageControlRuntime:
             )
         return decision
 
+    def _allocate_ev_priority(
+        self, decision: ControlDecision, sample: GridTelemetrySample, now: float
+    ) -> ControlDecision:
+        """Reallocate an import-ceiling change between the Solis battery
+        limit and the Hypervolt current, per --ev-priority.
+
+        Runs after the base controller has already decided how much to
+        change the Solis import ceiling by, exactly as it always has with no
+        knowledge of Hypervolt; this only decides which of the two
+        controllable consumers actually absorbs that change. If the
+        Hypervolt command itself fails, the base decision is returned
+        untouched — the full change lands on the Solis side, precisely as it
+        would without Hypervolt enabled — so a cloud outage can only fall
+        back to today's behaviour, never weaken voltage protection.
+        """
+        assert self.hypervolt_actuator is not None
+        ev_ma = self.hypervolt_actuator.commanded_ma
+        if ev_ma is None or decision.desired_limit_w is None:
+            return decision  # no confirmed Hypervolt state yet; do not guess
+        battery_w = self.import_actuator.commanded_w
+        delta_w = decision.desired_limit_w - battery_w
+        if delta_w == 0:
+            return decision
+        voltage_v = sample.raw_voltage_v
+        ev_w = round(ev_ma / 1000 * voltage_v)
+        new_battery_w, new_ev_w = allocate_import_step(
+            delta_w,
+            battery_w=battery_w,
+            battery_min_w=self.configuration.minimum_import_w,
+            battery_max_w=self.configuration.maximum_import_w,
+            ev_w=ev_w,
+            ev_min_w=round(self.hypervolt_actuator.minimum_ma / 1000 * voltage_v),
+            ev_max_w=round(self.hypervolt_actuator.maximum_ma / 1000 * voltage_v),
+            priority=self.configuration.ev_priority,
+        )
+        if new_ev_w == ev_w:
+            return replace(decision, desired_limit_w=new_battery_w)
+        new_ev_ma = round(new_ev_w / voltage_v * 1000)
+        try:
+            self.hypervolt_actuator.command_ma(
+                new_ev_ma, now, emergency=decision.action == ControlAction.EMERGENCY
+            )
+        except HypervoltError:
+            return decision
+        return replace(
+            decision,
+            desired_limit_w=new_battery_w,
+            reason=f"{decision.reason}; EV current adjusted towards {new_ev_w / 1_000:.2f} kW",
+        )
+
     def communication_unavailable(self) -> None:
         decision = self.controller.communication_unavailable()
         signature = (decision.state.value, decision.mode or "", decision.emergency)
@@ -1524,6 +1686,17 @@ class VoltageControlRuntime:
                 "export_write_validated": self.configuration.export_control_validated,
                 "daily_summary": self.summary or None,
                 "recovery_note": self.recovery_note,
+                "ev_priority": self.configuration.ev_priority if self.hypervolt_actuator else None,
+                "ev_charging": (
+                    self.hypervolt_actuator.client.state.is_charging(
+                        now, self.configuration.ev_stale_age_s
+                    )
+                    if self.hypervolt_actuator
+                    else None
+                ),
+                "hypervolt_actuator": (
+                    self.hypervolt_actuator.diagnostics() if self.hypervolt_actuator else None
+                ),
             }
         )
         if first_sample or self.events_revision != self.streamed_events_revision:
@@ -1558,6 +1731,11 @@ class VoltageControlRuntime:
         elif self.initialised:
             messages.append(
                 "baseline restoration deferred: telemetry is not fresh; journal retained"
+            )
+        if self.hypervolt_actuator is not None:
+            messages.append(
+                "hypervolt: charging current left at its last commanded value; "
+                "no baseline restore for this device"
             )
         try:
             if self.history_store:
@@ -2434,6 +2612,59 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voltage-history-db", type=Path)
     parser.add_argument("--voltage-history-retention-days", type=int, default=30)
     parser.add_argument(
+        "--hypervolt-enable",
+        action="store_true",
+        help=(
+            "arbitrate battery-versus-EV charging priority with a Hypervolt charger "
+            "(requires --dynamic-voltage-control)"
+        ),
+    )
+    parser.add_argument(
+        "--hypervolt-credentials",
+        type=Path,
+        help="refresh-token file written by hypervolt-login (default: <state dir>/hypervolt.json)",
+    )
+    parser.add_argument(
+        "--ev-priority",
+        choices=("battery", "ev", "balanced"),
+        default="battery",
+        help="which load is backed off first to protect voltage (default: battery)",
+    )
+    parser.add_argument(
+        "--ev-minimum-voltage",
+        type=float,
+        default=216.0,
+        help="Hypervolt's own low-voltage protection threshold, tighter than --minimum-voltage "
+        "while it is charging (default: 216)",
+    )
+    parser.add_argument(
+        "--ev-maximum-voltage",
+        type=float,
+        default=253.0,
+        help="Hypervolt's own high-voltage protection threshold while charging (default: 253)",
+    )
+    parser.add_argument("--ev-minimum-current", type=float, default=6.0, help="amps (default: 6)")
+    parser.add_argument("--ev-maximum-current", type=float, default=32.0, help="amps (default: 32)")
+    parser.add_argument(
+        "--ev-stale-age",
+        type=float,
+        default=30.0,
+        help="seconds before Hypervolt telemetry is treated as not charging (default: 30)",
+    )
+    parser.add_argument("--hypervolt-timeout", type=float, default=10.0)
+    # Hidden: point at a different Hypervolt API deployment. Mainly exists so
+    # end-to-end tests can redirect to a local fake_hypervolt.py instead of
+    # the real cloud service.
+    parser.add_argument(
+        "--hypervolt-token-host", default="kc.prod.hypervolt.co.uk", help=argparse.SUPPRESS
+    )
+    parser.add_argument("--hypervolt-token-port", type=int, default=443, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--hypervolt-api-host", default="api.hypervolt.co.uk", help=argparse.SUPPRESS
+    )
+    parser.add_argument("--hypervolt-api-port", type=int, default=443, help=argparse.SUPPRESS)
+    parser.add_argument("--hypervolt-insecure", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
         "--csv", type=Path, help="append readings to CSV and restore its last six hours"
     )
     parser.add_argument(
@@ -2479,6 +2710,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--csv and --jsonl must name different files")
     if args.dynamic_export_control and not args.dynamic_voltage_control:
         parser.error("--dynamic-export-control requires --dynamic-voltage-control")
+    if args.hypervolt_enable and not args.dynamic_voltage_control:
+        parser.error("--hypervolt-enable requires --dynamic-voltage-control")
     if args.once and args.dynamic_voltage_control:
         parser.error("--dynamic-voltage-control cannot be combined with --once")
     try:
@@ -2521,7 +2754,20 @@ def dynamic_configuration(
         deactivation_delay_s=args.control_deactivation_delay,
         import_activation_w=round(args.import_activation_kw * 1_000),
         export_activation_w=round(args.export_activation_kw * 1_000),
+        hypervolt_enabled=args.hypervolt_enable,
+        ev_priority=args.ev_priority,
+        ev_minimum_voltage_v=args.ev_minimum_voltage,
+        ev_maximum_voltage_v=args.ev_maximum_voltage,
+        ev_minimum_current_a=args.ev_minimum_current,
+        ev_maximum_current_a=args.ev_maximum_current,
+        ev_stale_age_s=args.ev_stale_age,
     )
+
+
+def _next_backoff_delay_s(attempt: int) -> float:
+    """Exponential backoff shared by the Modbus and Hypervolt reconnect
+    paths: 1, 2, 4, ... capped at 60 seconds."""
+    return min(60.0, 2 ** min(attempt, 6))
 
 
 def _interrupt(signal_number: int, _frame: object) -> NoReturn:
@@ -2560,6 +2806,11 @@ def main() -> int:
     voltage_runtime: VoltageControlRuntime | None = None
     reconnect_attempt = 0
     reconnect_not_before = 0.0
+    hypervolt_client: HypervoltClient | None = None
+    hypervolt_actuator: HypervoltCurrentActuator | None = None
+    hypervolt_reconnect_attempt = 0
+    hypervolt_reconnect_not_before = 0.0
+    hypervolt_credentials_path: Path | None = None
     attention = AttentionChannel(sys.stdin if args.stream_json else None)
 
     try:
@@ -2599,6 +2850,28 @@ def main() -> int:
                     "legacy unscoped control journal exists; verify its inverter and baseline "
                     "before migrating or archiving it"
                 )
+            if args.hypervolt_enable:
+                hypervolt_credentials_path = (
+                    args.hypervolt_credentials or state_dir / "hypervolt.json"
+                )
+                hypervolt_credentials = HypervoltCredentials.load(hypervolt_credentials_path)
+                hypervolt_client = HypervoltClient(
+                    hypervolt_credentials,
+                    timeout=args.hypervolt_timeout,
+                    token_host=args.hypervolt_token_host,
+                    token_port=args.hypervolt_token_port,
+                    api_host=args.hypervolt_api_host,
+                    api_port=args.hypervolt_api_port,
+                    use_tls=not args.hypervolt_insecure,
+                )
+                hypervolt_client.connect()
+                hypervolt_credentials.save(hypervolt_credentials_path)
+                hypervolt_actuator = HypervoltCurrentActuator(
+                    hypervolt_client,
+                    configuration.ev_minimum_current_a,
+                    configuration.ev_maximum_current_a,
+                    args.minimum_write_interval,
+                )
             device_key = hashlib.sha256(client.control_identity.encode()).hexdigest()[:24]
             voltage_runtime = VoltageControlRuntime(
                 client,
@@ -2607,12 +2880,33 @@ def main() -> int:
                 args.control_journal or state_dir / f"voltage-control-{device_key}.json",
                 args.voltage_history_db or state_dir / "voltage-history.sqlite3",
                 args.voltage_history_retention_days,
+                hypervolt_actuator,
             )
         if dashboard:
             print("\033[?25l", end="")
         while True:
             poll_started = time.perf_counter()
             now_monotonic = time.monotonic()
+            if hypervolt_client is not None and now_monotonic >= hypervolt_reconnect_not_before:
+                try:
+                    hypervolt_client.poll()
+                    if hypervolt_actuator is not None:
+                        hypervolt_actuator.note_connection_error(None)
+                except HypervoltError as exc:
+                    hypervolt_error = str(exc)
+                    try:
+                        hypervolt_client.connect()
+                        if hypervolt_credentials_path is not None:
+                            hypervolt_client.credentials.save(hypervolt_credentials_path)
+                        hypervolt_reconnect_attempt = 0
+                        hypervolt_reconnect_not_before = 0.0
+                    except HypervoltError as reconnect_error:
+                        delay = _next_backoff_delay_s(hypervolt_reconnect_attempt)
+                        hypervolt_reconnect_attempt += 1
+                        hypervolt_reconnect_not_before = time.monotonic() + delay
+                        hypervolt_error = f"{hypervolt_error}; reconnect failed: {reconnect_error}"
+                    if hypervolt_actuator is not None:
+                        hypervolt_actuator.note_connection_error(hypervolt_error)
             if now_monotonic < reconnect_not_before:
                 # PyModbus dials the host again inside every read, so polling
                 # through the backoff made a connect attempt every interval and
@@ -2676,7 +2970,7 @@ def main() -> int:
                         client.connect()
                         health.reconnects += 1
                     except (ConnectionError, OSError, client.modbus_exception) as reconnect_error:
-                        delay = min(60.0, 2 ** min(reconnect_attempt, 6))
+                        delay = _next_backoff_delay_s(reconnect_attempt)
                         reconnect_attempt += 1
                         reconnect_not_before = time.monotonic() + delay
                         last_error = (
@@ -2723,6 +3017,8 @@ def main() -> int:
         fail(str(exc), 1)
     except (RecordingError, sqlite3.Error, ValueError, RuntimeError) as exc:
         fail(str(exc), 1)
+    except HypervoltError as exc:
+        fail(f"cannot connect to the Hypervolt charger: {exc}", 1)
     except (ConnectionError, OSError, client.modbus_exception) as exc:
         fail(f"cannot connect to {args.host}:{args.port}: {exc}", 1)
     finally:
@@ -2735,6 +3031,8 @@ def main() -> int:
                     print(f"voltage control shutdown: {message}", file=sys.stderr)
         finally:
             client.close()
+            if hypervolt_client is not None:
+                hypervolt_client.close()
             if recorder:
                 recorder.close()
             if dashboard:

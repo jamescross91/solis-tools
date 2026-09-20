@@ -13,6 +13,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+# Hardware limits Hypervolt itself enforces; see hypervolt_client.py. Kept
+# here too, duplicated rather than imported, because this module is
+# deliberately transport-independent and must not import a cloud client.
+HYPERVOLT_MIN_CURRENT_A = 6.0
+HYPERVOLT_MAX_CURRENT_A = 32.0
+
+# The priority arbitration between battery charging and EV charging is a
+# closed, three-way choice, not an open enum: "battery" and "ev" each say
+# which one is backed off first when import needs to be trimmed (and which
+# one gets headroom back first once it doesn't); "balanced" splits a change
+# between both. Kept as plain strings, like `ControlDecision.mode`, rather
+# than a str Enum, so the value serialises through `configuration_dict`'s
+# blanket asdict() as an ordinary string without special-casing it there.
+EV_PRIORITIES = ("battery", "ev", "balanced")
+
 
 class VoltageControlState(str, Enum):
     DISABLED = "Disabled"
@@ -67,6 +82,13 @@ class DynamicVoltageConfiguration:
     stale_age_s: float = 6.0
     recovery_samples: int = 3
     filter_time_constant_s: float = 6.0
+    hypervolt_enabled: bool = False
+    ev_priority: str = "battery"
+    ev_minimum_voltage_v: float = 216.0
+    ev_maximum_voltage_v: float = 253.0
+    ev_minimum_current_a: float = 6.0
+    ev_maximum_current_a: float = 32.0
+    ev_stale_age_s: float = 30.0
 
     def validate(self) -> None:
         numeric = (
@@ -80,6 +102,11 @@ class DynamicVoltageConfiguration:
             self.fresh_age_s,
             self.stale_age_s,
             self.filter_time_constant_s,
+            self.ev_minimum_voltage_v,
+            self.ev_maximum_voltage_v,
+            self.ev_minimum_current_a,
+            self.ev_maximum_current_a,
+            self.ev_stale_age_s,
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("dynamic-voltage settings must be finite")
@@ -133,6 +160,24 @@ class DynamicVoltageConfiguration:
             raise ValueError("recovery sample count must be at least one")
         if self.export_enabled and not self.export_control_validated:
             raise ValueError("dynamic export is blocked until this installation is validated")
+        if self.ev_priority not in EV_PRIORITIES:
+            raise ValueError(f"--ev-priority must be one of {', '.join(EV_PRIORITIES)}")
+        if not 180 <= self.ev_minimum_voltage_v < self.ev_maximum_voltage_v <= 280:
+            raise ValueError(
+                "Hypervolt voltage limits must satisfy 180 <= minimum < maximum <= 280"
+            )
+        if self.ev_stale_age_s <= 0:
+            raise ValueError("Hypervolt telemetry staleness age must be above zero")
+        if not (
+            HYPERVOLT_MIN_CURRENT_A
+            <= self.ev_minimum_current_a
+            < self.ev_maximum_current_a
+            <= HYPERVOLT_MAX_CURRENT_A
+        ):
+            raise ValueError(
+                f"Hypervolt current limits must satisfy {HYPERVOLT_MIN_CURRENT_A:g} <= "
+                f"minimum < maximum <= {HYPERVOLT_MAX_CURRENT_A:g}"
+            )
 
     @property
     def import_target_v(self) -> float:
@@ -235,6 +280,11 @@ class GridTelemetrySample:
     grid_kw: float
     battery_status: str
     age_s: float = 0.0
+    # Both default to "no EV" so every existing caller and test, which knows
+    # nothing about Hypervolt, is unaffected: import regulation activates
+    # exactly as it always has, and the voltage band never narrows.
+    ev_charging: bool = False
+    ev_power_w: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -313,7 +363,16 @@ class OperatingStateDetector:
         importing = (
             self.configuration.import_enabled
             and sample.grid_kw * -1_000 >= self.configuration.import_activation_w
-            and sample.battery_status == "Charging"
+            # A charging EV is, like a charging battery, an import driver this
+            # controller can actually do something about (trim its current) —
+            # unlike household base load, which neither can throttle. Gated on
+            # hypervolt_enabled too, defensively, so a stray ev_charging=True
+            # cannot matter while the feature is nominally off; with it off,
+            # this is exactly the original battery-only condition.
+            and (
+                sample.battery_status == "Charging"
+                or (self.configuration.hypervolt_enabled and sample.ev_charging)
+            )
         )
         exporting = (
             self.configuration.export_enabled
@@ -411,6 +470,21 @@ class DynamicVoltageController:
         self.import_manual_bias_w = 0
         self.import_lower_ceiling_candidate_w = None
         self.import_lower_ceiling_since = None
+
+    def _voltage_bounds(self, ev_charging: bool) -> tuple[float, float]:
+        """The operating band for this sample: the general band, tightened to
+        Hypervolt's own protection thresholds while it is actively charging.
+        Whichever bound is tighter always wins regardless of which device
+        reports it, so enabling Hypervolt can only narrow the safe range,
+        never widen it.
+        """
+        c = self.configuration
+        if not (c.hypervolt_enabled and ev_charging):
+            return c.minimum_voltage_v, c.maximum_voltage_v
+        return (
+            max(c.minimum_voltage_v, c.ev_minimum_voltage_v),
+            min(c.maximum_voltage_v, c.ev_maximum_voltage_v),
+        )
 
     def adopt_external_limit(
         self,
@@ -543,15 +617,16 @@ class DynamicVoltageController:
         filtered = self.filter.update(sample.raw_voltage_v, sample.monotonic_s)
         self._update_sensitivity(sample)
         immediate_mode = self.detector._candidate(sample)
+        minimum_voltage_v, maximum_voltage_v = self._voltage_bounds(sample.ev_charging)
         if immediate_mode == "import" and self.import_demand_ceiling_w is None:
             self.import_activation_peak_w = max(
                 self.import_activation_peak_w,
                 max(0, round(-sample.grid_kw * 1_000)),
             )
-        if immediate_mode == "import" and sample.raw_voltage_v <= configuration.minimum_voltage_v:
+        if immediate_mode == "import" and sample.raw_voltage_v <= minimum_voltage_v:
             self.decision = self._evaluate_import(sample, filtered, current_import_w)
             return self.decision
-        if immediate_mode == "export" and sample.raw_voltage_v >= configuration.maximum_voltage_v:
+        if immediate_mode == "export" and sample.raw_voltage_v >= maximum_voltage_v:
             self.decision = self._evaluate_export(sample, filtered, current_export_w)
             return self.decision
         if self.recovering:
@@ -621,6 +696,8 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
+        minimum_voltage_v, _ = self._voltage_bounds(sample.ev_charging)
+        import_target_v = minimum_voltage_v + c.safety_margin_v
         measured_import_w = max(0, round(-sample.grid_kw * 1_000))
         measured_ceiling_w = max(
             c.minimum_import_w,
@@ -673,7 +750,7 @@ class DynamicVoltageController:
                 self.import_lower_ceiling_candidate_w = None
                 self.import_lower_ceiling_since = None
         demand_ceiling_w = self.import_demand_ceiling_w
-        if sample.raw_voltage_v <= c.minimum_voltage_v:
+        if sample.raw_voltage_v <= minimum_voltage_v:
             desired = max(c.minimum_import_w, current_w - c.emergency_reduction_w)
             return ControlDecision(
                 VoltageControlState.EMERGENCY_LOW_VOLTAGE,
@@ -685,10 +762,10 @@ class DynamicVoltageController:
                 "raw PCC voltage reached the absolute minimum",
                 True,
             )
-        if filtered < c.import_target_v - c.deadband_v:
+        if filtered < import_target_v - c.deadband_v:
             reduction = (
                 c.near_limit_reduction_w
-                if sample.raw_voltage_v <= c.minimum_voltage_v + c.deadband_v
+                if sample.raw_voltage_v <= minimum_voltage_v + c.deadband_v
                 else c.reduction_step_w
             )
             desired = max(c.minimum_import_w, current_w - reduction)
@@ -706,7 +783,7 @@ class DynamicVoltageController:
                 f"trimming unused allowance to {c.import_headroom_w / 1_000:g} kW "
                 "above measured import",
             )
-        if filtered > c.import_target_v + c.deadband_v:
+        if filtered > import_target_v + c.deadband_v:
             if sample.age_s > c.fresh_age_s:
                 return self._hold(
                     "import",
@@ -723,7 +800,7 @@ class DynamicVoltageController:
                     filtered,
                     "waiting for the previous change to settle",
                 )
-            headroom = filtered - (c.import_target_v + c.deadband_v)
+            headroom = filtered - (import_target_v + c.deadband_v)
             desired = min(demand_ceiling_w, current_w + self._increase_step(headroom))
             if desired == current_w:
                 return self._hold(
@@ -744,7 +821,9 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
-        if sample.raw_voltage_v >= c.maximum_voltage_v:
+        _, maximum_voltage_v = self._voltage_bounds(sample.ev_charging)
+        export_target_v = maximum_voltage_v - c.safety_margin_v
+        if sample.raw_voltage_v >= maximum_voltage_v:
             desired = max(0, current_w - c.emergency_reduction_w)
             return ControlDecision(
                 VoltageControlState.EMERGENCY_HIGH_VOLTAGE,
@@ -756,17 +835,17 @@ class DynamicVoltageController:
                 "raw PCC voltage reached the absolute maximum",
                 True,
             )
-        if filtered > c.export_target_v + c.deadband_v:
+        if filtered > export_target_v + c.deadband_v:
             reduction = (
                 c.near_limit_reduction_w
-                if sample.raw_voltage_v >= c.maximum_voltage_v - c.deadband_v
+                if sample.raw_voltage_v >= maximum_voltage_v - c.deadband_v
                 else c.reduction_step_w
             )
             desired = max(0, current_w - reduction)
             return self._normal_decision(
                 "export", desired, sample, filtered, ControlAction.REDUCING
             )
-        if filtered < c.export_target_v - c.deadband_v:
+        if filtered < export_target_v - c.deadband_v:
             if sample.age_s > c.fresh_age_s:
                 return self._hold(
                     "export",
@@ -783,7 +862,7 @@ class DynamicVoltageController:
                     filtered,
                     "waiting for the previous change to settle",
                 )
-            headroom = (c.export_target_v - c.deadband_v) - filtered
+            headroom = (export_target_v - c.deadband_v) - filtered
             desired = min(
                 c.effective_maximum_export_w,
                 current_w + self._increase_step(headroom),
@@ -842,6 +921,70 @@ class DynamicVoltageController:
             filtered,
             reason,
         )
+
+
+def allocate_import_step(
+    delta_w: float,
+    *,
+    battery_w: int,
+    battery_min_w: int,
+    battery_max_w: int,
+    ev_w: int,
+    ev_min_w: int,
+    ev_max_w: int,
+    priority: str,
+) -> tuple[int, int]:
+    """Split a change to the site's import ceiling between the battery's
+    charging limit and the EV's charging current, in watts, honouring each
+    side's own floor and ceiling.
+
+    `delta_w` is negative to cut import, positive to restore it — this is the
+    watt change DynamicVoltageController already decided to make to the
+    Solis import register, computed exactly as it always has been, with no
+    knowledge of Hypervolt. This function only decides which of the two
+    controllable consumers absorbs that change.
+
+    Under "battery" priority the EV is the flexible resource: it absorbs a
+    cut first, down to `ev_min_w`, and — deliberately symmetrically — also
+    absorbs a restore first, up to `ev_max_w`, before the battery's own
+    ceiling moves at all. "ev" priority is the mirror image, with the battery
+    charging limit as the flexible side. Either way, whichever side is
+    already at its own limit spills the remainder onto the other rather than
+    leaving it unapplied. "balanced" splits `delta_w` evenly between both
+    sides up front, then spills any leftover — because one side hit its own
+    limit — onto whichever side still has room.
+
+    Both returned values are rounded to whole watts; everything in between is
+    kept as float so repeated small steps do not accumulate rounding error.
+    """
+
+    def move(current: float, minimum: int, maximum: int, amount: float) -> tuple[float, float]:
+        new_value = min(maximum, max(minimum, current + amount))
+        return new_value, new_value - current
+
+    if priority not in EV_PRIORITIES:
+        raise ValueError(f"priority must be one of {', '.join(EV_PRIORITIES)}")
+
+    if priority in ("battery", "ev"):
+        if priority == "battery":
+            first = (ev_w, ev_min_w, ev_max_w)
+            second = (battery_w, battery_min_w, battery_max_w)
+        else:
+            first = (battery_w, battery_min_w, battery_max_w)
+            second = (ev_w, ev_min_w, ev_max_w)
+        new_first, absorbed = move(*first, delta_w)
+        new_second, _ = move(*second, delta_w - absorbed)
+        battery_result, ev_result = (
+            (new_second, new_first) if priority == "battery" else (new_first, new_second)
+        )
+    else:
+        new_battery, battery_absorbed = move(battery_w, battery_min_w, battery_max_w, delta_w / 2)
+        new_ev, ev_absorbed = move(ev_w, ev_min_w, ev_max_w, delta_w / 2)
+        leftover = delta_w - battery_absorbed - ev_absorbed
+        new_battery, extra = move(new_battery, battery_min_w, battery_max_w, leftover)
+        new_ev, _ = move(new_ev, ev_min_w, ev_max_w, leftover - extra)
+        battery_result, ev_result = new_battery, new_ev
+    return round(battery_result), round(ev_result)
 
 
 class ControllerJournal:

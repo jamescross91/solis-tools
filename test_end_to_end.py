@@ -17,7 +17,9 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+from fake_hypervolt import FakeHypervoltCloud
 from fake_inverter import FakeInverter, hybrid_bank
+from hypervolt_client import HypervoltCredentials
 
 MONITOR = str(Path(__file__).with_name("solis_poll.py"))
 TIMEOUT = 30
@@ -345,6 +347,113 @@ class StreamContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("blocked until this installation is validated", result.stderr)
         self.assertEqual(writes, [])
+
+
+class HypervoltPriorityTests(unittest.TestCase):
+    """Proves the priority arbitration end to end: which of the battery's
+    import limit or the EV's charging current absorbs a voltage-driven
+    reduction is exactly the one --ev-priority names, and the other is left
+    completely alone.
+
+    215.5 V sits just below the default import deadband (215.75 V) but above
+    the emergency threshold (215 V), and neither the battery's ~13 kW nor the
+    EV's ~5.5 kW of headroom is anywhere near exhausted by the single ~1 kW
+    reduction this triggers, so the write-rate guard (a hard five-second
+    floor) caps each run at exactly one write; the test only has to observe
+    that one write, not race a compounding series of them.
+    """
+
+    def _bank(self) -> dict[int, int]:
+        bank = hybrid_bank()
+        bank[33135] = 0  # charging
+        bank[33251] = 2165  # 216.5 V: inside the deadband, not an emergency
+        # (216.5 sits above the default --ev-minimum-voltage of 216, the
+        # tighter threshold that applies once Hypervolt reports charging;
+        # below it this would be an emergency instead of a plain reduction)
+        bank[33263] = 0xFFFF
+        bank[33264] = 0xF830  # -2.0 kW import
+        bank[43488] = 140  # 14.0 kW import ceiling
+        return bank
+
+    def _run(self, priority: str, inverter, hypervolt, directory: str) -> list[dict]:
+        credentials_path = Path(directory) / "hypervolt.json"
+        HypervoltCredentials(refresh_token=hypervolt.refresh_token).save(credentials_path)
+        return stream_samples(
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(inverter.port),
+            "--interval",
+            "0.05",
+            "--slow-interval",
+            "30",
+            "--dynamic-voltage-control",
+            "--control-activation-delay",
+            "0.1",
+            "--control-settle-time",
+            "0.1",
+            "--control-journal",
+            str(Path(directory) / "journal.json"),
+            "--voltage-history-db",
+            str(Path(directory) / "history.sqlite3"),
+            "--hypervolt-enable",
+            "--hypervolt-credentials",
+            str(credentials_path),
+            "--hypervolt-token-host",
+            "127.0.0.1",
+            "--hypervolt-token-port",
+            str(hypervolt.port),
+            "--hypervolt-api-host",
+            "127.0.0.1",
+            "--hypervolt-api-port",
+            str(hypervolt.port),
+            "--hypervolt-insecure",
+            "--ev-priority",
+            priority,
+            wanted=5,
+        )
+
+    def test_battery_priority_cuts_the_ev_and_leaves_the_inverter_untouched(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("battery", inverter, hypervolt, directory)
+                inverter_writes = list(inverter.writes)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertGreaterEqual(len(samples), 5)
+        last = samples[-1]["voltage_control"]
+        self.assertTrue(last["ev_charging"])
+        self.assertEqual(last["ev_priority"], "battery")
+        self.assertEqual(inverter_writes, [])
+        self.assertTrue(hypervolt_applied, "expected the EV current to be cut")
+        self.assertLess(hypervolt_applied[-1]["max_current"], 32000)
+        self.assertLess(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
+        self.assertIn("EV current adjusted", latest_events(samples)[0]["message"])
+
+    def test_ev_priority_cuts_the_inverter_and_leaves_the_ev_untouched(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("ev", inverter, hypervolt, directory)
+                inverter_writes = list(inverter.writes)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertGreaterEqual(len(samples), 5)
+        last = samples[-1]["voltage_control"]
+        self.assertTrue(last["ev_charging"])
+        self.assertEqual(last["ev_priority"], "ev")
+        self.assertEqual(hypervolt_applied, [])
+        self.assertTrue(inverter_writes, "expected the Solis import limit to be cut")
+        # inverter_writes[-1] is the shutdown restore back to the captured
+        # baseline (140); the reduction itself is the first write.
+        self.assertEqual(inverter_writes[0], (43488, 130))
+        self.assertEqual(inverter_writes[-1], (43488, 140))
+        self.assertEqual(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
 
 
 class CadenceTests(unittest.TestCase):

@@ -84,6 +84,27 @@ struct VoltageControlDetails: Decodable, Sendable {
     var recentEvents: [VoltageControlEvent]?
     let dailySummary: VoltageControlDailySummary?
     let recoveryNote: String?
+    /// All three are nil unless --hypervolt-enable is on: which controllable
+    /// load ("battery", "ev" or "balanced") is backed off first, whether a
+    /// car is confirmed charging right now, and the EV actuator's own
+    /// diagnostics. An older poller without Hypervolt support omits all
+    /// three, which decodes the same way as Hypervolt simply being disabled.
+    let evPriority: String?
+    let evCharging: Bool?
+    let hypervoltActuator: HypervoltActuatorDetails?
+}
+
+/// Diagnostics for the Hypervolt current actuator. Deliberately not
+/// ActuatorDetails: that shape is a Solis register (a PDU address, a
+/// watt-per-raw-tick resolution); Hypervolt's own control surface is a
+/// current in amps with no register behind it, so the two do not share one.
+struct HypervoltActuatorDetails: Decodable, Sendable {
+    let connected: Bool
+    let commandedCurrentA: Double
+    let minimumCurrentA: Double
+    let maximumCurrentA: Double
+    let totalWriteCount: Int
+    let lastError: String?
 }
 
 struct VoltageControlDailySummary: Decodable, Sendable {
@@ -314,6 +335,21 @@ struct MonitorConfiguration: Equatable, Sendable {
     var importActivationKw: Double
     var exportActivationKw: Double
     var minimumWriteInterval: Double
+    var hypervoltEnabled: Bool
+    var evPriority: String
+    /// Empty means the poller's own default, <state dir>/hypervolt.json,
+    /// written once by hypervolt-login.
+    var hypervoltCredentialsPath: String
+
+    /// Where hypervolt-login writes credentials when the user has not
+    /// overridden the path, matching solis_poll.py's own default exactly so
+    /// a poller launched without --hypervolt-credentials finds them.
+    static var defaultHypervoltCredentialsPath: String {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SolisTools", isDirectory: true)
+            .appendingPathComponent("hypervolt.json")
+            .path
+    }
 
     /// Read the settings the dashboard stores, or nil if no host is set yet.
     ///
@@ -357,7 +393,10 @@ struct MonitorConfiguration: Equatable, Sendable {
             controlDeactivationDelay: max(0, defaults.object(forKey: "controlDeactivationDelay") as? Double ?? 10),
             importActivationKw: max(0, defaults.object(forKey: "importActivationKw") as? Double ?? 1),
             exportActivationKw: max(0, defaults.object(forKey: "exportActivationKw") as? Double ?? 0.5),
-            minimumWriteInterval: max(5, defaults.object(forKey: "minimumWriteInterval") as? Double ?? 5)
+            minimumWriteInterval: max(5, defaults.object(forKey: "minimumWriteInterval") as? Double ?? 5),
+            hypervoltEnabled: defaults.bool(forKey: "hypervoltEnabled"),
+            evPriority: defaults.string(forKey: "evPriority") ?? "battery",
+            hypervoltCredentialsPath: defaults.string(forKey: "hypervoltCredentialsPath") ?? ""
         )
     }
 }

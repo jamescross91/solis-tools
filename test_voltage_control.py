@@ -20,6 +20,7 @@ from voltage_control import (
     OperatingStateDetector,
     VoltageControlState,
     VoltageFilter,
+    allocate_import_step,
     export_validation_path,
 )
 
@@ -30,8 +31,12 @@ def sample(
     grid_kw: float = -2.0,
     battery_status: str = "Charging",
     age_s: float = 0.0,
+    ev_charging: bool = False,
+    ev_power_w: float = 0.0,
 ) -> GridTelemetrySample:
-    return GridTelemetrySample(now, voltage, grid_kw, battery_status, age_s)
+    return GridTelemetrySample(
+        now, voltage, grid_kw, battery_status, age_s, ev_charging, ev_power_w
+    )
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -157,6 +162,153 @@ class FilterAndStateTests(unittest.TestCase):
         )
         self.assertEqual(decision.action, ControlAction.HOLDING)
         self.assertIn("deactivation delay", decision.reason)
+
+
+class EvActivationAndBoundsTests(unittest.TestCase):
+    def test_ev_charging_alone_activates_import_when_hypervolt_is_enabled(self):
+        configuration = DynamicVoltageConfiguration(
+            enabled=True, hypervolt_enabled=True, activation_delay_s=0
+        )
+        detector = OperatingStateDetector(configuration)
+        detector.update(sample(0, battery_status="Idle", ev_charging=True))
+        self.assertEqual(
+            detector.update(sample(0, battery_status="Idle", ev_charging=True)), "import"
+        )
+
+    def test_ev_charging_is_ignored_for_activation_while_hypervolt_is_disabled(self):
+        """A stray ev_charging=True must not matter until the feature is on."""
+        configuration = DynamicVoltageConfiguration(enabled=True, activation_delay_s=0)
+        detector = OperatingStateDetector(configuration)
+        detector.update(sample(0, battery_status="Idle", ev_charging=True))
+        self.assertIsNone(detector.update(sample(0, battery_status="Idle", ev_charging=True)))
+
+    def test_ev_charging_narrows_the_emergency_threshold(self):
+        configuration = DynamicVoltageConfiguration(
+            enabled=True,
+            hypervolt_enabled=True,
+            minimum_voltage_v=210,
+            ev_minimum_voltage_v=216,
+            activation_delay_s=0,
+            filter_time_constant_s=0.01,
+        )
+        controller = DynamicVoltageController(configuration)
+        # 213 V is inside the general band (>= 210) but outside the tighter
+        # EV band (< 216), so only the EV-charging sample must trip emergency.
+        decision = controller.evaluate(
+            sample(0, voltage=213, battery_status="Idle", ev_charging=False), 10_000, 0
+        )
+        self.assertNotEqual(decision.state, VoltageControlState.EMERGENCY_LOW_VOLTAGE)
+
+        controller = DynamicVoltageController(configuration)
+        decision = controller.evaluate(
+            sample(0, voltage=213, battery_status="Idle", ev_charging=True), 10_000, 0
+        )
+        self.assertEqual(decision.state, VoltageControlState.EMERGENCY_LOW_VOLTAGE)
+
+    def test_ev_bounds_never_widen_the_general_band(self):
+        """Whichever bound is tighter always wins, from either side."""
+        configuration = DynamicVoltageConfiguration(
+            enabled=True,
+            hypervolt_enabled=True,
+            minimum_voltage_v=215,
+            maximum_voltage_v=258,
+            ev_minimum_voltage_v=180,  # deliberately looser than the general band
+            ev_maximum_voltage_v=280,
+            activation_delay_s=0,
+            filter_time_constant_s=0.01,
+        )
+        controller = DynamicVoltageController(configuration)
+        decision = controller.evaluate(
+            sample(0, voltage=214, battery_status="Idle", ev_charging=True), 10_000, 0
+        )
+        self.assertEqual(decision.state, VoltageControlState.EMERGENCY_LOW_VOLTAGE)
+
+    def test_configuration_rejects_nonsense_ev_settings(self):
+        with self.assertRaisesRegex(ValueError, "Hypervolt voltage limits"):
+            DynamicVoltageConfiguration(
+                ev_minimum_voltage_v=260, ev_maximum_voltage_v=250
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "Hypervolt current limits"):
+            DynamicVoltageConfiguration(ev_minimum_current_a=40).validate()
+        with self.assertRaisesRegex(ValueError, "ev-priority"):
+            DynamicVoltageConfiguration(ev_priority="whichever").validate()
+
+
+class AllocateImportStepTests(unittest.TestCase):
+    bounds = {
+        "battery_min_w": 1_000,
+        "battery_max_w": 14_000,
+        "ev_min_w": 1_380,
+        "ev_max_w": 7_360,
+    }
+
+    def test_battery_priority_cuts_the_ev_first(self):
+        battery_w, ev_w = allocate_import_step(
+            -500, battery_w=10_000, ev_w=5_000, priority="battery", **self.bounds
+        )
+        self.assertEqual(battery_w, 10_000)
+        self.assertEqual(ev_w, 4_500)
+
+    def test_battery_priority_spills_to_battery_once_the_ev_hits_its_floor(self):
+        battery_w, ev_w = allocate_import_step(
+            -2_000, battery_w=10_000, ev_w=1_500, priority="battery", **self.bounds
+        )
+        self.assertEqual(ev_w, 1_380)  # floor, not fully absorbed
+        self.assertEqual(battery_w, 10_000 - (2_000 - (1_500 - 1_380)))
+
+    def test_ev_priority_cuts_the_battery_first(self):
+        battery_w, ev_w = allocate_import_step(
+            -500, battery_w=10_000, ev_w=5_000, priority="ev", **self.bounds
+        )
+        self.assertEqual(battery_w, 9_500)
+        self.assertEqual(ev_w, 5_000)
+
+    def test_ev_priority_spills_to_ev_once_the_battery_hits_its_floor(self):
+        battery_w, ev_w = allocate_import_step(
+            -2_000, battery_w=1_200, ev_w=5_000, priority="ev", **self.bounds
+        )
+        self.assertEqual(battery_w, 1_000)  # floor
+        self.assertEqual(ev_w, 5_000 - (2_000 - 200))
+
+    def test_balanced_splits_evenly_when_both_have_room(self):
+        battery_w, ev_w = allocate_import_step(
+            -1_000, battery_w=10_000, ev_w=5_000, priority="balanced", **self.bounds
+        )
+        self.assertEqual(battery_w, 9_500)
+        self.assertEqual(ev_w, 4_500)
+
+    def test_balanced_spills_the_limited_sides_share_onto_the_other(self):
+        battery_w, ev_w = allocate_import_step(
+            -1_000, battery_w=10_000, ev_w=1_400, priority="balanced", **self.bounds
+        )
+        self.assertEqual(ev_w, 1_380)  # floor; only 20 W of its 500 W share absorbed
+        self.assertEqual(battery_w, 10_000 - (500 + 480))
+
+    def test_restores_favour_the_same_side_a_cut_would_have(self):
+        """Symmetric by design: the flexible resource recovers first too."""
+        battery_w, ev_w = allocate_import_step(
+            300, battery_w=10_000, ev_w=1_380, priority="battery", **self.bounds
+        )
+        self.assertEqual(battery_w, 10_000)
+        self.assertEqual(ev_w, 1_680)
+
+        battery_w, ev_w = allocate_import_step(
+            300, battery_w=1_000, ev_w=5_000, priority="ev", **self.bounds
+        )
+        self.assertEqual(battery_w, 1_300)
+        self.assertEqual(ev_w, 5_000)
+
+    def test_nothing_left_to_give_holds_both_sides_at_their_limits(self):
+        battery_w, ev_w = allocate_import_step(
+            -5_000, battery_w=1_000, ev_w=1_380, priority="balanced", **self.bounds
+        )
+        self.assertEqual((battery_w, ev_w), (1_000, 1_380))
+
+    def test_an_unknown_priority_is_rejected(self):
+        with self.assertRaises(ValueError):
+            allocate_import_step(
+                -100, battery_w=5_000, ev_w=5_000, priority="whichever", **self.bounds
+            )
 
 
 class ControllerTests(unittest.TestCase):
