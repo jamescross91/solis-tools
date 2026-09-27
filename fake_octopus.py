@@ -180,7 +180,9 @@ def main() -> int:
     with FakeOctopusApi(port=args.port) as fake:
         if args.charge_now:
             fake.plan_charge(0, args.charge_now * 60)
-        print(f"fake Octopus API on 127.0.0.1:{fake.port}, API key {fake.api_key}")
+        # Never print the key, even this fake one: the docstring names it, and a
+        # banner that echoes credentials is the habit the real client avoids.
+        print(f"fake Octopus API on 127.0.0.1:{fake.port}; API key is FAKE_API_KEY")
         try:
             while True:
                 time.sleep(3600)
