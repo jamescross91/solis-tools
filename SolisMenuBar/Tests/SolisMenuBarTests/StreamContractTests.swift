@@ -134,6 +134,62 @@ final class StreamContractTests: XCTestCase {
         XCTAssertNil(details.evPriority)
         XCTAssertNil(details.evCharging)
         XCTAssertNil(details.hypervoltActuator)
+        XCTAssertNil(details.evVoltageLimitsActive)
+        XCTAssertNil(details.octopusSchedule)
+    }
+
+    func testOctopusScheduleDecodes() throws {
+        let control = """
+            {
+              "state": "Emergency high voltage", "action": "Emergency", "mode": "export",
+              "desired_limit_w": 3000, "raw_voltage_v": 254.0,
+              "filtered_voltage_v": 254.0, "reason": "raw PCC voltage reached the absolute maximum",
+              "emergency": true, "voltage_source": "meter/PCC input register, raw PDU 33251",
+              "estimated_voltage_sensitivity_v_per_kw": null,
+              "import_actuator": {
+                "pdu_address": 43488, "resolution_w": 100, "baseline_raw": 140,
+                "last_commanded_raw": 140, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 0, "last_error": null
+              },
+              "export_actuator": {
+                "pdu_address": 43074, "resolution_w": 100, "baseline_raw": 50,
+                "last_commanded_raw": 30, "last_requested_raw": null,
+                "last_write_at": null, "writes_last_hour": 1, "last_error": null
+              },
+              "export_write_validated": true,
+              "daily_summary": null, "recovery_note": null,
+              "ev_priority": null, "ev_charging": null, "hypervolt_actuator": null,
+              "ev_voltage_limits_active": true,
+              "effective_minimum_voltage_v": 215.0, "effective_maximum_voltage_v": 253.0,
+              "octopus_schedule": {
+                "charge_window_active": true,
+                "active_window": {
+                  "start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T05:30:00+01:00",
+                  "kind": "SMART"
+                },
+                "next_window": null,
+                "planned_windows": [{
+                  "start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T05:30:00+01:00",
+                  "kind": "SMART"
+                }],
+                "lead_time_s": 300.0,
+                "fetched_at": "2026-09-27T23:28:00+01:00",
+                "last_error": null
+              }
+            }
+            """
+        let details = try XCTUnwrap(
+            StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
+        )
+        XCTAssertEqual(details.evVoltageLimitsActive, true)
+        XCTAssertEqual(details.effectiveMaximumVoltageV, 253.0)
+        let schedule = try XCTUnwrap(details.octopusSchedule)
+        XCTAssertTrue(schedule.chargeWindowActive)
+        XCTAssertEqual(schedule.activeWindow?.kind, "SMART")
+        XCTAssertNil(schedule.nextWindow)
+        XCTAssertEqual(schedule.plannedWindows.count, 1)
+        XCTAssertEqual(schedule.leadTimeS, 300)
+        XCTAssertNil(schedule.lastError)
     }
 
     func testHypervoltDiagnosticsDecode() throws {
@@ -337,6 +393,8 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertFalse(configuration.hypervoltEnabled)
         XCTAssertEqual(configuration.evPriority, "battery")
         XCTAssertEqual(configuration.hypervoltCredentialsPath, "")
+        XCTAssertFalse(configuration.octopusEnabled)
+        XCTAssertEqual(configuration.octopusCredentialsPath, "")
     }
 
     /// A too-short interval would make the poller hammer the inverter.

@@ -84,11 +84,21 @@ class DynamicVoltageConfiguration:
     filter_time_constant_s: float = 6.0
     hypervolt_enabled: bool = False
     ev_priority: str = "battery"
-    ev_minimum_voltage_v: float = 216.0
+    # Hypervolt's PEN-fault protection opens the contactor when line-neutral
+    # voltage stays above 253 V or below 207 V for five seconds (BS 7671
+    # 722.411.4.1), then needs 30 s back inside the band before it resumes.
+    ev_minimum_voltage_v: float = 207.0
     ev_maximum_voltage_v: float = 253.0
     ev_minimum_current_a: float = 6.0
     ev_maximum_current_a: float = 32.0
     ev_stale_age_s: float = 30.0
+    # Octopus's plan says a charge is coming before the car draws anything, so
+    # the band can tighten in advance. Without it the tighter band only arrives
+    # once Hypervolt reports charging, which is too late when the voltage is
+    # already over 253 V: the charger trips before it starts and never reports
+    # charging at all.
+    octopus_enabled: bool = False
+    octopus_lead_time_s: float = 300.0
 
     def validate(self) -> None:
         numeric = (
@@ -107,6 +117,7 @@ class DynamicVoltageConfiguration:
             self.ev_minimum_current_a,
             self.ev_maximum_current_a,
             self.ev_stale_age_s,
+            self.octopus_lead_time_s,
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("dynamic-voltage settings must be finite")
@@ -168,6 +179,8 @@ class DynamicVoltageConfiguration:
             )
         if self.ev_stale_age_s <= 0:
             raise ValueError("Hypervolt telemetry staleness age must be above zero")
+        if not 0 <= self.octopus_lead_time_s <= 3_600:
+            raise ValueError("Octopus lead time must be between 0 and 3600 seconds")
         if not (
             HYPERVOLT_MIN_CURRENT_A
             <= self.ev_minimum_current_a
@@ -285,6 +298,8 @@ class GridTelemetrySample:
     # exactly as it always has, and the voltage band never narrows.
     ev_charging: bool = False
     ev_power_w: float = 0.0
+    # True while an Octopus planned charge (or its lead-in) covers this sample.
+    ev_charge_window: bool = False
 
 
 @dataclass(frozen=True)
@@ -462,6 +477,8 @@ class DynamicVoltageController:
         self.import_manual_bias_w = 0
         self.import_lower_ceiling_candidate_w: int | None = None
         self.import_lower_ceiling_since: float | None = None
+        # The band the last evaluated sample was held to, for the stream.
+        self.voltage_bounds_v = (configuration.minimum_voltage_v, configuration.maximum_voltage_v)
 
     def _reset_import_demand_tracking(self) -> None:
         self.import_demand_ceiling_w = None
@@ -471,15 +488,26 @@ class DynamicVoltageController:
         self.import_lower_ceiling_candidate_w = None
         self.import_lower_ceiling_since = None
 
-    def _voltage_bounds(self, ev_charging: bool) -> tuple[float, float]:
+    def ev_limits_apply(self, sample: GridTelemetrySample) -> bool:
+        """Whether the charger's tighter band governs this sample: the car is
+        confirmed charging, or Octopus has a charge planned for now. Each
+        signal counts only while its own feature is enabled."""
+        c = self.configuration
+        return (c.hypervolt_enabled and sample.ev_charging) or (
+            c.octopus_enabled and sample.ev_charge_window
+        )
+
+    def _voltage_bounds(self, sample: GridTelemetrySample) -> tuple[float, float]:
         """The operating band for this sample: the general band, tightened to
-        Hypervolt's own protection thresholds while it is actively charging.
-        Whichever bound is tighter always wins regardless of which device
-        reports it, so enabling Hypervolt can only narrow the safe range,
-        never widen it.
+        Hypervolt's own protection thresholds while it is charging or an
+        Octopus charge is planned. Whichever bound is tighter always wins
+        regardless of which device reports it, so enabling either integration
+        can only narrow the safe range, never widen it. The general band
+        returns by itself on the first sample after the window, because
+        nothing here is stored.
         """
         c = self.configuration
-        if not (c.hypervolt_enabled and ev_charging):
+        if not self.ev_limits_apply(sample):
             return c.minimum_voltage_v, c.maximum_voltage_v
         return (
             max(c.minimum_voltage_v, c.ev_minimum_voltage_v),
@@ -617,7 +645,8 @@ class DynamicVoltageController:
         filtered = self.filter.update(sample.raw_voltage_v, sample.monotonic_s)
         self._update_sensitivity(sample)
         immediate_mode = self.detector._candidate(sample)
-        minimum_voltage_v, maximum_voltage_v = self._voltage_bounds(sample.ev_charging)
+        minimum_voltage_v, maximum_voltage_v = self._voltage_bounds(sample)
+        self.voltage_bounds_v = (minimum_voltage_v, maximum_voltage_v)
         if immediate_mode == "import" and self.import_demand_ceiling_w is None:
             self.import_activation_peak_w = max(
                 self.import_activation_peak_w,
@@ -696,7 +725,7 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
-        minimum_voltage_v, _ = self._voltage_bounds(sample.ev_charging)
+        minimum_voltage_v, _ = self._voltage_bounds(sample)
         import_target_v = minimum_voltage_v + c.safety_margin_v
         measured_import_w = max(0, round(-sample.grid_kw * 1_000))
         measured_ceiling_w = max(
@@ -821,7 +850,7 @@ class DynamicVoltageController:
         self, sample: GridTelemetrySample, filtered: float, current_w: int
     ) -> ControlDecision:
         c = self.configuration
-        _, maximum_voltage_v = self._voltage_bounds(sample.ev_charging)
+        _, maximum_voltage_v = self._voltage_bounds(sample)
         export_target_v = maximum_voltage_v - c.safety_margin_v
         if sample.raw_voltage_v >= maximum_voltage_v:
             desired = max(0, current_w - c.emergency_reduction_w)

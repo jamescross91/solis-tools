@@ -22,7 +22,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, NoReturn
 
@@ -32,6 +32,12 @@ from hypervolt_client import (
     HypervoltClient,
     HypervoltCredentials,
     HypervoltError,
+)
+from octopus_client import (
+    OctopusClient,
+    OctopusCredentials,
+    OctopusError,
+    OctopusScheduleMonitor,
 )
 from voltage_control import (
     ControlAction,
@@ -1184,9 +1190,13 @@ class VoltageControlRuntime:
         history_path: Path | None,
         retention_days: int,
         hypervolt_actuator: HypervoltCurrentActuator | None = None,
+        octopus_monitor: OctopusScheduleMonitor | None = None,
     ):
         self.configuration = configuration
         self.hypervolt_actuator = hypervolt_actuator
+        self.octopus_monitor = octopus_monitor
+        self.ev_window_active = False
+        self.ev_limits_active = False
         # The configuration is frozen, and asdict() on it cost more per stream
         # sample than encoding the whole JSON payload did.
         self.configuration_payload = configuration_dict(configuration)
@@ -1244,7 +1254,11 @@ class VoltageControlRuntime:
     def needs_fast_telemetry(self) -> bool:
         """Whether a slower idle poll would delay regulation or restoration."""
         return (
-            self.active_mode is not None or self.controller.decision.state not in self.IDLE_STATES
+            self.active_mode is not None
+            or self.controller.decision.state not in self.IDLE_STATES
+            # Export can start at any moment of a planned charge, and the
+            # charger trips five seconds after the voltage passes 253 V.
+            or self.ev_window_active
         )
 
     def _fresh(self) -> bool:
@@ -1438,6 +1452,13 @@ class VoltageControlRuntime:
                 ev_power_w = max(
                     0.0, hypervolt_state.true_milli_amps / 1000 * reading.meter_voltage_v
                 )
+        charge_window = (
+            self.octopus_monitor.snapshot().active_window(
+                datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
+            )
+            if self.octopus_monitor is not None
+            else None
+        )
         sample = GridTelemetrySample(
             monotonic_s=now,
             raw_voltage_v=reading.meter_voltage_v,
@@ -1446,7 +1467,9 @@ class VoltageControlRuntime:
             age_s=age,
             ev_charging=ev_charging,
             ev_power_w=ev_power_w,
+            ev_charge_window=charge_window is not None,
         )
+        self.ev_limits_active = self.controller.ev_limits_apply(sample)
         self._synchronise_external_limit(sample, now)
         decision = self.controller.evaluate(
             sample,
@@ -1559,6 +1582,21 @@ class VoltageControlRuntime:
                 decision.reason,
             )
             self.last_event_signature = signature
+        if (charge_window is not None) != self.ev_window_active:
+            self.ev_window_active = charge_window is not None
+            minimum_v, maximum_v = self.controller.voltage_bounds_v
+            if charge_window is not None:
+                message = (
+                    f"Octopus charge planned until "
+                    f"{charge_window.end.astimezone():%H:%M}; voltage band held to "
+                    f"{minimum_v:g}–{maximum_v:g} V for the charger"
+                )
+            else:
+                message = (
+                    f"Octopus charge window ended; voltage band back to "
+                    f"{minimum_v:g}–{maximum_v:g} V"
+                )
+            self._event(decision, reading.grid_kw, None, None, message)
         if self.history_store:
             self.history_store.record_sample(
                 sampled_at,
@@ -1696,6 +1734,16 @@ class VoltageControlRuntime:
                 ),
                 "hypervolt_actuator": (
                     self.hypervolt_actuator.diagnostics() if self.hypervolt_actuator else None
+                ),
+                "ev_voltage_limits_active": self.ev_limits_active,
+                "effective_minimum_voltage_v": self.controller.voltage_bounds_v[0],
+                "effective_maximum_voltage_v": self.controller.voltage_bounds_v[1],
+                "octopus_schedule": (
+                    self.octopus_monitor.snapshot().stream_dict(
+                        datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
+                    )
+                    if self.octopus_monitor
+                    else None
                 ),
             }
         )
@@ -2633,15 +2681,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ev-minimum-voltage",
         type=float,
-        default=216.0,
-        help="Hypervolt's own low-voltage protection threshold, tighter than --minimum-voltage "
-        "while it is charging (default: 216)",
+        default=207.0,
+        help="Hypervolt's own low-voltage protection threshold, applied while it is charging "
+        "or an Octopus charge is planned (default: 207)",
     )
     parser.add_argument(
         "--ev-maximum-voltage",
         type=float,
         default=253.0,
-        help="Hypervolt's own high-voltage protection threshold while charging (default: 253)",
+        help="Hypervolt's own high-voltage protection threshold, applied while it is charging "
+        "or an Octopus charge is planned (default: 253)",
     )
     parser.add_argument("--ev-minimum-current", type=float, default=6.0, help="amps (default: 6)")
     parser.add_argument("--ev-maximum-current", type=float, default=32.0, help="amps (default: 32)")
@@ -2664,6 +2713,37 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hypervolt-api-port", type=int, default=443, help=argparse.SUPPRESS)
     parser.add_argument("--hypervolt-insecure", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--octopus-enable",
+        action="store_true",
+        help=(
+            "hold voltage inside the EV charger's limits during Intelligent Octopus planned "
+            "charges (requires --dynamic-voltage-control)"
+        ),
+    )
+    parser.add_argument(
+        "--octopus-credentials",
+        type=Path,
+        help="API-key file written by octopus-login (default: <state dir>/octopus.json)",
+    )
+    parser.add_argument(
+        "--octopus-lead-time",
+        type=float,
+        default=300.0,
+        help="seconds before a planned charge to start holding the charger's limits (default: 300)",
+    )
+    parser.add_argument(
+        "--octopus-interval",
+        type=float,
+        default=180.0,
+        help="seconds between Octopus schedule refreshes (default: 180, minimum 60)",
+    )
+    parser.add_argument("--octopus-timeout", type=float, default=10.0)
+    # Hidden, like the Hypervolt overrides: end-to-end tests point these at
+    # fake_octopus.py.
+    parser.add_argument("--octopus-host", default="api.octopus.energy", help=argparse.SUPPRESS)
+    parser.add_argument("--octopus-port", type=int, default=443, help=argparse.SUPPRESS)
+    parser.add_argument("--octopus-insecure", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--csv", type=Path, help="append readings to CSV and restore its last six hours"
     )
@@ -2712,6 +2792,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dynamic-export-control requires --dynamic-voltage-control")
     if args.hypervolt_enable and not args.dynamic_voltage_control:
         parser.error("--hypervolt-enable requires --dynamic-voltage-control")
+    if args.octopus_enable and not args.dynamic_voltage_control:
+        parser.error("--octopus-enable requires --dynamic-voltage-control")
+    # Octopus rate-limits per account; the plan changes on a scale of minutes.
+    if not math.isfinite(args.octopus_interval) or args.octopus_interval < 60:
+        parser.error("--octopus-interval must be finite and at least 60 seconds")
+    if not math.isfinite(args.octopus_timeout) or args.octopus_timeout <= 0:
+        parser.error("--octopus-timeout must be finite and above zero")
     if args.once and args.dynamic_voltage_control:
         parser.error("--dynamic-voltage-control cannot be combined with --once")
     try:
@@ -2761,6 +2848,8 @@ def dynamic_configuration(
         ev_minimum_current_a=args.ev_minimum_current,
         ev_maximum_current_a=args.ev_maximum_current,
         ev_stale_age_s=args.ev_stale_age,
+        octopus_enabled=args.octopus_enable,
+        octopus_lead_time_s=args.octopus_lead_time,
     )
 
 
@@ -2811,6 +2900,7 @@ def main() -> int:
     hypervolt_reconnect_attempt = 0
     hypervolt_reconnect_not_before = 0.0
     hypervolt_credentials_path: Path | None = None
+    octopus_monitor: OctopusScheduleMonitor | None = None
     attention = AttentionChannel(sys.stdin if args.stream_json else None)
 
     try:
@@ -2872,6 +2962,26 @@ def main() -> int:
                     configuration.ev_maximum_current_a,
                     args.minimum_write_interval,
                 )
+            if args.octopus_enable:
+                octopus_monitor = OctopusScheduleMonitor(
+                    OctopusClient(
+                        OctopusCredentials.load(
+                            args.octopus_credentials or state_dir / "octopus.json"
+                        ),
+                        timeout=args.octopus_timeout,
+                        host=args.octopus_host,
+                        port=args.octopus_port,
+                        use_tls=not args.octopus_insecure,
+                    ),
+                    interval_s=args.octopus_interval,
+                    lead_time_s=configuration.octopus_lead_time_s,
+                )
+                # One synchronous fetch so a refused key stops the run here,
+                # like any other configuration mistake. Any other failure is
+                # transient: the thread retries, and until it succeeds the
+                # controller simply has no window to tighten for.
+                octopus_monitor.refresh()
+                octopus_monitor.start()
             device_key = hashlib.sha256(client.control_identity.encode()).hexdigest()[:24]
             voltage_runtime = VoltageControlRuntime(
                 client,
@@ -2881,6 +2991,7 @@ def main() -> int:
                 args.voltage_history_db or state_dir / "voltage-history.sqlite3",
                 args.voltage_history_retention_days,
                 hypervolt_actuator,
+                octopus_monitor,
             )
         if dashboard:
             print("\033[?25l", end="")
@@ -3019,6 +3130,8 @@ def main() -> int:
         fail(str(exc), 1)
     except HypervoltError as exc:
         fail(f"cannot connect to the Hypervolt charger: {exc}", 1)
+    except OctopusError as exc:
+        fail(f"cannot read the Octopus charge schedule: {exc}", 1)
     except (ConnectionError, OSError, client.modbus_exception) as exc:
         fail(f"cannot connect to {args.host}:{args.port}: {exc}", 1)
     finally:
@@ -3033,6 +3146,8 @@ def main() -> int:
             client.close()
             if hypervolt_client is not None:
                 hypervolt_client.close()
+            if octopus_monitor is not None:
+                octopus_monitor.stop()
             if recorder:
                 recorder.close()
             if dashboard:

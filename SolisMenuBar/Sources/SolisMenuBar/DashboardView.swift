@@ -42,6 +42,8 @@ struct DashboardView: View {
     @AppStorage("hypervoltEnabled") private var hypervoltEnabled = false
     @AppStorage("evPriority") private var evPriority = "battery"
     @AppStorage("hypervoltCredentialsPath") private var hypervoltCredentialsPath = ""
+    @AppStorage("octopusEnabled") private var octopusEnabled = false
+    @AppStorage("octopusCredentialsPath") private var octopusCredentialsPath = ""
 
     @StateObject private var hypervoltLogin = HypervoltLoginRunner()
 
@@ -280,6 +282,16 @@ struct DashboardView: View {
                             Text(error).foregroundStyle(.orange)
                         }
                     }
+                    if let schedule = control.octopusSchedule {
+                        octopusStatus(schedule)
+                    }
+                    if control.evVoltageLimitsActive == true,
+                        let minimum = control.effectiveMinimumVoltageV,
+                        let maximum = control.effectiveMaximumVoltageV
+                    {
+                        Text(String(format: "Holding %.0f–%.0f V for the EV charger", minimum, maximum))
+                            .foregroundStyle(.green)
+                    }
                     let events = control.recentEvents ?? []
                     if !events.isEmpty {
                         Divider().padding(.vertical, 2)
@@ -309,6 +321,20 @@ struct DashboardView: View {
             Text(value).font(.caption.weight(.semibold).monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func octopusStatus(_ schedule: OctopusScheduleDetails) -> some View {
+        if let active = schedule.activeWindow {
+            Text("Octopus charge: now, \(active.label)")
+        } else if let next = schedule.nextWindow {
+            Text("Octopus charge: next \(next.label)")
+        } else {
+            Text("Octopus charge: none planned")
+        }
+        if let error = schedule.lastError {
+            Text("Octopus: \(error)").foregroundStyle(.orange)
+        }
     }
 
     private func evPriorityLabel(_ priority: String?) -> String {
@@ -511,6 +537,37 @@ struct DashboardView: View {
             .foregroundStyle(.secondary)
 
             Divider()
+            Text("Intelligent Octopus charge windows")
+                .font(.headline)
+            Toggle("Hold the EV charger's voltage limits during planned charges", isOn: $octopusEnabled)
+                .disabled(!dynamicVoltageEnabled)
+            LabeledContent("Credentials file") {
+                TextField("default: state directory/octopus.json", text: $octopusCredentialsPath)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .disabled(!dynamicVoltageEnabled || !octopusEnabled)
+            if let account = octopusAccountNumber {
+                Label("Signed in to Octopus account \(account)", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Label(
+                    "Not signed in: run octopus-login --credentials \"\(octopusCredentialsResolvedPath)\" "
+                        + "in Terminal once and paste your API key",
+                    systemImage: "person.crop.circle.badge.questionmark"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            }
+            Text(
+                "From five minutes before each planned charge until it ends, voltage is held inside "
+                    + "Hypervolt's 207–253 V trip limits; the normal limits return afterwards."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Divider()
             Text("Menu bar metrics")
                 .font(.headline)
             Toggle("House load", isOn: $showHouseLoad)
@@ -544,6 +601,19 @@ struct DashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var octopusCredentialsResolvedPath: String {
+        octopusCredentialsPath.isEmpty
+            ? MonitorConfiguration.defaultOctopusCredentialsPath : octopusCredentialsPath
+    }
+
+    private var octopusAccountNumber: String? {
+        guard let data = FileManager.default.contents(atPath: octopusCredentialsResolvedPath),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let account = json["account_number"] as? String, !account.isEmpty
+        else { return nil }
+        return account
     }
 
     private var hypervoltCredentialsResolvedPath: String {

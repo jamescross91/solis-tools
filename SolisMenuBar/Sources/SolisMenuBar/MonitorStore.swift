@@ -426,6 +426,14 @@ final class MonitorStore: ObservableObject {
                     ])
                 }
             }
+            if configuration.octopusEnabled {
+                result.append("--octopus-enable")
+                if !configuration.octopusCredentialsPath.isEmpty {
+                    result.append(contentsOf: [
+                        "--octopus-credentials", configuration.octopusCredentialsPath,
+                    ])
+                }
+            }
         }
         return result
     }

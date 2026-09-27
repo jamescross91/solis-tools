@@ -7,6 +7,20 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Hold the supply voltage inside the EV charger's limits during Intelligent
+  Octopus planned charges. `--octopus-enable` reads the charge plan Octopus
+  publishes for the car and, from five minutes before each planned charge
+  (`--octopus-lead-time`) until it ends, narrows the control band to
+  `--ev-minimum-voltage`/`--ev-maximum-voltage`, so export regulation brings a
+  254 V supply under Hypervolt's 253 V trip point before the car tries to
+  start. The normal band returns by itself when the window ends. Octopus is
+  only read, never asked to change a charge. The API key is saved once, at
+  0600 permissions, by the new `octopus-login` command. A failed refresh keeps
+  the known plan, and a charge that has started is kept until its planned end
+  even if Octopus drops it. The stream gains `octopus_schedule`,
+  `ev_voltage_limits_active` and the effective band, and the menu-bar app shows
+  the active or next charge and gained a setting for it. See
+  `docs/octopus-integration.md`.
 - Optional Hypervolt EV charger integration for dynamic voltage control.
   `--hypervolt-enable` adds a second, cloud-connected lever alongside the
   existing Solis import limit; `--ev-priority` (`battery`, `ev` or
@@ -37,6 +51,9 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `--ev-minimum-voltage` defaults to 207 V, Hypervolt's published
+  PEN-protection threshold, instead of 216 V. With the default 215 V
+  `--minimum-voltage` the effective floor while charging is unchanged.
 - Slow the stream while nobody is watching. With `--idle-interval`, the poller
   idles at that interval while the consumer has written `attention off` to its
   stdin and dynamic control has nothing to regulate or restore; `attention on`

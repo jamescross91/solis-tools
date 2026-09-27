@@ -19,7 +19,9 @@ from pathlib import Path
 
 from fake_hypervolt import FakeHypervoltCloud
 from fake_inverter import FakeInverter, hybrid_bank
+from fake_octopus import FAKE_API_KEY, FakeOctopusApi
 from hypervolt_client import HypervoltCredentials
+from octopus_client import OctopusCredentials
 
 MONITOR = str(Path(__file__).with_name("solis_poll.py"))
 TIMEOUT = 30
@@ -366,10 +368,9 @@ class HypervoltPriorityTests(unittest.TestCase):
     def _bank(self) -> dict[int, int]:
         bank = hybrid_bank()
         bank[33135] = 0  # charging
-        bank[33251] = 2165  # 216.5 V: inside the deadband, not an emergency
-        # (216.5 sits above the default --ev-minimum-voltage of 216, the
-        # tighter threshold that applies once Hypervolt reports charging;
-        # below it this would be an emergency instead of a plain reduction)
+        bank[33251] = 2155  # 215.5 V: below the deadband, not an emergency
+        # (the general 215 V floor is tighter than Hypervolt's own 207 V, so
+        # it is the one that applies while the car charges)
         bank[33263] = 0xFFFF
         bank[33264] = 0xF830  # -2.0 kW import
         bank[43488] = 140  # 14.0 kW import ceiling
@@ -454,6 +455,143 @@ class HypervoltPriorityTests(unittest.TestCase):
         self.assertEqual(inverter_writes[0], (43488, 130))
         self.assertEqual(inverter_writes[-1], (43488, 140))
         self.assertEqual(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
+
+
+class OctopusChargeWindowTests(unittest.TestCase):
+    """A planned Intelligent Octopus charge holds export regulation to the
+    charger's 253 V ceiling, where the general 258 V ceiling would let it
+    trip. 254 V with 4 kW of export is the reported failure: fine for the
+    house, fatal for a Hypervolt about to start charging.
+    """
+
+    def _bank(self) -> dict[int, int]:
+        bank = hybrid_bank()
+        bank[33251] = 2540  # 254.0 V
+        bank[33263] = 0
+        bank[33264] = 4_000  # 4.0 kW export
+        bank[43074] = 50  # 5.0 kW export limit
+        return bank
+
+    def _run(self, inverter, octopus, directory: str, wanted: int) -> list[dict]:
+        validation = Path(directory) / "export-validation.json"
+        validation.write_text(
+            json.dumps(
+                {
+                    "device_identity": f"127.0.0.1:{inverter.port}/1",
+                    "validated_at": "2026-09-07T12:00:00+01:00",
+                    "baseline_raw": 50,
+                    "test_raw": 30,
+                    "restored_raw": 50,
+                    "observed_before_kw": 4.638,
+                    "observed_limited_kw": 2.938,
+                    "schema_version": 1,
+                    "register_address": 43074,
+                    "watts_per_raw_unit": 100,
+                }
+            ),
+            encoding="utf-8",
+        )
+        credentials = Path(directory) / "octopus.json"
+        OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", octopus.devices[0]).save(credentials)
+        return stream_samples(
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(inverter.port),
+            "--interval",
+            "0.05",
+            "--dynamic-voltage-control",
+            "--dynamic-export-control",
+            "--export-control-validation",
+            str(validation),
+            "--control-journal",
+            str(Path(directory) / "journal.json"),
+            "--voltage-history-db",
+            str(Path(directory) / "history.sqlite3"),
+            "--octopus-enable",
+            "--octopus-credentials",
+            str(credentials),
+            "--octopus-host",
+            "127.0.0.1",
+            "--octopus-port",
+            str(octopus.port),
+            "--octopus-insecure",
+            wanted=wanted,
+        )
+
+    def test_a_planned_charge_cuts_export_before_the_charger_trips(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeOctopusApi() as octopus:
+                octopus.plan_charge(60, 3600)  # inside the five-minute lead-in
+                samples = self._run(inverter, octopus, directory, wanted=3)
+                writes = list(inverter.writes)
+
+        control = samples[-1]["voltage_control"]
+        self.assertTrue(control["ev_voltage_limits_active"])
+        self.assertEqual(control["effective_maximum_voltage_v"], 253.0)
+        self.assertEqual(control["octopus_schedule"]["charge_window_active"], True)
+        self.assertEqual(control["octopus_schedule"]["active_window"]["kind"], "SMART")
+        self.assertEqual(samples[0]["voltage_control"]["state"], "Emergency high voltage")
+        self.assertEqual(writes[0], (43074, 30))
+        # Shutdown restores the pre-session export limit.
+        self.assertEqual(writes[-1], (43074, 50))
+        self.assertTrue(
+            any(
+                event["message"].startswith("Octopus charge planned until")
+                for event in latest_events(samples)
+            )
+        )
+
+    def test_a_later_charge_is_reported_without_tightening_the_band(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeOctopusApi() as octopus:
+                octopus.plan_charge(2 * 3600, 3600)
+                samples = self._run(inverter, octopus, directory, wanted=3)
+                writes = list(inverter.writes)
+
+        control = samples[-1]["voltage_control"]
+        self.assertFalse(control["ev_voltage_limits_active"])
+        self.assertEqual(control["effective_maximum_voltage_v"], 258.0)
+        schedule = control["octopus_schedule"]
+        self.assertFalse(schedule["charge_window_active"])
+        self.assertIsNotNone(schedule["next_window"])
+        self.assertEqual(len(schedule["planned_windows"]), 1)
+        self.assertNotIn((43074, 30), writes)
+
+    def test_a_refused_api_key_stops_the_run(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeOctopusApi() as octopus:
+                octopus.refuse_key = True
+                credentials = Path(directory) / "octopus.json"
+                OctopusCredentials(FAKE_API_KEY).save(credentials)
+                result = run_monitor(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--dynamic-voltage-control",
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                    "--octopus-enable",
+                    "--octopus-credentials",
+                    str(credentials),
+                    "--octopus-host",
+                    "127.0.0.1",
+                    "--octopus-port",
+                    str(octopus.port),
+                    "--octopus-insecure",
+                )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read the Octopus charge schedule", result.stderr)
+        self.assertNotIn(FAKE_API_KEY, result.stderr)
 
 
 class CadenceTests(unittest.TestCase):

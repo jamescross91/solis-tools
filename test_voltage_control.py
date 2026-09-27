@@ -234,6 +234,71 @@ class EvActivationAndBoundsTests(unittest.TestCase):
             DynamicVoltageConfiguration(ev_priority="whichever").validate()
 
 
+class OctopusChargeWindowTests(unittest.TestCase):
+    """A planned Octopus charge holds the band to the charger's limits before
+    the car draws anything, and the general band returns once it ends."""
+
+    @staticmethod
+    def exporting(now: float, voltage: float, window: bool) -> GridTelemetrySample:
+        return GridTelemetrySample(now, voltage, 3.0, "Idle", 0.0, ev_charge_window=window)
+
+    @staticmethod
+    def configuration(**overrides: object) -> DynamicVoltageConfiguration:
+        values: dict[str, object] = {
+            "enabled": True,
+            "export_enabled": True,
+            "export_control_validated": True,
+            "octopus_enabled": True,
+            "activation_delay_s": 0,
+            "settle_time_s": 0,
+            "filter_time_constant_s": 0.01,
+        }
+        values.update(overrides)
+        return DynamicVoltageConfiguration(**values)  # type: ignore[arg-type]
+
+    def test_a_planned_charge_makes_254_v_an_emergency(self):
+        """254 V is inside the general 258 V ceiling but over the 253 V at
+        which Hypervolt trips, the export-window failure this exists for."""
+        controller = DynamicVoltageController(self.configuration())
+        decision = controller.evaluate(self.exporting(0, 254, window=False), 0, 5_000)
+        self.assertNotEqual(decision.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
+
+        controller = DynamicVoltageController(self.configuration())
+        decision = controller.evaluate(self.exporting(0, 254, window=True), 0, 5_000)
+        self.assertEqual(decision.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
+        self.assertEqual(decision.desired_limit_w, 3_000)
+        self.assertEqual(controller.voltage_bounds_v, (215.0, 253.0))
+
+    def test_the_window_is_ignored_while_octopus_is_disabled(self):
+        controller = DynamicVoltageController(self.configuration(octopus_enabled=False))
+        decision = controller.evaluate(self.exporting(0, 254, window=True), 0, 5_000)
+        self.assertNotEqual(decision.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
+        self.assertEqual(controller.voltage_bounds_v, (215.0, 258.0))
+
+    def test_the_general_band_returns_after_the_window(self):
+        controller = DynamicVoltageController(self.configuration())
+        controller.evaluate(self.exporting(0, 252.6, window=True), 0, 5_000)
+        during = controller.evaluate(self.exporting(1, 252.6, window=True), 0, 5_000)
+        self.assertEqual(during.action, ControlAction.REDUCING)
+
+        after = controller.evaluate(self.exporting(2, 252.6, window=False), 0, 4_500)
+        self.assertEqual(controller.voltage_bounds_v, (215.0, 258.0))
+        self.assertEqual(after.action, ControlAction.INCREASING)
+
+    def test_hypervolt_defaults_match_its_pen_protection(self):
+        configuration = DynamicVoltageConfiguration()
+        self.assertEqual(
+            (configuration.ev_minimum_voltage_v, configuration.ev_maximum_voltage_v),
+            (207.0, 253.0),
+        )
+
+    def test_lead_time_is_bounded(self):
+        with self.assertRaisesRegex(ValueError, "lead time"):
+            DynamicVoltageConfiguration(octopus_lead_time_s=-1).validate()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            DynamicVoltageConfiguration(octopus_lead_time_s=float("nan")).validate()
+
+
 class AllocateImportStepTests(unittest.TestCase):
     bounds = {
         "battery_min_w": 1_000,
