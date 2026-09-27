@@ -94,7 +94,7 @@ optional, so an older read-only poller still decodes.
 | `hypervolt_actuator` | EV charger current diagnostics, described below, or null when the feature is off |
 | `ev_voltage_limits_active` | Whether the EV charger's band governed the last sample: the car is confirmed charging or an Octopus charge window (with its lead-in) covers it |
 | `effective_minimum_voltage_v`, `effective_maximum_voltage_v` | The band the last sample was held to: the general limits, narrowed by the EV limits while `ev_voltage_limits_active` |
-| `octopus_schedule` | The Intelligent Octopus charge plan, described below, or null when `--octopus-enable` is off |
+| `octopus_schedule` | The Intelligent Octopus charge plan, described below, or null when `--octopus-enable` is off. **Present in the first sample and whenever the plan is refreshed or a window's lead-in or end passes; absent otherwise.** Consumers keep the last plan they received; the menu-bar app does this in `MonitorStore` and resets it for each new poller run |
 
 Actuator diagnostics contain `pdu_address`, `resolution_w`, `baseline_raw`,
 `last_commanded_raw`, `last_requested_raw`, `last_write_at`, `writes_last_hour`,

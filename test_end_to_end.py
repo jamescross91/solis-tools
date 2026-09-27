@@ -92,6 +92,14 @@ def latest_events(samples: list[dict]) -> list[dict]:
     raise AssertionError("no sample carried recent_events")
 
 
+def latest_octopus_schedule(samples: list[dict]) -> dict:
+    """The charge plan as a consumer sees it: the last one that was sent."""
+    for sample in reversed(samples):
+        if "octopus_schedule" in sample["voltage_control"]:
+            return sample["voltage_control"]["octopus_schedule"]
+    raise AssertionError("no sample carried octopus_schedule")
+
+
 def readings(*arguments: str) -> dict[str, str]:
     result = run_monitor("--once", *arguments)
     assert result.returncode == 0, result.stderr
@@ -472,7 +480,15 @@ class OctopusChargeWindowTests(unittest.TestCase):
         bank[43074] = 50  # 5.0 kW export limit
         return bank
 
-    def _run(self, inverter, octopus, directory: str, wanted: int) -> list[dict]:
+    def _run(
+        self,
+        inverter,
+        octopus,
+        directory: str,
+        wanted: int,
+        *extra: str,
+        commands: Sequence[str] = (),
+    ) -> list[dict]:
         validation = Path(directory) / "export-validation.json"
         validation.write_text(
             json.dumps(
@@ -516,7 +532,9 @@ class OctopusChargeWindowTests(unittest.TestCase):
             "--octopus-port",
             str(octopus.port),
             "--octopus-insecure",
+            *extra,
             wanted=wanted,
+            commands=commands,
         )
 
     def test_a_planned_charge_cuts_export_before_the_charger_trips(self):
@@ -531,8 +549,9 @@ class OctopusChargeWindowTests(unittest.TestCase):
         control = samples[-1]["voltage_control"]
         self.assertTrue(control["ev_voltage_limits_active"])
         self.assertEqual(control["effective_maximum_voltage_v"], 253.0)
-        self.assertEqual(control["octopus_schedule"]["charge_window_active"], True)
-        self.assertEqual(control["octopus_schedule"]["active_window"]["kind"], "SMART")
+        schedule = latest_octopus_schedule(samples)
+        self.assertEqual(schedule["charge_window_active"], True)
+        self.assertEqual(schedule["active_window"]["kind"], "SMART")
         self.assertEqual(samples[0]["voltage_control"]["state"], "Emergency high voltage")
         self.assertEqual(writes[0], (43074, 30))
         # Shutdown restores the pre-session export limit.
@@ -556,11 +575,41 @@ class OctopusChargeWindowTests(unittest.TestCase):
         control = samples[-1]["voltage_control"]
         self.assertFalse(control["ev_voltage_limits_active"])
         self.assertEqual(control["effective_maximum_voltage_v"], 258.0)
-        schedule = control["octopus_schedule"]
+        schedule = latest_octopus_schedule(samples)
         self.assertFalse(schedule["charge_window_active"])
         self.assertIsNotNone(schedule["next_window"])
         self.assertEqual(len(schedule["planned_windows"]), 1)
         self.assertNotIn((43074, 30), writes)
+        # Sent with the first sample only: nothing changed in between.
+        self.assertIn("octopus_schedule", samples[0]["voltage_control"])
+        self.assertTrue(all("octopus_schedule" not in s["voltage_control"] for s in samples[1:]))
+
+    def test_a_window_with_nothing_to_regulate_keeps_the_idle_cadence(self):
+        """An overnight slot is six hours of importing with no export: the
+        window must not hold the fast poll, and its wakeups, all night."""
+        import tempfile
+
+        bank = self._bank()
+        bank[33251] = 2400  # 240.0 V
+        bank[33264] = 0  # no grid flow
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter, FakeOctopusApi() as octopus:
+                octopus.plan_charge(0, 6 * 3600)
+                samples = self._run(
+                    inverter,
+                    octopus,
+                    directory,
+                    4,
+                    "--interval",
+                    "0.02",
+                    "--idle-interval",
+                    "0.2",
+                    commands=("attention off",),
+                )
+
+        self.assertTrue(latest_octopus_schedule(samples)["charge_window_active"])
+        self.assertTrue(samples[-1]["voltage_control"]["ev_voltage_limits_active"])
+        self.assertEqual(samples[-1]["cadence"], {"interval_s": 0.2, "idle": True})
 
     def test_a_refused_api_key_stops_the_run(self):
         import tempfile

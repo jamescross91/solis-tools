@@ -52,6 +52,7 @@ class FakeOctopusApi:
         self.valid_tokens: set[str] = set()
         self.token_requests = 0
         self.queries: list[str] = []
+        self.connections = 0
         # Test drivers: answer every request with HTTP 503, or refuse the key.
         self.unavailable = False
         self.refuse_key = False
@@ -59,6 +60,15 @@ class FakeOctopusApi:
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
+            # HTTP/1.1 keeps the connection open between requests, as the
+            # real API does, so tests can count TLS-handshake-equivalents.
+            protocol_version = "HTTP/1.1"
+
+            def setup(self) -> None:
+                super().setup()
+                with fake.lock:
+                    fake.connections += 1
+
             def log_message(self, *_: object) -> None:
                 pass
 

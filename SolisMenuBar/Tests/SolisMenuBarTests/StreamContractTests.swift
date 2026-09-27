@@ -186,6 +186,10 @@ final class StreamContractTests: XCTestCase {
         let schedule = try XCTUnwrap(details.octopusSchedule)
         XCTAssertTrue(schedule.chargeWindowActive)
         XCTAssertEqual(schedule.activeWindow?.kind, "SMART")
+        XCTAssertEqual(
+            schedule.activeWindow?.endDate?.timeIntervalSince(try XCTUnwrap(schedule.activeWindow?.startDate)),
+            6 * 3_600
+        )
         XCTAssertNil(schedule.nextWindow)
         XCTAssertEqual(schedule.plannedWindows.count, 1)
         XCTAssertEqual(schedule.leadTimeS, 300)
@@ -263,6 +267,8 @@ final class StreamContractTests: XCTestCase {
             StreamDecoder.decode(envelopeJSON(voltageControl: control)).voltageControl
         )
         XCTAssertNil(details.recentEvents)
+        // Also sent only on change; MonitorStore carries the last plan forward.
+        XCTAssertNil(details.octopusSchedule)
         XCTAssertEqual(details.importActuator.commandedW, 12_000)
     }
 

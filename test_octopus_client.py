@@ -85,6 +85,17 @@ class ClientTests(unittest.TestCase):
                 client.planned_dispatches()
             self.assertEqual(fake.token_requests, 1)
 
+    def test_a_token_renewal_and_its_query_share_one_connection(self):
+        with FakeOctopusApi() as fake:
+            client = client_for(fake, device_id=fake.devices[0])
+            client.planned_dispatches()
+            self.assertEqual(len(fake.queries), 2)
+            self.assertEqual(fake.connections, 1)
+            client.planned_dispatches()
+            # A new refresh opens afresh rather than reuse a connection the
+            # server would long since have dropped.
+            self.assertEqual(fake.connections, 2)
+
     def test_a_revoked_token_is_renewed_once_and_the_query_retried(self):
         with FakeOctopusApi() as fake:
             client = client_for(fake, device_id=fake.devices[0])
@@ -127,6 +138,19 @@ class ScheduleTests(unittest.TestCase):
         self.assertIsNotNone(schedule.active_window(NOW + timedelta(minutes=5), 300))
         self.assertIsNotNone(schedule.active_window(NOW + timedelta(minutes=39), 300))
         self.assertIsNone(schedule.active_window(NOW + timedelta(minutes=40), 300))
+
+    def test_window_at_says_when_its_answer_next_changes(self):
+        schedule = OctopusSchedule((window(10, 40), window(90, 120)))
+        self.assertEqual(schedule.window_at(NOW, 300), (None, NOW + timedelta(minutes=5)))
+        self.assertEqual(
+            schedule.window_at(NOW + timedelta(minutes=6), 300),
+            (window(10, 40), NOW + timedelta(minutes=40)),
+        )
+        self.assertEqual(
+            schedule.window_at(NOW + timedelta(minutes=40), 300),
+            (None, NOW + timedelta(minutes=85)),
+        )
+        self.assertEqual(schedule.window_at(NOW + timedelta(minutes=120), 300), (None, None))
 
 
 class FakeClient:

@@ -98,8 +98,9 @@ struct VoltageControlDetails: Decodable, Sendable {
     let evVoltageLimitsActive: Bool?
     let effectiveMinimumVoltageV: Double?
     let effectiveMaximumVoltageV: Double?
-    /// Nil unless --octopus-enable is on.
-    let octopusSchedule: OctopusScheduleDetails?
+    /// Nil unless --octopus-enable is on. Sent only when the plan or its
+    /// active window changes; MonitorStore carries the last one forward.
+    var octopusSchedule: OctopusScheduleDetails?
 }
 
 /// One planned Intelligent Octopus charge. Times carry their UTC offset.
@@ -107,13 +108,28 @@ struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
     let start: String
     let end: String
     let kind: String
+    /// Parsed once at decode. The window is carried forward for hours and
+    /// its label is rendered on every dashboard refresh.
+    let startDate: Date?
+    let endDate: Date?
 
     var id: String { start }
 
+    private enum CodingKeys: String, CodingKey {
+        case start, end, kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        start = try container.decode(String.self, forKey: .start)
+        end = try container.decode(String.self, forKey: .end)
+        kind = try container.decode(String.self, forKey: .kind)
+        startDate = StreamDecoder.date(from: start)
+        endDate = StreamDecoder.date(from: end)
+    }
+
     var label: String {
-        let from = StreamDecoder.date(from: start)
-        let to = StreamDecoder.date(from: end)
-        guard let from, let to else { return "\(start)–\(end)" }
+        guard let from = startDate, let to = endDate else { return "\(start)–\(end)" }
         let sameDay = Calendar.current.isDate(from, inSameDayAs: Date())
         let day = sameDay ? "" : from.formatted(.dateTime.weekday(.abbreviated)) + " "
         return day + from.formatted(date: .omitted, time: .shortened) + "–"

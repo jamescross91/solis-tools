@@ -34,9 +34,11 @@ from hypervolt_client import (
     HypervoltError,
 )
 from octopus_client import (
+    ChargeWindow,
     OctopusClient,
     OctopusCredentials,
     OctopusError,
+    OctopusSchedule,
     OctopusScheduleMonitor,
 )
 from voltage_control import (
@@ -1197,6 +1199,11 @@ class VoltageControlRuntime:
         self.octopus_monitor = octopus_monitor
         self.ev_window_active = False
         self.ev_limits_active = False
+        self.window_schedule: OctopusSchedule | None = None
+        self.window_active: ChargeWindow | None = None
+        self.window_recheck_at = 0.0
+        self.octopus_revision = 0
+        self.streamed_octopus_revision: int | None = None
         # The configuration is frozen, and asdict() on it cost more per stream
         # sample than encoding the whole JSON payload did.
         self.configuration_payload = configuration_dict(configuration)
@@ -1253,13 +1260,30 @@ class VoltageControlRuntime:
 
     def needs_fast_telemetry(self) -> bool:
         """Whether a slower idle poll would delay regulation or restoration."""
+        # A charge window alone does not keep the fast cadence: an overnight
+        # slot would hold it for six hours with nothing to regulate. Export
+        # during a window leaves the idle states on its first sample, and at
+        # or over the ceiling that same sample is already an emergency.
         return (
-            self.active_mode is not None
-            or self.controller.decision.state not in self.IDLE_STATES
-            # Export can start at any moment of a planned charge, and the
-            # charger trips five seconds after the voltage passes 253 V.
-            or self.ev_window_active
+            self.active_mode is not None or self.controller.decision.state not in self.IDLE_STATES
         )
+
+    def _charge_window(self) -> ChargeWindow | None:
+        """The Octopus window covering now, rescanned only when the monitor
+        publishes a new schedule or a window boundary passes; every other
+        sample costs an identity check and one float comparison."""
+        if self.octopus_monitor is None:
+            return None
+        schedule = self.octopus_monitor.snapshot()
+        if schedule is not self.window_schedule or time.time() >= self.window_recheck_at:
+            active, changes_at = schedule.window_at(
+                datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
+            )
+            self.window_schedule = schedule
+            self.window_active = active
+            self.window_recheck_at = changes_at.timestamp() if changes_at else math.inf
+            self.octopus_revision += 1
+        return self.window_active
 
     def _fresh(self) -> bool:
         return (
@@ -1452,13 +1476,7 @@ class VoltageControlRuntime:
                 ev_power_w = max(
                     0.0, hypervolt_state.true_milli_amps / 1000 * reading.meter_voltage_v
                 )
-        charge_window = (
-            self.octopus_monitor.snapshot().active_window(
-                datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
-            )
-            if self.octopus_monitor is not None
-            else None
-        )
+        charge_window = self._charge_window()
         sample = GridTelemetrySample(
             monotonic_s=now,
             raw_voltage_v=reading.meter_voltage_v,
@@ -1738,15 +1756,19 @@ class VoltageControlRuntime:
                 "ev_voltage_limits_active": self.ev_limits_active,
                 "effective_minimum_voltage_v": self.controller.voltage_bounds_v[0],
                 "effective_maximum_voltage_v": self.controller.voltage_bounds_v[1],
-                "octopus_schedule": (
-                    self.octopus_monitor.snapshot().stream_dict(
-                        datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
-                    )
-                    if self.octopus_monitor
-                    else None
-                ),
             }
         )
+        # Like the event log, the plan goes out only when it changes: a new
+        # refresh or a window boundary, not every sample of a six-hour window.
+        self._charge_window()
+        if self.window_schedule is None:
+            if first_sample:
+                result["octopus_schedule"] = None
+        elif first_sample or self.octopus_revision != self.streamed_octopus_revision:
+            result["octopus_schedule"] = self.window_schedule.stream_dict(
+                datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
+            )
+            self.streamed_octopus_revision = self.octopus_revision
         if first_sample or self.events_revision != self.streamed_events_revision:
             result["recent_events"] = list(self.events)
             self.streamed_events_revision = self.events_revision

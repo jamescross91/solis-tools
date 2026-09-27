@@ -51,6 +51,7 @@ struct DashboardView: View {
     @State private var selectedMetric: HistoryMetric = .house
     @State private var hypervoltEmail = ""
     @State private var hypervoltPassword = ""
+    @State private var octopusAccountNumber: String?
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -546,19 +547,25 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
             }
             .disabled(!dynamicVoltageEnabled || !octopusEnabled)
-            if let account = octopusAccountNumber {
-                Label("Signed in to Octopus account \(account)", systemImage: "checkmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else {
-                Label(
-                    "Not signed in: run octopus-login --credentials \"\(octopusCredentialsResolvedPath)\" "
-                        + "in Terminal once and paste your API key",
-                    systemImage: "person.crop.circle.badge.questionmark"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+            Group {
+                if let account = octopusAccountNumber {
+                    Label("Signed in to Octopus account \(account)", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                } else {
+                    Label(
+                        "Not signed in: run octopus-login --credentials \"\(octopusCredentialsResolvedPath)\" "
+                            + "in Terminal once and paste your API key",
+                        systemImage: "person.crop.circle.badge.questionmark"
+                    )
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+            }
+            .font(.caption)
+            // Read the file when settings open or the path changes, not on
+            // every redraw of the settings form.
+            .task(id: octopusCredentialsResolvedPath) {
+                octopusAccountNumber = Self.octopusAccount(at: octopusCredentialsResolvedPath)
             }
             Text(
                 "From five minutes before each planned charge until it ends, voltage is held inside "
@@ -608,8 +615,8 @@ struct DashboardView: View {
             ? MonitorConfiguration.defaultOctopusCredentialsPath : octopusCredentialsPath
     }
 
-    private var octopusAccountNumber: String? {
-        guard let data = FileManager.default.contents(atPath: octopusCredentialsResolvedPath),
+    private static func octopusAccount(at path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let account = json["account_number"] as? String, !account.isEmpty
         else { return nil }

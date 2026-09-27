@@ -117,6 +117,7 @@ final class MonitorStore: ObservableObject {
     private var lastMenuUpdate = Date.distantPast
     private var lastUrgentSignature: String?
     private var retainedEvents: [VoltageControlEvent] = []
+    private var retainedOctopusSchedule: OctopusScheduleDetails?
 
     private static let maximumBufferedBytes = 1 << 20
     private static let maximumRetryDelay: TimeInterval = 60
@@ -226,6 +227,7 @@ final class MonitorStore: ObservableObject {
         if clearReading {
             latestReceived = nil
             retainedEvents = []
+            retainedOctopusSchedule = nil
             historyBuffer.removeAll()
             controlHistoryBuffer.removeAll()
             presentation = DashboardPresentation()
@@ -305,6 +307,9 @@ final class MonitorStore: ObservableObject {
 
         executablePath = path
         setState(.connecting)
+        // Each run sends its plan (or null when Octopus is off) first; a
+        // plan from an earlier run must not survive a settings change.
+        retainedOctopusSchedule = nil
         errorBuffer.removeAll(keepingCapacity: true)
 
         let process = Process()
@@ -466,8 +471,14 @@ final class MonitorStore: ObservableObject {
             } else {
                 envelope.voltageControl?.recentEvents = retainedEvents
             }
+            if let schedule = control.octopusSchedule {
+                retainedOctopusSchedule = schedule
+            } else {
+                envelope.voltageControl?.octopusSchedule = retainedOctopusSchedule
+            }
         } else {
             retainedEvents = []
+            retainedOctopusSchedule = nil
         }
         latestReceived = envelope
         setState(envelope.error == nil ? .connected : .degraded)

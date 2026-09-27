@@ -26,9 +26,11 @@ import http.client
 import json
 import os
 import re
+import ssl
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -207,6 +209,18 @@ class OctopusSchedule:
                 return window
         return None
 
+    def window_at(
+        self, now: datetime, lead_time_s: float
+    ) -> tuple[ChargeWindow | None, datetime | None]:
+        """The active window, and when that answer next changes (the active
+        window's end, or the next lead-in), or None if it never does. A caller
+        that keeps the second value needs no rescan until then."""
+        active = self.active_window(now, lead_time_s)
+        if active is not None:
+            return active, active.end
+        following = self.next_window(now, lead_time_s)
+        return None, following.start - timedelta(seconds=lead_time_s) if following else None
+
     def next_window(self, now: datetime, lead_time_s: float) -> ChargeWindow | None:
         lead = timedelta(seconds=lead_time_s)
         for window in self.windows:
@@ -267,10 +281,45 @@ class OctopusClient:
         self.use_tls = use_tls
         self._token: str | None = None
         self._token_renew_at = 0.0
+        # Built once: a default context loads the system CA bundle, which cost
+        # more CPU than the request itself when every connection made its own.
+        self._ssl_context: ssl.SSLContext | None = None
+        if use_tls:
+            self._ssl_context = ssl.create_default_context()
+            self._ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self._connection: http.client.HTTPConnection | None = None
+        self._session_depth = 0
+
+    @contextmanager
+    def _session(self) -> Iterator[None]:
+        """Share one keep-alive connection between the requests of one
+        operation, typically a token renewal and the query, so an hourly token
+        renewal costs no second TLS handshake. It is closed afterwards rather
+        than kept for the next refresh minutes later, when the server will
+        have dropped it and the first request would fail."""
+        self._session_depth += 1
+        try:
+            yield
+        finally:
+            self._session_depth -= 1
+            if self._session_depth == 0 and self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def _open(self) -> http.client.HTTPConnection:
+        if self._connection is None:
+            if self._ssl_context is not None:
+                self._connection = http.client.HTTPSConnection(
+                    self.host, self.port, timeout=self.timeout, context=self._ssl_context
+                )
+            else:
+                self._connection = http.client.HTTPConnection(
+                    self.host, self.port, timeout=self.timeout
+                )
+        return self._connection
 
     def _post(self, query: str, token: str | None) -> dict[str, Any]:
-        connection_cls = http.client.HTTPSConnection if self.use_tls else http.client.HTTPConnection
-        connection = connection_cls(self.host, self.port, timeout=self.timeout)
+        connection = self._open()
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -285,9 +334,12 @@ class OctopusClient:
             response = connection.getresponse()
             body = response.read()
         except (OSError, http.client.HTTPException) as exc:
-            raise OctopusError(f"Octopus API unreachable: {exc}") from exc
-        finally:
             connection.close()
+            self._connection = None
+            raise OctopusError(f"Octopus API unreachable: {exc}") from exc
+        if self._session_depth == 0:
+            connection.close()
+            self._connection = None
         if response.status in (401, 403):
             raise OctopusAuthError(f"Octopus refused the request (HTTP {response.status})")
         if response.status != 200:
@@ -353,6 +405,10 @@ class OctopusClient:
         raise AssertionError("unreachable")
 
     def discover_account_number(self) -> str:
+        with self._session():
+            return self._discover_account_number()
+
+    def _discover_account_number(self) -> str:
         data = self._query("query { viewer { accounts { number } } }")
         accounts = (data.get("viewer") or {}).get("accounts") or []
         numbers = [
@@ -371,6 +427,10 @@ class OctopusClient:
         return self.credentials.account_number
 
     def discover_device_id(self) -> str:
+        with self._session():
+            return self._discover_device_id()
+
+    def _discover_device_id(self) -> str:
         account = self.credentials.account_number or self.discover_account_number()
         data = self._query(
             f"query {{ devices(accountNumber: {json.dumps(account)}) "
@@ -398,6 +458,10 @@ class OctopusClient:
         return self.credentials.device_id
 
     def planned_dispatches(self) -> list[ChargeWindow]:
+        with self._session():
+            return self._planned_dispatches()
+
+    def _planned_dispatches(self) -> list[ChargeWindow]:
         device = self.credentials.device_id or self.discover_device_id()
         data = self._query(
             f"query {{ flexPlannedDispatches(deviceId: {json.dumps(device)}) "
@@ -442,15 +506,15 @@ class OctopusScheduleMonitor:
     interval_s: float = 180.0
     lead_time_s: float = 300.0
     clock: Callable[[], datetime] = _utc_now
+    # Replaced whole, never mutated: one attribute store is atomic, so the
+    # control loop reads it with no lock to contend for on every sample.
     _schedule: OctopusSchedule = field(default_factory=OctopusSchedule)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
     consecutive_failures: int = 0
 
     def snapshot(self) -> OctopusSchedule:
-        with self._lock:
-            return self._schedule
+        return self._schedule
 
     def refresh(self) -> OctopusSchedule:
         """Fetch once, synchronously. Raises only OctopusAuthError, which is a
@@ -476,8 +540,7 @@ class OctopusScheduleMonitor:
                 now,
                 None,
             )
-        with self._lock:
-            self._schedule = schedule
+        self._schedule = schedule
         return schedule
 
     def _delay_s(self) -> float:
@@ -490,8 +553,7 @@ class OctopusScheduleMonitor:
 
     def _publish_error(self, message: str) -> None:
         previous = self.snapshot()
-        with self._lock:
-            self._schedule = OctopusSchedule(previous.windows, previous.fetched_at, message)
+        self._schedule = OctopusSchedule(previous.windows, previous.fetched_at, message)
         self.consecutive_failures += 1
 
     def _run(self) -> None:

@@ -69,6 +69,32 @@ The account number, device ID and API key are checked against strict patterns
 before they are embedded in a query, which is what keeps a hostile credentials
 file from changing the query.
 
+## What it costs to run
+
+The poller runs unattended for weeks, and wakeups rather than CPU decide its
+power draw (see "Polling cadence" in `docs/architecture.md`), so this adds as
+few as it can:
+
+- **Network**: one HTTPS request per `--octopus-interval`, and a token renewal
+  about once an hour that shares that request's connection. The TLS context is
+  built once per run, not per connection. The connection is closed after each
+  refresh rather than kept for the next one, which the server would have
+  dropped by then, so a refresh never starts with a failed request.
+- **Per sample**: the control loop compares the monitor's snapshot by
+  identity and the clock against the next window boundary. The plan is
+  rescanned only when a refresh publishes a new snapshot or a lead-in or end
+  passes. The snapshot is replaced whole, so reading it takes no lock.
+- **Cadence**: a charge window does not hold the fast poll. An overnight slot
+  is hours of import with nothing to regulate, and the idle cadence applies
+  exactly as it would without Octopus. Export during a window leaves the idle
+  states on its first sample, and a sample at or over the ceiling is already
+  an emergency.
+- **Stream**: `octopus_schedule` is sent in the first sample and then only
+  when it changes, as the event log is, rather than on every sample. The app
+  carries it forward and parses the window times once, at decode. The settings
+  form reads the credentials file when it opens or its path changes, not on
+  every redraw.
+
 ## When the plan is wrong or unavailable
 
 Every rule below can only keep the band narrow for longer, never relax it
