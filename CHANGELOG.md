@@ -19,7 +19,7 @@ versioning](https://semver.org/spec/v2.0.0.html).
   the known plan, and a charge that has started is kept until its planned end
   even if Octopus drops it. The stream gains `octopus_schedule`,
   `ev_voltage_limits_active` and the effective band, and the menu-bar app shows
-  the active or next charge and gained a setting for it. See
+  the active or next charge and gained a setting and a sign-in form for it. See
   `docs/octopus-integration.md`.
 - Optional Hypervolt EV charger integration for dynamic voltage control.
   `--hypervolt-enable` adds a second, cloud-connected lever alongside the

@@ -434,9 +434,10 @@ solis-poll --host 192.168.1.57 --dynamic-voltage-control --dynamic-export-contro
   --octopus-enable
 ```
 
-`octopus-login` prompts for the API key from the Octopus dashboard (Personal
-details, API access), finds the account and the enrolled car or charger, and
-saves them at 0600 permissions. Octopus is only ever read: this never starts,
+The menu-bar app's settings have an Octopus sign-in form for the API key from
+the Octopus dashboard (Personal details, API access); from the CLI,
+`octopus-login` prompts for it. Either way it finds the account and the
+enrolled car or charger and saves them at 0600 permissions. Octopus is only ever read: this never starts,
 stops or reschedules a charge. The plan, the next charge and whether the band
 is being held appear in the menu-bar app and in the stream. Details and
 failure handling are in [docs/octopus-integration.md](docs/octopus-integration.md).

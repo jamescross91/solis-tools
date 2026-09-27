@@ -4,7 +4,10 @@
     octopus-login --credentials ~/.local/state/solis-tools/octopus.json
 
 Installed as the `octopus-login` command by Homebrew, and runnable directly as
-`python3 octopus_login.py` from a source checkout. The API key is on the
+`python3 octopus_login.py` from a source checkout. The SolisMenuBar app's
+Octopus sign-in form drives this exact command as a subprocess, piping the key
+to its stdin; its first stdout line and its `error: ` stderr lines are what
+that form shows, so keep their prefixes. The API key is on the
 Octopus dashboard under Personal details, API access. It is read from a prompt
 (never a command-line argument, so it stays out of shell history and process
 listings), checked against Octopus, and saved with the account number and

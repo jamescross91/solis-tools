@@ -46,12 +46,16 @@ struct DashboardView: View {
     @AppStorage("octopusCredentialsPath") private var octopusCredentialsPath = ""
 
     @StateObject private var hypervoltLogin = HypervoltLoginRunner()
+    @StateObject private var octopusLogin = OctopusLoginRunner()
 
     @State private var showingSettings = false
     @State private var selectedMetric: HistoryMetric = .house
     @State private var hypervoltEmail = ""
     @State private var hypervoltPassword = ""
     @State private var octopusAccountNumber: String?
+    @State private var octopusAPIKey = ""
+    @State private var octopusAccountField = ""
+    @State private var octopusDeviceField = ""
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -547,26 +551,8 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
             }
             .disabled(!dynamicVoltageEnabled || !octopusEnabled)
-            Group {
-                if let account = octopusAccountNumber {
-                    Label("Signed in to Octopus account \(account)", systemImage: "checkmark.circle")
-                        .foregroundStyle(.green)
-                } else {
-                    Label(
-                        "Not signed in: run octopus-login --credentials \"\(octopusCredentialsResolvedPath)\" "
-                            + "in Terminal once and paste your API key",
-                        systemImage: "person.crop.circle.badge.questionmark"
-                    )
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                }
-            }
-            .font(.caption)
-            // Read the file when settings open or the path changes, not on
-            // every redraw of the settings form.
-            .task(id: octopusCredentialsResolvedPath) {
-                octopusAccountNumber = Self.octopusAccount(at: octopusCredentialsResolvedPath)
-            }
+            octopusSignIn
+                .disabled(!dynamicVoltageEnabled || !octopusEnabled)
             Text(
                 "From five minutes before each planned charge until it ends, voltage is held inside "
                     + "Hypervolt's 207–253 V trip limits; the normal limits return afterwards."
@@ -613,6 +599,83 @@ struct DashboardView: View {
     private var octopusCredentialsResolvedPath: String {
         octopusCredentialsPath.isEmpty
             ? MonitorConfiguration.defaultOctopusCredentialsPath : octopusCredentialsPath
+    }
+
+    @ViewBuilder
+    private var octopusSignIn: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let account = octopusAccountNumber {
+                Label("Signed in to Octopus account \(account)", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Label("Not signed in to Octopus yet", systemImage: "person.crop.circle.badge.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            SecureField("Octopus API key (sk_live_…)", text: $octopusAPIKey)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                TextField("Account number (optional)", text: $octopusAccountField)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("Device ID (optional)", text: $octopusDeviceField)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            }
+            HStack(spacing: 8) {
+                Button("Sign in to Octopus") {
+                    signInToOctopus()
+                }
+                .disabled(
+                    octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || octopusLogin.outcome == .running
+                )
+                if octopusLogin.outcome == .running {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+                if let apiAccess = URL(
+                    string: "https://octopus.energy/dashboard/new/accounts/personal-details/api-access"
+                ) {
+                    Link("Find your API key", destination: apiAccess)
+                        .font(.caption)
+                }
+            }
+            if case let .succeeded(message) = octopusLogin.outcome {
+                Label(message, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if case let .failed(message) = octopusLogin.outcome {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Text(
+                "The account and your car or charger are found automatically; fill in the account "
+                    + "number or device ID only if Octopus reports more than one. The key is checked "
+                    + "with Octopus and saved only to the credentials file above, at owner-only "
+                    + "permissions; this app never stores it."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        // Read the file when settings open, the path changes or a sign-in
+        // completes, not on every redraw of the settings form.
+        .task(id: "\(octopusCredentialsResolvedPath)#\(octopusLogin.completedSignIns)") {
+            octopusAccountNumber = Self.octopusAccount(at: octopusCredentialsResolvedPath)
+        }
+    }
+
+    private func signInToOctopus() {
+        octopusLogin.signIn(
+            apiKey: octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines),
+            accountNumber: octopusAccountField.trimmingCharacters(in: .whitespacesAndNewlines),
+            deviceID: octopusDeviceField.trimmingCharacters(in: .whitespacesAndNewlines),
+            credentialsPath: octopusCredentialsResolvedPath
+        )
+        octopusAPIKey = ""
     }
 
     private static func octopusAccount(at path: String) -> String? {

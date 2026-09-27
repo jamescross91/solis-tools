@@ -260,6 +260,36 @@ class LoginTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(OctopusCredentials.load(path).device_id, fake.devices[0])
 
+    def test_several_devices_are_listed_then_one_is_chosen(self):
+        """The menu-bar form shows the stderr line and offers the device field;
+        filling it in passes --device and succeeds."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            FakeOctopusApi(devices=("car-1", "charger-2")) as fake,
+        ):
+            path = Path(directory) / "octopus.json"
+            listed = self.run_login(fake, path, FAKE_API_KEY)
+            self.assertEqual(listed.returncode, 1)
+            self.assertIn("car-1", listed.stderr)
+            self.assertIn("charger-2", listed.stderr)
+            self.assertFalse(path.exists())
+
+            chosen = self.run_login(fake, path, FAKE_API_KEY, "--device", "charger-2")
+            self.assertEqual(chosen.returncode, 0, chosen.stderr)
+            self.assertEqual(OctopusCredentials.load(path).device_id, "charger-2")
+
+    def test_output_matches_what_the_menu_bar_parses(self):
+        """OctopusLoginRunner.swift keys on these exact prefixes."""
+        with tempfile.TemporaryDirectory() as directory, FakeOctopusApi() as fake:
+            path = Path(directory) / "octopus.json"
+            good = self.run_login(fake, path, FAKE_API_KEY)
+            fake.refuse_key = True
+            bad = self.run_login(fake, path, FAKE_API_KEY)
+        self.assertTrue(good.stdout.splitlines()[0].startswith("Saved Octopus credentials"))
+        self.assertTrue(
+            any(line.startswith("error: ") for line in bad.stderr.splitlines()), bad.stderr
+        )
+
     def test_a_refused_key_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory, FakeOctopusApi() as fake:
             fake.refuse_key = True

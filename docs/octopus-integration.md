@@ -126,8 +126,9 @@ never logged, streamed or passed on a command line.
 `getpass`, which also accepts it on a piped stdin, checks it against Octopus,
 discovers the account and device, reads the plan once to prove the whole path
 works, and only then writes the file. With more than one account or device it
-lists them and asks for `--account` or `--device`. Re-running it replaces the
-file, which is how to recover from a regenerated key.
+lists them and asks for `--account` or `--device` (the optional fields in the
+app's form). Re-running it replaces the file, which is how to recover from a
+regenerated key.
 
 ## Stream and menu bar
 
@@ -139,8 +140,13 @@ are additive, so `schema_version` is unchanged; see `docs/stream-contract.md`.
 Window start and end produce events in the control log.
 
 The menu-bar app shows the active or next charge and, while it applies, the
-band being held. Its settings have an enable toggle and a credentials path; it
-has no sign-in form yet and shows the `octopus-login` command to run once.
+band being held. Its settings have an enable toggle, a credentials path and a
+sign-in form: an API-key field, optional account-number and device-ID fields
+for accounts with more than one, and a link to the Octopus API-access page.
+`OctopusLoginRunner.swift` runs `octopus-login` as a subprocess with the key
+on its stdin, exactly as `HypervoltLoginRunner.swift` does for Hypervolt, and
+reports the command's own success or `error: ` line. The key field is cleared
+as soon as the command starts; the app never stores the key.
 
 ## Testing without an Octopus account
 
