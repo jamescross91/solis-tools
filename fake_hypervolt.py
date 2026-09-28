@@ -289,22 +289,10 @@ class FakeHypervoltCloud:
             # A newly connected session socket must see the current state
             # without waiting for the next change, the same way the sync
             # socket answers sync.snapshot; unlike the sync socket, the
-            # session socket is push-only, so this is sent unprompted.
+            # session socket is push-only, so this is sent unprompted, as the
+            # same flat object the real service pushes on every change.
             try:
-                _send_ws_frame(
-                    connection,
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": "initial",
-                            "result": [
-                                {"charging": initial_session_state["charging"]},
-                                {"true_milli_amps": initial_session_state["true_milli_amps"]},
-                                {"watt_hours": initial_session_state["watt_hours"]},
-                            ],
-                        }
-                    ),
-                )
+                _send_ws_frame(connection, json.dumps(initial_session_state))
             except OSError:
                 pass
         try:
@@ -367,8 +355,14 @@ class FakeHypervoltCloud:
     def _broadcast_sync_state(self) -> None:
         with self._lock:
             connections = list(self._sync_conns)
+            # A server-initiated change arrives as a JSON-RPC notification
+            # with the fields in `params`, not as a `result` reply.
             message = json.dumps(
-                {"jsonrpc": "2.0", "id": "push", "result": [{"max_current": self.max_current_ma}]}
+                {
+                    "jsonrpc": "2.0",
+                    "method": "sync.apply",
+                    "params": {"max_current": self.max_current_ma},
+                }
             )
         for connection in connections:
             try:
@@ -379,15 +373,14 @@ class FakeHypervoltCloud:
     def _broadcast_session_state(self) -> None:
         with self._lock:
             connections = list(self._session_conns)
+            # The session socket sends bare objects, with no JSON-RPC envelope.
             message = json.dumps(
                 {
-                    "jsonrpc": "2.0",
-                    "id": "push",
-                    "result": [
-                        {"charging": self.charging},
-                        {"true_milli_amps": self.true_milli_amps},
-                        {"watt_hours": self.watt_hours},
-                    ],
+                    "charging": self.charging,
+                    "session": 1,
+                    "milli_amps": self.max_current_ma,
+                    "true_milli_amps": self.true_milli_amps,
+                    "watt_hours": self.watt_hours,
                 }
             )
         for connection in connections:

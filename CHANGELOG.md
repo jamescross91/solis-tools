@@ -5,7 +5,31 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Battery priority no longer trims the car's charging current while the home
+  battery is idle or discharging. Priority now only decides between two loads
+  that are both charging from the grid; with the battery not grid charging a
+  voltage reduction falls on the Solis import ceiling as it would without
+  Hypervolt, and only an emergency may still cut the car. Trimming unused
+  Solis import allowance down to measured demand never touches the car, and a
+  car trimmed earlier is stepped back to its maximum once the battery stops
+  grid charging and the voltage is clear.
+- The live Hypervolt charging rate is read again. The client only understood
+  `result` replies, so the session socket's bare state objects and the sync
+  socket's `params` pushes were dropped, leaving the charging flag and
+  measured current unknown. The stream's `hypervolt_actuator` gains
+  `measured_current_a`, `charging_power_kw`, `session_energy_kwh` and
+  `telemetry_age_s`, and the menu-bar app shows an EV charger card with the
+  rate the car is drawing, its current limit and the session energy.
+
 ### Added
+
+- The menu-bar app shows an Intelligent Octopus card outside the diagnostics:
+  when the next charging slot is, the voltage band it narrows from and to,
+  when that starts (the lead-in) and when it reverts. `octopus_schedule`
+  gains `normal_minimum_voltage_v`, `normal_maximum_voltage_v`,
+  `charge_minimum_voltage_v` and `charge_maximum_voltage_v`.
 
 - Hold the supply voltage inside the EV charger's limits during Intelligent
   Octopus planned charges. `--octopus-enable` reads the charge plan Octopus

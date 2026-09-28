@@ -471,29 +471,49 @@ class HypervoltClient:
         envelope = {"id": str(int(time.time() * 1_000_000)), **message}
         ws.send_text(json.dumps(envelope))
 
+    @staticmethod
+    def _updates(message: Any) -> list[dict[str, Any]]:
+        """Every field group a message carries, whichever envelope it uses.
+
+        The same fields arrive in three shapes: a `result` list answering
+        sync.snapshot, a server-initiated `params` push (a dict or a list of
+        dicts) when the charger changes, and the session socket's flat objects
+        with the fields at the top level. Reading only the first shape left a
+        real charger's live current and charging flag at None, so the dashboard
+        showed no charging rate and the controller saw a car that never
+        charged.
+        """
+        if not isinstance(message, dict):
+            return []
+        groups: list[dict[str, Any]] = [message]
+        for key in ("result", "params"):
+            value = message.get(key)
+            if isinstance(value, dict):
+                groups.append(value)
+            elif isinstance(value, list):
+                groups.extend(item for item in value if isinstance(item, dict))
+        return groups
+
     def _apply_message(self, text: str) -> None:
         try:
             message = json.loads(text)
         except json.JSONDecodeError:
             return
-        result = message.get("result") if isinstance(message, dict) else None
-        if not isinstance(result, list):
-            return
         applied = False
-        for update in result:
-            if not isinstance(update, dict):
-                continue
-            if "max_current" in update:
-                self.state.max_current_ma = update["max_current"]
+        for update in self._updates(message):
+            # A malformed value is ignored rather than stored, so a vendor
+            # change cannot put a string where the controller does arithmetic.
+            if isinstance(update.get("max_current"), (int, float)):
+                self.state.max_current_ma = round(update["max_current"])
                 applied = True
-            if "charging" in update:
+            if isinstance(update.get("charging"), bool):
                 self.state.charging = update["charging"]
                 applied = True
-            if "true_milli_amps" in update:
-                self.state.true_milli_amps = update["true_milli_amps"]
+            if isinstance(update.get("true_milli_amps"), (int, float)):
+                self.state.true_milli_amps = max(0, round(update["true_milli_amps"]))
                 applied = True
-            if "watt_hours" in update:
-                self.state.watt_hours = update["watt_hours"]
+            if isinstance(update.get("watt_hours"), (int, float)):
+                self.state.watt_hours = max(0, round(update["watt_hours"]))
                 applied = True
         if applied:
             self.state.updated_monotonic = time.monotonic()

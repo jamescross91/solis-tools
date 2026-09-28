@@ -174,7 +174,9 @@ final class StreamContractTests: XCTestCase {
                 }],
                 "lead_time_s": 300.0,
                 "fetched_at": "2026-09-27T23:28:00+01:00",
-                "last_error": null
+                "last_error": null,
+                "normal_minimum_voltage_v": 215.0, "normal_maximum_voltage_v": 258.0,
+                "charge_minimum_voltage_v": 215.0, "charge_maximum_voltage_v": 253.0
               }
             }
             """
@@ -194,6 +196,9 @@ final class StreamContractTests: XCTestCase {
         XCTAssertEqual(schedule.plannedWindows.count, 1)
         XCTAssertEqual(schedule.leadTimeS, 300)
         XCTAssertNil(schedule.lastError)
+        XCTAssertEqual(schedule.normalMaximumVoltageV, 258.0)
+        XCTAssertEqual(schedule.chargeMaximumVoltageV, 253.0)
+        XCTAssertEqual(schedule.chargeMinimumVoltageV, 215.0)
     }
 
     func testHypervoltDiagnosticsDecode() throws {
@@ -220,7 +225,9 @@ final class StreamContractTests: XCTestCase {
               "hypervolt_actuator": {
                 "connected": true, "commanded_current_a": 22.5,
                 "minimum_current_a": 6.0, "maximum_current_a": 32.0,
-                "total_write_count": 3, "last_error": null
+                "total_write_count": 3, "last_error": null,
+                "measured_current_a": 21.8, "charging_power_kw": 4.717,
+                "session_energy_kwh": 6.4, "telemetry_age_s": 1.2
               }
             }
             """
@@ -235,6 +242,76 @@ final class StreamContractTests: XCTestCase {
         XCTAssertEqual(hypervolt.maximumCurrentA, 32.0)
         XCTAssertEqual(hypervolt.totalWriteCount, 3)
         XCTAssertNil(hypervolt.lastError)
+        XCTAssertEqual(hypervolt.measuredCurrentA, 21.8)
+        XCTAssertEqual(hypervolt.chargingPowerKw, 4.717)
+        XCTAssertEqual(hypervolt.sessionEnergyKwh, 6.4)
+        XCTAssertEqual(hypervolt.telemetryAgeS, 1.2)
+    }
+
+    private func schedule(_ json: String) throws -> OctopusScheduleDetails {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(OctopusScheduleDetails.self, from: Data(json.utf8))
+    }
+
+    /// The dashboard says when the next slot is, what the band becomes and
+    /// what it returns to, before the slot starts.
+    func testOctopusSummaryDescribesTheNextSlotAndTheRevert() throws {
+        let plan = try schedule(
+            """
+            {
+              "charge_window_active": false, "active_window": null,
+              "next_window": {
+                "start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T05:30:00+01:00",
+                "kind": "SMART"
+              },
+              "planned_windows": [
+                {"start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T05:30:00+01:00", "kind": "SMART"},
+                {"start": "2026-09-28T23:30:00+01:00", "end": "2026-09-29T01:00:00+01:00", "kind": "SMART"}
+              ],
+              "lead_time_s": 300.0, "fetched_at": null, "last_error": null,
+              "normal_minimum_voltage_v": 215.0, "normal_maximum_voltage_v": 258.0,
+              "charge_minimum_voltage_v": 215.0, "charge_maximum_voltage_v": 253.0
+            }
+            """
+        )
+        let start = try XCTUnwrap(plan.nextWindow?.startDate)
+        XCTAssertEqual(plan.nextLeadInDate, start.addingTimeInterval(-300))
+        let lines = plan.summaryLines(now: start.addingTimeInterval(-3_600))
+        XCTAssertTrue(lines[0].hasPrefix("Next charging slot: "))
+        XCTAssertTrue(lines[1].contains("narrows from 215–258 V to 215–253 V"), lines[1])
+        XCTAssertTrue(lines[2].hasPrefix("It reverts to 215–258 V at "), lines[2])
+        XCTAssertEqual(lines.last, "1 more slot planned after that.")
+    }
+
+    func testOctopusSummaryWithoutBandsFromAnOlderPoller() throws {
+        let plan = try schedule(
+            """
+            {
+              "charge_window_active": false, "active_window": null, "next_window": null,
+              "planned_windows": [], "lead_time_s": 300.0,
+              "fetched_at": null, "last_error": null
+            }
+            """
+        )
+        XCTAssertNil(plan.normalMaximumVoltageV)
+        XCTAssertEqual(plan.summaryLines(now: Date()), ["No charging slot planned."])
+    }
+
+    /// A poller from before the live charging figures still decodes.
+    func testHypervoltDiagnosticsWithoutLiveFiguresDecode() throws {
+        let json = """
+            {
+              "connected": true, "commanded_current_a": 32.0,
+              "minimum_current_a": 6.0, "maximum_current_a": 32.0,
+              "total_write_count": 0, "last_error": null
+            }
+            """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let hypervolt = try decoder.decode(HypervoltActuatorDetails.self, from: Data(json.utf8))
+        XCTAssertNil(hypervolt.measuredCurrentA)
+        XCTAssertNil(hypervolt.chargingPowerKw)
     }
 
     /// Between changes the poller leaves out the event log and, after the

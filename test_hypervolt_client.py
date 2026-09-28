@@ -205,6 +205,36 @@ class TelemetryAndControlTests(unittest.TestCase):
                     client.poll()
                     time.sleep(0.05)
 
+    def test_every_real_message_shape_updates_the_state(self):
+        # The live charging rate went missing because only `result` replies
+        # were read: the session socket's bare objects and the sync socket's
+        # `params` notifications were dropped without a trace.
+        client = HypervoltClient(HypervoltCredentials(refresh_token="unused"))
+        client._apply_message('{"id": "1", "result": [{"max_current": 16000}]}')
+        self.assertEqual(client.state.max_current_ma, 16000)
+        client._apply_message(
+            '{"jsonrpc": "2.0", "method": "sync.apply", "params": {"max_current": 24000}}'
+        )
+        self.assertEqual(client.state.max_current_ma, 24000)
+        client._apply_message('{"method": "sync.apply", "params": [{"max_current": 20000}]}')
+        self.assertEqual(client.state.max_current_ma, 20000)
+        client._apply_message(
+            '{"charging": true, "session": 7, "true_milli_amps": 15800, "watt_hours": 1200}'
+        )
+        self.assertTrue(client.state.charging)
+        self.assertEqual(client.state.true_milli_amps, 15800)
+        self.assertEqual(client.state.watt_hours, 1200)
+        self.assertIsNotNone(client.state.updated_monotonic)
+
+    def test_malformed_values_are_ignored_rather_than_stored(self):
+        client = HypervoltClient(HypervoltCredentials(refresh_token="unused"))
+        client._apply_message('{"charging": "yes", "true_milli_amps": "lots"}')
+        client._apply_message("not json")
+        client._apply_message("[1, 2, 3]")
+        self.assertIsNone(client.state.charging)
+        self.assertIsNone(client.state.true_milli_amps)
+        self.assertIsNone(client.state.updated_monotonic)
+
     def test_poll_before_connect_fails_closed_rather_than_crashing_oddly(self):
         with FakeHypervoltCloud() as fake:
             client = make_client(fake)

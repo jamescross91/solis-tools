@@ -69,7 +69,10 @@ struct DashboardView: View {
                         settings
                     } else if let sample = monitor.latest {
                         status(sample)
-                        metrics(sample.reading)
+                        metrics(sample.reading, control: sample.voltageControl)
+                        if let schedule = sample.voltageControl?.octopusSchedule {
+                            octopusPlan(schedule)
+                        }
                         if let control = sample.voltageControl {
                             voltageControlStatus(control, reading: sample.reading)
                             VoltageControlChartView(
@@ -152,7 +155,7 @@ struct DashboardView: View {
         }
     }
 
-    private func metrics(_ reading: InverterReading) -> some View {
+    private func metrics(_ reading: InverterReading, control: VoltageControlDetails?) -> some View {
         LazyVGrid(columns: columns, spacing: 10) {
             MetricCard(
                 title: "House load",
@@ -194,7 +197,75 @@ struct DashboardView: View {
                     colour: .green
                 )
             }
+            if let control, let charger = control.hypervoltActuator {
+                MetricCard(
+                    title: "EV charger",
+                    value: Self.evValue(charger, charging: control.evCharging == true),
+                    detail: Self.evDetail(charger, charging: control.evCharging == true),
+                    symbol: "bolt.car.fill",
+                    colour: control.evCharging == true ? .blue : .gray
+                )
+            }
         }
+    }
+
+    /// The charging rate the car is actually drawing. The commanded current
+    /// is only a cap, so it belongs in the detail line, not the headline.
+    private static func evValue(_ charger: HypervoltActuatorDetails, charging: Bool) -> String {
+        guard charger.connected else { return "Offline" }
+        guard charging else { return "Not charging" }
+        if let power = charger.chargingPowerKw {
+            return String(format: "%.2f kW", power)
+        }
+        if let current = charger.measuredCurrentA {
+            return String(format: "%.1f A", current)
+        }
+        return "Charging"
+    }
+
+    private static func evDetail(_ charger: HypervoltActuatorDetails, charging: Bool) -> String {
+        let limit = String(format: "limit %.0f A", charger.commandedCurrentA)
+        if let age = charger.telemetryAgeS, age > 30 {
+            return String(format: "No update for %.0f s · %@", age, limit)
+        }
+        guard charging else { return String(format: "Limit %.0f A", charger.commandedCurrentA) }
+        var parts: [String] = []
+        if let current = charger.measuredCurrentA {
+            parts.append(String(format: "%.1f A", current))
+        }
+        parts.append(limit)
+        if let energy = charger.sessionEnergyKwh {
+            parts.append(String(format: "%.1f kWh", energy))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// When the next Octopus slot is, what it does to the voltage band, and
+    /// when the band goes back, outside the collapsed diagnostics.
+    private func octopusPlan(_ schedule: OctopusScheduleDetails) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Intelligent Octopus", systemImage: "calendar.badge.clock")
+                    .font(.headline)
+                Spacer()
+                Text(schedule.chargeWindowActive ? "Charge slot active" : "Waiting")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(schedule.chargeWindowActive ? .green : .secondary)
+            }
+            ForEach(schedule.summaryLines(now: Date()), id: \.self) { line in
+                Text(line)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            if let error = schedule.lastError {
+                Text("Octopus: \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10)
+        .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func voltageControlStatus(
@@ -278,17 +349,10 @@ struct DashboardView: View {
                         )
                     }
                     if let hypervolt = control.hypervoltActuator {
-                        Text(
-                            "EV charging: \(control.evCharging == true ? "yes" : "no")"
-                                + " · protecting \(evPriorityLabel(control.evPriority))"
-                                + String(format: " · %.1f A", hypervolt.commandedCurrentA)
-                        )
+                        Text(evDiagnosticsLine(control, hypervolt))
                         if let error = hypervolt.lastError {
                             Text(error).foregroundStyle(.orange)
                         }
-                    }
-                    if let schedule = control.octopusSchedule {
-                        octopusStatus(schedule)
                     }
                     if control.evVoltageLimitsActive == true,
                         let minimum = control.effectiveMinimumVoltageV,
@@ -328,18 +392,20 @@ struct DashboardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private func octopusStatus(_ schedule: OctopusScheduleDetails) -> some View {
-        if let active = schedule.activeWindow {
-            Text("Octopus charge: now, \(active.label)")
-        } else if let next = schedule.nextWindow {
-            Text("Octopus charge: next \(next.label)")
-        } else {
-            Text("Octopus charge: none planned")
+    private func evDiagnosticsLine(
+        _ control: VoltageControlDetails,
+        _ hypervolt: HypervoltActuatorDetails
+    ) -> String {
+        // Built in steps: one concatenated expression was too slow for the
+        // Swift type checker and failed the build.
+        var parts: [String] = []
+        parts.append("EV charging: " + (control.evCharging == true ? "yes" : "no"))
+        parts.append("protecting " + evPriorityLabel(control.evPriority))
+        if let drawn = hypervolt.measuredCurrentA {
+            parts.append(String(format: "%.1f A drawn", drawn))
         }
-        if let error = schedule.lastError {
-            Text("Octopus: \(error)").foregroundStyle(.orange)
-        }
+        parts.append(String(format: "%.1f A limit", hypervolt.commandedCurrentA))
+        return parts.joined(separator: " · ")
     }
 
     private func evPriorityLabel(_ priority: String?) -> String {

@@ -139,8 +139,11 @@ window, the last successful refresh and the last error;
 are additive, so `schema_version` is unchanged; see `docs/stream-contract.md`.
 Window start and end produce events in the control log.
 
-The menu-bar app shows the active or next charge and, while it applies, the
-band being held. Its settings have an enable toggle, a credentials path and a
+The menu-bar app shows an Intelligent Octopus card, outside the collapsed
+diagnostics: when the next slot is, the band it narrows from and to, when the
+lead-in starts, and when the band reverts. During a slot it shows the band
+being held, what it replaces and when it returns. The band values come from
+`octopus_schedule` itself, so the card can describe a charge before it starts. Its settings have an enable toggle, a credentials path and a
 sign-in form: an API-key field, optional account-number and device-ID fields
 for accounts with more than one, and a link to the Octopus API-access page.
 `OctopusLoginRunner.swift` runs `octopus-login` as a subprocess with the key
