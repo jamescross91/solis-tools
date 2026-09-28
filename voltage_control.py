@@ -312,6 +312,10 @@ class ControlDecision:
     filtered_voltage_v: float | None
     reason: str
     emergency: bool = False
+    # True when the reduction only trims import allowance nobody is using
+    # down to measured demand. It is bookkeeping for the Solis register, not
+    # a response to voltage, so it must never cost the car any current.
+    allowance_trim: bool = False
 
     def stream_dict(self) -> dict[str, Any]:
         return {
@@ -811,6 +815,7 @@ class DynamicVoltageController:
                 filtered,
                 f"trimming unused allowance to {c.import_headroom_w / 1_000:g} kW "
                 "above measured import",
+                allowance_trim=True,
             )
         if filtered > import_target_v + c.deadband_v:
             if sample.age_s > c.fresh_age_s:

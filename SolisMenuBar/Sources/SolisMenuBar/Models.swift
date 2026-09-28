@@ -147,6 +147,81 @@ struct OctopusScheduleDetails: Decodable, Sendable {
     let leadTimeS: Double
     let fetchedAt: String?
     let lastError: String?
+    /// The band held outside a charge and the band held during one, so the
+    /// dashboard can say what a planned charge changes and what it returns
+    /// to. Nil from a poller that predates them.
+    let normalMinimumVoltageV: Double?
+    let normalMaximumVoltageV: Double?
+    let chargeMinimumVoltageV: Double?
+    let chargeMaximumVoltageV: Double?
+
+    /// When the tighter band starts: the lead-in before the next charge.
+    var nextLeadInDate: Date? {
+        nextWindow?.startDate.map { $0.addingTimeInterval(-leadTimeS) }
+    }
+}
+
+extension OctopusScheduleDetails {
+    /// Plain-language lines for the dashboard: when the next slot is, what it
+    /// does to the voltage band and when the band goes back.
+    func summaryLines(now: Date) -> [String] {
+        let normal = Self.band(normalMinimumVoltageV, normalMaximumVoltageV)
+        let charge = Self.band(chargeMinimumVoltageV, chargeMaximumVoltageV)
+        let unchanged = normal != nil && normal == charge
+        var lines: [String] = []
+        if let active = activeWindow {
+            if let start = active.startDate, start > now {
+                lines.append("Charging slot starts at \(Self.clock(start, now: now)): \(active.label)")
+            } else {
+                lines.append("Charging slot now: \(active.label)")
+            }
+            if let normal, let charge, !unchanged {
+                lines.append("Voltage band held at \(charge) for the charger, instead of \(normal).")
+            }
+            if let end = active.endDate {
+                lines.append(
+                    "Returns to \(normal ?? "the normal band") at \(Self.clock(end, now: now)) when the slot ends."
+                )
+            }
+        } else if let next = nextWindow {
+            lines.append("Next charging slot: \(next.label)")
+            if let normal, let charge, !unchanged {
+                let from = nextLeadInDate.map { "From \(Self.clock($0, now: now))" } ?? "During it"
+                lines.append("\(from) the voltage band narrows from \(normal) to \(charge).")
+            }
+            if let end = next.endDate {
+                lines.append(
+                    "It reverts to \(normal ?? "the normal band") at \(Self.clock(end, now: now)) when the slot ends."
+                )
+            }
+        } else {
+            lines.append("No charging slot planned.")
+        }
+        if unchanged {
+            lines.append("The charger's limits already sit inside the normal band, so nothing changes.")
+        }
+        // The first planned window is the one described above.
+        let later = plannedWindows.count - 1
+        if later > 0 {
+            lines.append("\(later) more slot\(later == 1 ? "" : "s") planned after that.")
+        }
+        return lines
+    }
+
+    private static func band(_ minimum: Double?, _ maximum: Double?) -> String? {
+        guard let minimum, let maximum else { return nil }
+        return "\(Self.volts(minimum))–\(Self.volts(maximum)) V"
+    }
+
+    private static func volts(_ value: Double) -> String {
+        value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.1f", value)
+    }
+
+    private static func clock(_ date: Date, now: Date) -> String {
+        let time = date.formatted(date: .omitted, time: .shortened)
+        guard !Calendar.current.isDate(date, inSameDayAs: now) else { return time }
+        return date.formatted(.dateTime.weekday(.abbreviated)) + " " + time
+    }
 }
 
 /// Diagnostics for the Hypervolt current actuator. Deliberately not
@@ -160,6 +235,12 @@ struct HypervoltActuatorDetails: Decodable, Sendable {
     let maximumCurrentA: Double
     let totalWriteCount: Int
     let lastError: String?
+    /// What the car is actually drawing, as distinct from the commanded cap.
+    /// Nil from a poller that predates them, or before the charger reports.
+    let measuredCurrentA: Double?
+    let chargingPowerKw: Double?
+    let sessionEnergyKwh: Double?
+    let telemetryAgeS: Double?
 }
 
 struct VoltageControlDailySummary: Decodable, Sendable {

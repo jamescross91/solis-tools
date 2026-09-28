@@ -896,14 +896,33 @@ class HypervoltCurrentActuator:
         diagnostics(), even though no write was attempted."""
         self.last_error = message
 
-    def diagnostics(self) -> dict[str, Any]:
+    def diagnostics(self, now: float, voltage_v: float | None) -> dict[str, Any]:
+        # The commanded current is only a cap; what the car actually draws is
+        # the session socket's measured current. Both are streamed so the
+        # dashboard can show the charging rate rather than the limit.
+        state = self.client.state
+        measured_a = state.true_milli_amps / 1000 if state.true_milli_amps is not None else None
         return {
-            "connected": self.client.state.connected,
+            "connected": state.connected,
             "commanded_current_a": (self.commanded_ma or 0) / 1000,
             "minimum_current_a": self.minimum_ma / 1000,
             "maximum_current_a": self.maximum_ma / 1000,
             "total_write_count": self.total_write_count,
             "last_error": self.last_error,
+            "measured_current_a": measured_a,
+            "charging_power_kw": (
+                round(measured_a * voltage_v / 1000, 3)
+                if measured_a is not None and voltage_v is not None
+                else None
+            ),
+            "session_energy_kwh": (
+                state.watt_hours / 1000 if state.watt_hours is not None else None
+            ),
+            "telemetry_age_s": (
+                round(max(0.0, now - state.updated_monotonic), 1)
+                if state.updated_monotonic is not None
+                else None
+            ),
         }
 
 
@@ -1503,6 +1522,8 @@ class VoltageControlRuntime:
             in (ControlAction.REDUCING, ControlAction.EMERGENCY, ControlAction.INCREASING)
         ):
             decision = self._allocate_ev_priority(decision, sample, now)
+        elif self.hypervolt_actuator is not None and ev_charging:
+            decision = self._restore_ev_current(decision, sample, now)
         regulating_states = {
             VoltageControlState.IMPORT_REGULATING,
             VoltageControlState.EXPORT_REGULATING,
@@ -1645,6 +1666,19 @@ class VoltageControlRuntime:
         ev_ma = self.hypervolt_actuator.commanded_ma
         if ev_ma is None or decision.desired_limit_w is None:
             return decision  # no confirmed Hypervolt state yet; do not guess
+        if decision.allowance_trim:
+            return decision
+        priority = self.configuration.ev_priority
+        if sample.battery_status != "Charging":
+            # Priority settles a contest between two loads charging from the
+            # grid. With the battery idle or discharging there is no contest:
+            # battery priority used to hand every reduction to the car anyway,
+            # trimming it for nothing. Only an emergency may still cut the car,
+            # because it is then the one load whose current moves the voltage,
+            # and a restore goes back to the car first for the same reason.
+            if decision.action == ControlAction.REDUCING:
+                return decision
+            priority = "battery"
         battery_w = self.import_actuator.commanded_w
         delta_w = decision.desired_limit_w - battery_w
         if delta_w == 0:
@@ -1659,7 +1693,7 @@ class VoltageControlRuntime:
             ev_w=ev_w,
             ev_min_w=round(self.hypervolt_actuator.minimum_ma / 1000 * voltage_v),
             ev_max_w=round(self.hypervolt_actuator.maximum_ma / 1000 * voltage_v),
-            priority=self.configuration.ev_priority,
+            priority=priority,
         )
         if new_ev_w == ev_w:
             return replace(decision, desired_limit_w=new_battery_w)
@@ -1675,6 +1709,50 @@ class VoltageControlRuntime:
             desired_limit_w=new_battery_w,
             reason=f"{decision.reason}; EV current adjusted towards {new_ev_w / 1_000:.2f} kW",
         )
+
+    def _restore_ev_current(
+        self, decision: ControlDecision, sample: GridTelemetrySample, now: float
+    ) -> ControlDecision:
+        """Step a trimmed car back towards its maximum while nothing competes
+        for the supply: the battery is not charging from the grid and the
+        voltage is clear of the import target.
+
+        The controller only restores through the Solis import ceiling, which
+        stops at measured demand, so a car trimmed earlier stayed trimmed for
+        the rest of its session once the battery stopped charging.
+        """
+        assert self.hypervolt_actuator is not None
+        c = self.configuration
+        ev_ma = self.hypervolt_actuator.commanded_ma
+        filtered = decision.filtered_voltage_v
+        if (
+            ev_ma is None
+            or ev_ma >= self.hypervolt_actuator.maximum_ma
+            or filtered is None
+            or decision.emergency
+            or decision.action in (ControlAction.REDUCING, ControlAction.SUSPENDED)
+            or sample.battery_status == "Charging"
+            or sample.age_s > c.fresh_age_s
+            or now < self.controller.settle_until
+            or filtered <= self.controller.voltage_bounds_v[0] + c.safety_margin_v + c.deadband_v
+        ):
+            return decision
+        step_ma = round(c.increase_step_w / sample.raw_voltage_v * 1000)
+        target_ma = min(self.hypervolt_actuator.maximum_ma, ev_ma + step_ma)
+        try:
+            written, _ = self.hypervolt_actuator.command_ma(target_ma, now)
+        except HypervoltError:
+            return decision
+        if not written:
+            return decision
+        battery_w = self.import_actuator.commanded_w
+        self.controller.command_applied("import", battery_w, battery_w, sample.raw_voltage_v, now)
+        message = (
+            f"EV current restored towards {target_ma / 1000:g} A; "
+            "the battery is not charging from the grid"
+        )
+        self._event(decision, sample.grid_kw, None, None, message)
+        return replace(decision, reason=f"{decision.reason}; {message}")
 
     def communication_unavailable(self) -> None:
         decision = self.controller.communication_unavailable()
@@ -1751,7 +1829,9 @@ class VoltageControlRuntime:
                     else None
                 ),
                 "hypervolt_actuator": (
-                    self.hypervolt_actuator.diagnostics() if self.hypervolt_actuator else None
+                    self.hypervolt_actuator.diagnostics(now, self.controller.decision.raw_voltage_v)
+                    if self.hypervolt_actuator
+                    else None
                 ),
                 "ev_voltage_limits_active": self.ev_limits_active,
                 "effective_minimum_voltage_v": self.controller.voltage_bounds_v[0],
@@ -1765,9 +1845,21 @@ class VoltageControlRuntime:
             if first_sample:
                 result["octopus_schedule"] = None
         elif first_sample or self.octopus_revision != self.streamed_octopus_revision:
-            result["octopus_schedule"] = self.window_schedule.stream_dict(
-                datetime.now(timezone.utc), self.configuration.octopus_lead_time_s
+            c = self.configuration
+            octopus = self.window_schedule.stream_dict(
+                datetime.now(timezone.utc), c.octopus_lead_time_s
             )
+            # Both bands, so the app can say what a charge changes and what it
+            # returns to, before the window rather than only during it.
+            octopus.update(
+                {
+                    "normal_minimum_voltage_v": c.minimum_voltage_v,
+                    "normal_maximum_voltage_v": c.maximum_voltage_v,
+                    "charge_minimum_voltage_v": max(c.minimum_voltage_v, c.ev_minimum_voltage_v),
+                    "charge_maximum_voltage_v": min(c.maximum_voltage_v, c.ev_maximum_voltage_v),
+                }
+            )
+            result["octopus_schedule"] = octopus
             self.streamed_octopus_revision = self.octopus_revision
         if first_sample or self.events_revision != self.streamed_events_revision:
             result["recent_events"] = list(self.events)

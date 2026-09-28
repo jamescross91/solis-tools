@@ -32,6 +32,14 @@ The protocol itself is:
   sends state whenever it changes, there is nothing to request. It carries
   `charging`, `true_milli_amps` and `watt_hours`.
 
+The same fields arrive in three envelopes, and the client reads all of them:
+a `result` list answering `sync.snapshot`, a server-initiated notification
+with the fields in `params` (a dict or a list of dicts) when the charger's
+settings change, and the session socket's bare objects with the fields at the
+top level. Reading only the first once left a real charger's charging flag and
+measured current unknown. A value of the wrong type is ignored rather than
+stored.
+
 Because the standard library has no WebSocket client and PyModbus is the
 project's only permitted runtime dependency, `hypervolt_client.py` hand-rolls
 the RFC 6455 handshake and frame format itself, in the same spirit as
@@ -107,6 +115,28 @@ side's current value and its min/max bounds, and returning
 function handles both cuts and restores for both priorities — because a
 scheme that cuts the EV first but restores the battery first would leave the
 car starved of current it should have gotten back.
+
+Priority only settles a contest between two loads charging from the grid.
+While the battery is idle or discharging there is nothing to protect, so:
+
+- a normal reduction falls on the Solis import ceiling alone, exactly as it
+  would without Hypervolt, and the car keeps its current;
+- an emergency still cuts the car first, because it is then the one load whose
+  current moves the voltage;
+- a restore goes back to the car first.
+
+Trimming unused Solis import allowance down to measured demand
+(`ControlDecision.allowance_trim`) is bookkeeping for the Solis register, not a
+response to voltage, and never touches the car under any priority. Before
+this, battery priority handed both kinds of reduction to the car, trimming it
+while the battery was discharging.
+
+Because the controller only restores through the Solis ceiling, which stops at
+measured demand, a car trimmed earlier would stay trimmed for the rest of its
+session. `VoltageControlRuntime._restore_ev_current` steps it back by
+`--increase-step-w` per write-rate interval while the battery is not
+grid charging, telemetry is fresh, the previous change has settled and the
+filtered voltage is clear of the import target, and logs each step.
 
 `VoltageControlRuntime._allocate_ev_priority` is the only place amps and
 watts meet: it reads the controller's decision in watts, calls
@@ -206,7 +236,11 @@ bounds as pure logic, with no network involved. `test_end_to_end.py`'s
 `fake_inverter.py` and a `fake_hypervolt.py`, and proves both priorities end
 to end: `battery` priority cuts the car and leaves the inverter's holding
 register untouched; `ev` priority cuts the inverter and leaves the car's
-commanded current untouched.
+commanded current untouched. It also proves the car is left alone while the
+battery discharges and while unused allowance is trimmed, that a trimmed car
+is restored, and that the stream carries the measured charging rate.
+`fake_hypervolt.py` sends the real envelopes: bare objects on the session
+socket and `params` notifications on the sync socket.
 
 `hypervolt_login.py` carries the same hidden `--token-host`/`--token-port`/
 `--api-host`/`--api-port`/`--insecure` overrides as `solis_poll.py`, so

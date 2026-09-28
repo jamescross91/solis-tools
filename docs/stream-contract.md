@@ -110,7 +110,13 @@ a Modbus one. It contains `connected`, `commanded_current_a`,
 `last_error`. `commanded_current_a` is the last current requested of the
 charger, not a confirmed readback; `connected` reflects the state of the
 Hypervolt WebSocket connection, independent of the Modbus connection health
-reported elsewhere in the envelope.
+reported elsewhere in the envelope. `measured_current_a` is what the car is
+actually drawing, from the charger's session telemetry, and
+`charging_power_kw` is that current at the last meter voltage;
+`session_energy_kwh` is the current session's energy and `telemetry_age_s` the
+seconds since Hypervolt last reported. The four are null until the charger
+reports them, and consumers should use `ev_charging`, which fails closed on
+stale telemetry, to decide whether the car is charging.
 
 `octopus_schedule` contains `charge_window_active`, `active_window`,
 `next_window`, `planned_windows`, `lead_time_s`, `fetched_at` and
@@ -120,6 +126,10 @@ offset) and `kind` (Octopus's dispatch type, such as `SMART` or `BOOST`, or
 `charge_window_active` counts the lead-in, so it can be true a few minutes
 before `active_window.start`. After a failed refresh the previous plan is
 kept and `last_error` says why; `fetched_at` is the last successful refresh.
+`normal_minimum_voltage_v` / `normal_maximum_voltage_v` are the band held
+outside a charge and `charge_minimum_voltage_v` / `charge_maximum_voltage_v`
+the band held during one, lead-in included, so a consumer can say what a
+planned charge changes and what it returns to before it starts.
 
 Events contain `timestamp`, `state`, `action`, `mode`, `message`, `voltage_v`,
 `grid_kw`, `limit_w`, `previous_limit_w` and `limit_delta_w`. The last three

@@ -372,6 +372,14 @@ protecting, and which side is restored first once it no longer does:
 - `balanced` — a cut or restore is split 50/50 between the two, with any
   amount one side cannot take spilling over to the other.
 
+Priority only matters while the home battery is charging from the grid too.
+With the battery idle or discharging there is nothing to protect, so a normal
+reduction falls on the Solis import ceiling and the car keeps its current;
+only an emergency may still cut the car. Trimming unused Solis import
+allowance never touches the car, and a car trimmed earlier is stepped back to
+its maximum once the battery stops grid charging and the voltage is clear.
+The menu-bar app shows the rate the car is drawing in its EV charger card.
+
 Whichever side is cut or restored, it is a step on top of the existing
 Solis-only decision, not a replacement for it: raw-voltage emergency
 protection, the deadband and the import ceiling all work exactly as before,
@@ -438,8 +446,10 @@ The menu-bar app's settings have an Octopus sign-in form for the API key from
 the Octopus dashboard (Personal details, API access); from the CLI,
 `octopus-login` prompts for it. Either way it finds the account and the
 enrolled car or charger and saves them at 0600 permissions. Octopus is only ever read: this never starts,
-stops or reschedules a charge. The plan, the next charge and whether the band
-is being held appear in the menu-bar app and in the stream. Details and
+stops or reschedules a charge. The menu-bar app's Intelligent Octopus card
+shows when the next slot is, the band it narrows from and to (258 V to 253 V
+on the high side with the defaults), when that starts and when it reverts;
+the same plan is in the stream. Details and
 failure handling are in [docs/octopus-integration.md](docs/octopus-integration.md).
 
 ## Recording and restored history

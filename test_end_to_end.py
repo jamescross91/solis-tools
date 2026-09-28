@@ -373,10 +373,10 @@ class HypervoltPriorityTests(unittest.TestCase):
     that one write, not race a compounding series of them.
     """
 
-    def _bank(self) -> dict[int, int]:
+    def _bank(self, *, battery_charging: bool = True, voltage_raw: int = 2155) -> dict[int, int]:
         bank = hybrid_bank()
-        bank[33135] = 0  # charging
-        bank[33251] = 2155  # 215.5 V: below the deadband, not an emergency
+        bank[33135] = 0 if battery_charging else 1
+        bank[33251] = voltage_raw  # default 215.5 V: below the deadband, not an emergency
         # (the general 215 V floor is tighter than Hypervolt's own 207 V, so
         # it is the one that applies while the car charges)
         bank[33263] = 0xFFFF
@@ -463,6 +463,74 @@ class HypervoltPriorityTests(unittest.TestCase):
         self.assertEqual(inverter_writes[0], (43488, 130))
         self.assertEqual(inverter_writes[-1], (43488, 140))
         self.assertEqual(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
+
+    def test_battery_priority_leaves_the_ev_alone_while_the_battery_discharges(self):
+        # The reported fault: battery priority trimmed the car although the
+        # battery was not charging from the grid, so there was nothing to
+        # protect. Below the deadband but above the floor, the reduction now
+        # falls on the Solis ceiling alone, as it would without Hypervolt.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank = self._bank(battery_charging=False)
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("battery", inverter, hypervolt, directory)
+                inverter_writes = list(inverter.writes)
+                hypervolt_applied = list(hypervolt.applied)
+
+        last = samples[-1]["voltage_control"]
+        self.assertTrue(last["ev_charging"])
+        self.assertEqual(hypervolt_applied, [])
+        self.assertEqual(inverter_writes[0], (43488, 130))
+        self.assertEqual(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
+
+    def test_trimming_unused_allowance_never_cuts_the_ev(self):
+        # At a healthy 240 V the 14 kW ceiling is only trimmed down to
+        # measured import. That is Solis bookkeeping, not a voltage response,
+        # and battery priority used to pass it to the car first.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank = self._bank(voltage_raw=2400)
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("battery", inverter, hypervolt, directory)
+                inverter_writes = list(inverter.writes)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertTrue(samples[-1]["voltage_control"]["ev_charging"])
+        self.assertEqual(hypervolt_applied, [])
+        self.assertTrue(inverter_writes, "expected the unused allowance to be trimmed")
+        self.assertLess(inverter_writes[0][1], 140)
+
+    def test_a_trimmed_ev_is_restored_once_the_battery_stops_grid_charging(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank = self._bank(battery_charging=False, voltage_raw=2400)
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.max_current_ma = 16000
+                hypervolt.set_charging(True, true_milli_amps=16000)
+                self._run("battery", inverter, hypervolt, directory)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertTrue(hypervolt_applied, "expected the EV current to be raised")
+        self.assertGreater(hypervolt_applied[0]["max_current"], 16000)
+
+    def test_the_stream_carries_the_live_charging_rate(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=31500, watt_hours=4200)
+                samples = self._run("ev", inverter, hypervolt, directory)
+
+        hypervolt_details = samples[-1]["voltage_control"]["hypervolt_actuator"]
+        self.assertEqual(hypervolt_details["measured_current_a"], 31.5)
+        self.assertAlmostEqual(hypervolt_details["charging_power_kw"], 31.5 * 215.5 / 1000, 2)
+        self.assertEqual(hypervolt_details["session_energy_kwh"], 4.2)
+        self.assertIsNotNone(hypervolt_details["telemetry_age_s"])
 
 
 class OctopusChargeWindowTests(unittest.TestCase):
@@ -579,6 +647,12 @@ class OctopusChargeWindowTests(unittest.TestCase):
         self.assertFalse(schedule["charge_window_active"])
         self.assertIsNotNone(schedule["next_window"])
         self.assertEqual(len(schedule["planned_windows"]), 1)
+        # Enough for the app to say, before the charge, what the band becomes
+        # and what it returns to afterwards.
+        self.assertEqual(schedule["normal_minimum_voltage_v"], 215.0)
+        self.assertEqual(schedule["normal_maximum_voltage_v"], 258.0)
+        self.assertEqual(schedule["charge_minimum_voltage_v"], 215.0)
+        self.assertEqual(schedule["charge_maximum_voltage_v"], 253.0)
         self.assertNotIn((43074, 30), writes)
         # Sent with the first sample only: nothing changed in between.
         self.assertIn("octopus_schedule", samples[0]["voltage_control"])
