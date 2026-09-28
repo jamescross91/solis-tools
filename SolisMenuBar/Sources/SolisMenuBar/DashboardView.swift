@@ -349,12 +349,7 @@ struct DashboardView: View {
                         )
                     }
                     if let hypervolt = control.hypervoltActuator {
-                        Text(
-                            "EV charging: \(control.evCharging == true ? "yes" : "no")"
-                                + " · protecting \(evPriorityLabel(control.evPriority))"
-                                + (hypervolt.measuredCurrentA.map { String(format: " · %.1f A drawn", $0) } ?? "")
-                                + String(format: " · %.1f A limit", hypervolt.commandedCurrentA)
-                        )
+                        Text(evDiagnosticsLine(control, hypervolt))
                         if let error = hypervolt.lastError {
                             Text(error).foregroundStyle(.orange)
                         }
@@ -395,6 +390,22 @@ struct DashboardView: View {
             Text(value).font(.caption.weight(.semibold).monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func evDiagnosticsLine(
+        _ control: VoltageControlDetails,
+        _ hypervolt: HypervoltActuatorDetails
+    ) -> String {
+        // Built in steps: one concatenated expression was too slow for the
+        // Swift type checker and failed the build.
+        var parts: [String] = []
+        parts.append("EV charging: " + (control.evCharging == true ? "yes" : "no"))
+        parts.append("protecting " + evPriorityLabel(control.evPriority))
+        if let drawn = hypervolt.measuredCurrentA {
+            parts.append(String(format: "%.1f A drawn", drawn))
+        }
+        parts.append(String(format: "%.1f A limit", hypervolt.commandedCurrentA))
+        return parts.joined(separator: " · ")
     }
 
     private func evPriorityLabel(_ priority: String?) -> String {
