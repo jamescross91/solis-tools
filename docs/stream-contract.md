@@ -92,6 +92,9 @@ optional, so an older read-only poller still decodes.
 | `ev_priority` | `battery`, `ev` or `balanced`, or null when `--hypervolt-enable` is off; see `docs/hypervolt-integration.md` |
 | `ev_charging` | Whether the Hypervolt charger is confirmed charging, or null when the feature is off; a stale or unreachable cloud link reads as `false`, never guessed `true` |
 | `hypervolt_actuator` | EV charger current diagnostics, described below, or null when the feature is off |
+| `ev_voltage_limits_active` | Whether the EV charger's band governed the last sample: the car is confirmed charging or an Octopus charge window (with its lead-in) covers it |
+| `effective_minimum_voltage_v`, `effective_maximum_voltage_v` | The band the last sample was held to: the general limits, narrowed by the EV limits while `ev_voltage_limits_active` |
+| `octopus_schedule` | The Intelligent Octopus charge plan, described below, or null when `--octopus-enable` is off. **Present in the first sample and whenever the plan is refreshed or a window's lead-in or end passes; absent otherwise.** Consumers keep the last plan they received; the menu-bar app does this in `MonitorStore` and resets it for each new poller run |
 
 Actuator diagnostics contain `pdu_address`, `resolution_w`, `baseline_raw`,
 `last_commanded_raw`, `last_requested_raw`, `last_write_at`, `writes_last_hour`,
@@ -108,6 +111,15 @@ a Modbus one. It contains `connected`, `commanded_current_a`,
 charger, not a confirmed readback; `connected` reflects the state of the
 Hypervolt WebSocket connection, independent of the Modbus connection health
 reported elsewhere in the envelope.
+
+`octopus_schedule` contains `charge_window_active`, `active_window`,
+`next_window`, `planned_windows`, `lead_time_s`, `fetched_at` and
+`last_error`. A window is an object with `start`, `end` (ISO 8601 with UTC
+offset) and `kind` (Octopus's dispatch type, such as `SMART` or `BOOST`, or
+`MIXED` where touching slots of different types were merged).
+`charge_window_active` counts the lead-in, so it can be true a few minutes
+before `active_window.start`. After a failed refresh the previous plan is
+kept and `last_error` says why; `fetched_at` is the last successful refresh.
 
 Events contain `timestamp`, `state`, `action`, `mode`, `message`, `voltage_v`,
 `grid_kw`, `limit_w`, `previous_limit_w` and `limit_delta_w`. The last three

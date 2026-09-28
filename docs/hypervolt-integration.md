@@ -119,14 +119,24 @@ emergency action — a holding decision is left alone.
 ## Tighter voltage limits while the car is charging
 
 Hypervolt's own charger enforces tighter voltage protection than most
-household loads need. `--ev-minimum-voltage` / `--ev-maximum-voltage`
-(defaults 216.0 V / 253.0 V) express that. Whenever `ev_charging` is true,
+household loads need. Its PEN-fault detection (BS 7671 722.411.4.1) stops
+charging when line-neutral voltage stays above 253 V or below 207 V for five
+seconds, and resumes after 30 s back inside that range.
+`--ev-minimum-voltage` / `--ev-maximum-voltage` (defaults 207.0 V / 253.0 V)
+express that; the low default was 216 V before it was checked against
+Hypervolt's published threshold, and with the general 215 V floor the
+effective floor is unchanged. Whenever `ev_charging` is true,
 `DynamicVoltageController._voltage_bounds()` intersects the general bounds
 with the EV bounds — whichever is tighter always wins — and every emergency
 check, target and deadband calculation in `_evaluate_import` and
 `_evaluate_export` uses that intersected pair for the rest of the cycle. The
 general bounds are never widened by the EV values; they can only be
 narrowed.
+
+The same tightened band applies during an Intelligent Octopus planned charge
+when `--octopus-enable` is on, before the car draws anything; that is what
+stops a high supply voltage tripping the charger before it can report
+charging. See `docs/octopus-integration.md`.
 
 Detecting that the car is charging is also, on its own, enough to activate
 import regulation, alongside the pre-existing battery-charging signal — a
@@ -143,7 +153,7 @@ activate EV-aware behaviour unless the feature was actually turned on.
 | `--hypervolt-enable` | Off | Master opt-in; requires `--dynamic-voltage-control` |
 | `--hypervolt-credentials` | `<state dir>/hypervolt.json` | Refresh-token file written by `hypervolt-login` |
 | `--ev-priority` | `battery` | `battery`, `ev` or `balanced` — see above |
-| `--ev-minimum-voltage` / `--ev-maximum-voltage` | 216.0 / 253.0 V | Tightened bounds applied only while the car is charging |
+| `--ev-minimum-voltage` / `--ev-maximum-voltage` | 207.0 / 253.0 V | Tightened bounds applied while the car is charging or an Octopus charge is planned |
 | `--ev-minimum-current` / `--ev-maximum-current` | 6.0 / 32.0 A | Clamp for the commanded charging current |
 | `--ev-stale-age` | 30 s | Telemetry older than this reads as "not charging" |
 | `--hypervolt-timeout` | 10 s | HTTP/WebSocket connect timeout |

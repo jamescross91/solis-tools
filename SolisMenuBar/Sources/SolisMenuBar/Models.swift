@@ -92,6 +92,61 @@ struct VoltageControlDetails: Decodable, Sendable {
     let evPriority: String?
     let evCharging: Bool?
     let hypervoltActuator: HypervoltActuatorDetails?
+    /// Whether the EV charger's tighter band governed the last sample, and
+    /// the band itself. Nil only from a poller older than the Octopus
+    /// integration.
+    let evVoltageLimitsActive: Bool?
+    let effectiveMinimumVoltageV: Double?
+    let effectiveMaximumVoltageV: Double?
+    /// Nil unless --octopus-enable is on. Sent only when the plan or its
+    /// active window changes; MonitorStore carries the last one forward.
+    var octopusSchedule: OctopusScheduleDetails?
+}
+
+/// One planned Intelligent Octopus charge. Times carry their UTC offset.
+struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
+    let start: String
+    let end: String
+    let kind: String
+    /// Parsed once at decode. The window is carried forward for hours and
+    /// its label is rendered on every dashboard refresh.
+    let startDate: Date?
+    let endDate: Date?
+
+    var id: String { start }
+
+    private enum CodingKeys: String, CodingKey {
+        case start, end, kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        start = try container.decode(String.self, forKey: .start)
+        end = try container.decode(String.self, forKey: .end)
+        kind = try container.decode(String.self, forKey: .kind)
+        startDate = StreamDecoder.date(from: start)
+        endDate = StreamDecoder.date(from: end)
+    }
+
+    var label: String {
+        guard let from = startDate, let to = endDate else { return "\(start)–\(end)" }
+        let sameDay = Calendar.current.isDate(from, inSameDayAs: Date())
+        let day = sameDay ? "" : from.formatted(.dateTime.weekday(.abbreviated)) + " "
+        return day + from.formatted(date: .omitted, time: .shortened) + "–"
+            + to.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+/// The charge plan the poller last read from Octopus. A failed refresh keeps
+/// the previous plan and reports `lastError`; see docs/octopus-integration.md.
+struct OctopusScheduleDetails: Decodable, Sendable {
+    let chargeWindowActive: Bool
+    let activeWindow: OctopusChargeWindow?
+    let nextWindow: OctopusChargeWindow?
+    let plannedWindows: [OctopusChargeWindow]
+    let leadTimeS: Double
+    let fetchedAt: String?
+    let lastError: String?
 }
 
 /// Diagnostics for the Hypervolt current actuator. Deliberately not
@@ -340,6 +395,17 @@ struct MonitorConfiguration: Equatable, Sendable {
     /// Empty means the poller's own default, <state dir>/hypervolt.json,
     /// written once by hypervolt-login.
     var hypervoltCredentialsPath: String
+    var octopusEnabled: Bool
+    /// Empty means the poller's own default, <state dir>/octopus.json,
+    /// written once by octopus-login.
+    var octopusCredentialsPath: String
+
+    static var defaultOctopusCredentialsPath: String {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SolisTools", isDirectory: true)
+            .appendingPathComponent("octopus.json")
+            .path
+    }
 
     /// Where hypervolt-login writes credentials when the user has not
     /// overridden the path, matching solis_poll.py's own default exactly so
@@ -396,7 +462,9 @@ struct MonitorConfiguration: Equatable, Sendable {
             minimumWriteInterval: max(5, defaults.object(forKey: "minimumWriteInterval") as? Double ?? 5),
             hypervoltEnabled: defaults.bool(forKey: "hypervoltEnabled"),
             evPriority: defaults.string(forKey: "evPriority") ?? "battery",
-            hypervoltCredentialsPath: defaults.string(forKey: "hypervoltCredentialsPath") ?? ""
+            hypervoltCredentialsPath: defaults.string(forKey: "hypervoltCredentialsPath") ?? "",
+            octopusEnabled: defaults.bool(forKey: "octopusEnabled"),
+            octopusCredentialsPath: defaults.string(forKey: "octopusCredentialsPath") ?? ""
         )
     }
 }

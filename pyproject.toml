@@ -30,12 +30,20 @@ Issues = "https://github.com/jamescross91/solis-tools/issues"
 [project.scripts]
 solis-poll = "solis_poll:main"
 hypervolt-login = "hypervolt_login:main"
+octopus-login = "octopus_login:main"
 
 [project.optional-dependencies]
 dev = ["mypy>=1.11", "ruff>=0.6"]
 
 [tool.setuptools]
-py-modules = ["solis_poll", "voltage_control", "hypervolt_client", "hypervolt_login"]
+py-modules = [
+  "solis_poll",
+  "voltage_control",
+  "hypervolt_client",
+  "hypervolt_login",
+  "octopus_client",
+  "octopus_login",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "solis_poll.VERSION" }
@@ -51,5 +59,5 @@ select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "C4", "ISC"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["solis_poll.py", "voltage_control.py", "hypervolt_client.py", "hypervolt_login.py", "fake_inverter.py", "fake_hypervolt.py", "scripts/version.py", "scripts/release.py", "scripts/build_release_app.py"]
+files = ["solis_poll.py", "voltage_control.py", "hypervolt_client.py", "hypervolt_login.py", "octopus_client.py", "octopus_login.py", "fake_inverter.py", "fake_hypervolt.py", "fake_octopus.py", "scripts/version.py", "scripts/release.py", "scripts/build_release_app.py"]
 ignore_missing_imports = true

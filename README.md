@@ -318,9 +318,14 @@ changed by capturing its baseline.
 | `--hypervolt-enable` | Off | Enable the Hypervolt EV charger lever; requires `--dynamic-voltage-control` |
 | `--hypervolt-credentials` | `hypervolt.json` in state directory | Refresh-token file written by `hypervolt-login` |
 | `--ev-priority` | `battery` | `battery`, `ev` or `balanced` — which side is cut and restored first; see below |
-| `--ev-minimum-voltage` / `--ev-maximum-voltage` | 216 / 253 V | Tightened voltage bounds applied only while the car is charging |
+| `--ev-minimum-voltage` / `--ev-maximum-voltage` | 207 / 253 V | Hypervolt's own trip thresholds, applied while the car is charging or an Octopus charge is planned |
 | `--ev-minimum-current` / `--ev-maximum-current` | 6 / 32 A | Clamp for the commanded charging current |
 | `--ev-stale-age` | 30 s | Telemetry older than this reads as "not charging", never guessed |
+| `--octopus-enable` | Off | Hold the EV band during Intelligent Octopus planned charges; requires `--dynamic-voltage-control` |
+| `--octopus-credentials` | `octopus.json` in state directory | API-key file written by `octopus-login` |
+| `--octopus-lead-time` | 300 s | How long before a planned charge the EV band starts |
+| `--octopus-interval` | 180 s | Seconds between Octopus schedule refreshes; at least 60 |
+| `--octopus-timeout` | 10 s | HTTP timeout for the Octopus API |
 
 The state directory is `~/Library/Application Support/SolisTools` on macOS and
 `$XDG_STATE_HOME/solis-tools` (or `~/.local/state/solis-tools`) on Linux. If using
@@ -373,12 +378,14 @@ protection, the deadband and the import ceiling all work exactly as before,
 just divided between two actuators instead of one.
 
 Hypervolt's own charger enforces tighter voltage protection than most
-household loads need. While the car is confirmed charging, `--ev-minimum-voltage`
-and `--ev-maximum-voltage` (216 V / 253 V by default) narrow the operating
-band on top of `--minimum-voltage` / `--maximum-voltage` — whichever bound is
-tighter always wins. The car being confirmed charging is, on its own, also
-enough to activate import regulation, in addition to the existing
-battery-charging signal.
+household loads need: its PEN-fault protection stops charging when the supply
+stays above 253 V or below 207 V for five seconds. While the car is confirmed
+charging, `--ev-minimum-voltage` and `--ev-maximum-voltage` (207 V / 253 V by
+default) narrow the operating band on top of `--minimum-voltage` /
+`--maximum-voltage`; whichever bound is tighter always wins. The car being
+confirmed charging is, on its own, also enough to activate import regulation,
+in addition to the existing battery-charging signal. The same band applies
+during an Intelligent Octopus planned charge; see below.
 
 Enable it with:
 
@@ -401,6 +408,39 @@ charging", never guessed as charging: it cannot silently disable the tighter
 voltage protection charging is supposed to get, and a failed command to the
 charger leaves home battery regulation running exactly as it would without
 the feature enabled.
+
+## Intelligent Octopus charge windows
+
+A Hypervolt that trips on high voltage never starts charging, so it never
+reports charging, so the tighter band above never applies. On a sunny
+afternoon with the house exporting, the supply can sit above 253 V for the
+whole of an Intelligent Octopus charge slot and the car gets nothing.
+
+`--octopus-enable` reads the charge plan Octopus publishes for the car and
+holds voltage inside the charger's limits for each planned charge, starting
+`--octopus-lead-time` (five minutes) before it so the voltage is already down
+when the charger tries to start. At 254 V with the default 258 V ceiling that
+means export regulation cuts export as an emergency rather than raising it.
+The normal band returns on its own when the window ends; nothing is written
+to the inverter to change the limits themselves. Export regulation is the only
+lever that can lower a high supply voltage, so this needs
+`--dynamic-export-control` and its installation validation to do anything
+about high voltage. On the low side the default 215 V floor is already tighter
+than the charger's 207 V.
+
+```sh
+octopus-login --credentials ~/.local/state/solis-tools/octopus.json
+solis-poll --host 192.168.1.57 --dynamic-voltage-control --dynamic-export-control \
+  --octopus-enable
+```
+
+The menu-bar app's settings have an Octopus sign-in form for the API key from
+the Octopus dashboard (Personal details, API access); from the CLI,
+`octopus-login` prompts for it. Either way it finds the account and the
+enrolled car or charger and saves them at 0600 permissions. Octopus is only ever read: this never starts,
+stops or reschedules a charge. The plan, the next charge and whether the band
+is being held appear in the menu-bar app and in the stream. Details and
+failure handling are in [docs/octopus-integration.md](docs/octopus-integration.md).
 
 ## Recording and restored history
 
@@ -548,6 +588,8 @@ Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
   payload and how to change it
 - [docs/hypervolt-integration.md](docs/hypervolt-integration.md) — the
   Hypervolt EV charger cloud protocol and priority arbitration design
+- [docs/octopus-integration.md](docs/octopus-integration.md): reading
+  Intelligent Octopus charge plans and holding the charger's voltage limits
 - [docs/releasing.md](docs/releasing.md) — the release runbook
 - [CLAUDE.md](CLAUDE.md) — conventions and traps, for contributors and coding
   agents

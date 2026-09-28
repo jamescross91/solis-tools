@@ -13,6 +13,8 @@ Two deliverables from one repository:
   `voltage_control.py` contains the transport-independent controller and journal.
   `hypervolt_client.py` is a second, independent transport for an optional
   Hypervolt EV charger — see docs/hypervolt-integration.md.
+  `octopus_client.py` reads Intelligent Octopus charge plans on a background
+  thread; see docs/octopus-integration.md.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
   `solis-poll --stream-json` as a subprocess and renders its stdout.
 
@@ -67,6 +69,14 @@ as charging — see `HypervoltState.is_charging()` — and a failed Hypervolt
 command must fall back to the controller's original decision so Solis-side
 voltage safety never depends on the cloud link being up. Full design in
 docs/hypervolt-integration.md.
+
+**Octopus is read only.** `octopus_client.py` may only read the charge plan;
+never add an operation that starts, stops or reschedules a charge. A charge
+window may only narrow the voltage band, never widen it, and every failure
+rule keeps the band narrow for longer rather than relaxing it early. The API
+key is stored only by `octopus_login.py`, at 0600, and every value embedded in
+a query must pass its format check first. The HTTP call blocks, so it stays on
+`OctopusScheduleMonitor`'s thread; the control loop reads snapshots only.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
@@ -141,6 +151,8 @@ narrowest supported width.
 - `docs/stream-contract.md` — the `--stream-json` payload and its versioning rules.
 - `docs/hypervolt-integration.md` — the Hypervolt cloud protocol, priority
   arbitration and credential handling.
+- `docs/octopus-integration.md`: the Octopus charge plan, the lead-in and the
+  failure rules.
 - `docs/releasing.md` — the release runbook.
 - `CHANGELOG.md` — user-visible changes.
 

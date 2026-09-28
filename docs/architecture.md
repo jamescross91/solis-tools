@@ -10,6 +10,9 @@ Two programs, one repository, one interface between them.
                                                               │    │ (hypervolt_client.py)
                                                               │    ▼
                                                               │  Hypervolt charger
+                                                              │
+                                                              │  HTTPS GraphQL, read only
+                                                              │  (octopus_client.py) ──> Octopus plan
                                                               │ one JSON object
                                                               │ per sample, stdout
                                                               ▼
@@ -32,6 +35,7 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 | Interfaces | `parse_args`, `print_once`, `stream_payload`, `main` |
 | Voltage control | Typed actuators, baseline ownership, SQLite minute history and event log |
 | Hypervolt | `hypervolt_client.py` — cloud auth and WebSocket transport for the EV charger, independent of Modbus |
+| Octopus | `octopus_client.py`, which reads Intelligent Octopus planned charges on a background thread |
 
 ### Dynamic-voltage path
 
@@ -71,6 +75,17 @@ Solis import/export actuators with a new `HypervoltCurrentActuator`, calling
 decision rather than changing how that decision is made. A failed Hypervolt
 command falls back to the controller's original, un-reallocated decision, so
 battery regulation never depends on the Hypervolt cloud link being up.
+
+### Octopus charge-plan path
+
+`octopus_client.py` reads Intelligent Octopus planned dispatches from the
+Kraken GraphQL API. The request blocks, so `OctopusScheduleMonitor` makes it on
+a daemon thread every `--octopus-interval` and publishes an immutable
+`OctopusSchedule`; the control loop only reads the latest snapshot, so a slow
+or dead Octopus API can never delay a Modbus poll. `VoltageControlRuntime`
+turns "a window covers now" into `GridTelemetrySample.ev_charge_window`, and
+`DynamicVoltageController._voltage_bounds` narrows the band for it exactly as it
+does for a confirmed charging car. See `docs/octopus-integration.md`.
 
 ### Register addressing
 
@@ -189,6 +204,7 @@ newline-delimited JSON, retries with backoff, and translates stream state into
 | `SolisMenuBarApp.swift` | `MenuBarExtra` scene and the compact menu-bar label |
 | `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `MonitorStore` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
 | `HypervoltLoginRunner.swift` | Drives `hypervolt-login` as a one-shot subprocess for the dashboard's own sign-in form — see docs/hypervolt-integration.md |
+| `OctopusLoginRunner.swift` | Drives `octopus-login` the same way for the Octopus sign-in form; see docs/octopus-integration.md |
 
 General chart history is memory-only and downsampled to one point per 30 seconds
 over a 24-hour window — about 2,880 points. Retaining every poll sample for that
