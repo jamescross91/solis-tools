@@ -15,6 +15,15 @@ solis-poll --host 192.168.1.57 --stream-json
 Produced by `stream_payload` in `solis_poll.py`; consumed by `StreamDecoder` and
 the types in `SolisMenuBar/Sources/SolisMenuBar/Models.swift`.
 
+The menu-bar app is not the only consumer. `solis-hub` is a second one: it
+reads this stream from a poller child on a Raspberry Pi and forwards each
+envelope unchanged, byte for byte, inside its own message wrapper (see
+[hub-protocol.md](hub-protocol.md)). It does not parse, rename or add fields,
+so the rules below bind it exactly as they bind the app, and `schema_version`
+stays 2. A consumer that keeps the last `configuration`, `recent_events` or
+`octopus_schedule` it received must do so whether it reads this stream directly
+or a hub's `snapshot` messages, which carry those fields already merged.
+
 ## Shape
 
 ```json

@@ -15,6 +15,10 @@ Two deliverables from one repository:
   Hypervolt EV charger — see docs/hypervolt-integration.md.
   `octopus_client.py` reads Intelligent Octopus charge plans on a background
   thread; see docs/octopus-integration.md.
+- `solis_hub.py` is the optional always-on hub for a Raspberry Pi: it supervises
+  one `solis-poll --stream-json` child and fans the stream out over an
+  authenticated WebSocket (docs/hub.md). `SolisHubKit/` is the Swift package the
+  menu bar and the iOS app share to talk to it.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
   `solis-poll --stream-json` as a subprocess and renders its stdout.
 
@@ -77,6 +81,23 @@ rule keeps the band narrow for longer rather than relaxing it early. The API
 key is stored only by `octopus_login.py`, at 0600, and every value embedded in
 a query must pass its format check first. The HTTP call blocks, so it stays on
 `OctopusScheduleMonitor`'s thread; the control loop reads snapshots only.
+
+**One Modbus session, one controller.** Exactly one `solis-poll` holds the
+logger's session at any moment: the Mac's (Direct mode) or the Pi's (the hub).
+Nothing may open a second session. Hub mode in the menu bar never constructs a
+local poller, even when the hub is unreachable; there is no automatic fallback
+from Hub to Direct; and in Direct mode a Bonjour-detected `_solis-hub._tcp`
+service blocks the local poller until the user decides. See docs/hub.md.
+
+**The hub has no dependency and no write path.** `solis_hub.py` is standard
+library only (its WebSocket server is hand-rolled, as in `hypervolt_client.py`),
+never speaks Modbus, and passes the poller only `attention on` or `attention
+off`. It forwards stream envelopes byte for byte and must not change the stream
+or `schema_version`. It exposes no control or settings command: control
+settings live in the hub's config file. It never reads or relays Hypervolt or
+Octopus credentials, and never logs a token, Authorization header or Cloudflare
+secret. `hub_protocol_version` follows the same additive-only rule as the
+stream; the wire format is in docs/hub-protocol.md.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
@@ -151,6 +172,9 @@ narrowest supported width.
 - `docs/stream-contract.md` — the `--stream-json` payload and its versioning rules.
 - `docs/hypervolt-integration.md` — the Hypervolt cloud protocol, priority
   arbitration and credential handling.
+- `docs/hub.md`, `docs/hub-protocol.md`, `docs/hub-remote-access.md`,
+  `docs/hub-ios-integration.md`: the hub, its wire format, the Cloudflare
+  Tunnel setup and the iOS contract.
 - `docs/octopus-integration.md`: the Octopus charge plan, the lead-in and the
   failure rules.
 - `docs/releasing.md` — the release runbook.
