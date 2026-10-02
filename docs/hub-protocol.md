@@ -30,8 +30,11 @@ The rules mirror the stream contract:
 One port serves everything: WebSocket at `/v1/stream` and HTTP under `/v1/`.
 Every request except `GET /v1/healthz` needs `Authorization: Bearer <token>`.
 Behind Cloudflare Access a client also sends `CF-Access-Client-Id` and
-`CF-Access-Client-Secret`; the hub ignores those headers, and the bearer token
-is still required, so neither layer failing open is enough.
+`CF-Access-Client-Secret` on every request to the remote (HTTPS) endpoint; the
+hub ignores those headers, and the bearer token is still required, so neither
+layer failing open is enough. SolisHubKit does not send the Cloudflare pair to a
+LAN endpoint, which does not pass through Cloudflare and is plain `ws://`, and it
+refuses HTTP redirects on both transports so no header follows a redirect.
 
 | Status | Meaning |
 | --- | --- |

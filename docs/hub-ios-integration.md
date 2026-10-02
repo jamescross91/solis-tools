@@ -34,6 +34,20 @@ For plain `ws://` on the home network the app's Info.plist needs
 `_solis-hub._tcp` so discovery works. Remote connections are always `wss://`
 through Cloudflare, so nothing else is relaxed.
 
+## Connection behaviour the app inherits
+
+- A hub found by Bonjour is used only after the person chooses it (`preferredHubID`),
+  so the token is never sent to whatever happens to advertise `_solis-hub._tcp`.
+  A manually typed LAN URL or remote URL needs no choice.
+- Endpoints are tried LAN first with a 2 s connect timeout, then the remote URL,
+  and the client reconnects LAN-first when the network path changes
+  (`HubClient.networkPathChanged()`, driven by `HubEndpointResolver`'s path
+  revision).
+- Reconnect backoff runs from 1 s to 30 s with the jitter taken downwards from
+  the ceiling, and resets only after a connection stayed up for 10 s, so a hub
+  that accepts and immediately closes is not retried in a tight loop.
+- `stop()` finishes a client for good; make a new `HubClient` on foreground.
+
 ## What the package gives you
 
 | Piece | Purpose |

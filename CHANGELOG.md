@@ -45,6 +45,10 @@ versioning](https://semver.org/spec/v2.0.0.html).
   the token and optional Cloudflare Access credentials, kept in the Keychain.
 - `SolisHubKit`, a Swift package shared by the menu bar and the iOS app, with
   the stream models, the hub client, endpoint resolution and Keychain storage.
+- Hub clients (the menu bar and SolisHubKit) send the Cloudflare Access pair only
+  to the remote endpoint, use a Bonjour-found hub only after it is chosen, refuse
+  HTTP redirects, reconnect LAN-first when the network path changes, and back off
+  with downward jitter that resets only after a stable connection.
 - The menu-bar app's Info.plist now declares `_solis-hub._tcp` for Bonjour
   discovery, so macOS may ask once for local network access after upgrading.
   The stream models moved from the app into `SolisHubKit` with unchanged
