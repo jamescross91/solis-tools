@@ -3,6 +3,43 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- An optional always-on hub, `solis-hub`, for a Raspberry Pi. It supervises one
+  `solis-poll` and shares its live stream with any number of viewers over an
+  authenticated WebSocket and a small read-only HTTP API on one port, so voltage
+  control keeps running with the Mac asleep or away, and the Mac and an iPhone
+  see the same real-time data. It also serves in-memory sample history and the
+  poller's control history, and can send ntfy notifications for emergencies, a
+  down poller, an unreachable inverter and a pending restoration. It uses only
+  the standard library, never speaks Modbus, and has no write path or control
+  settings. Reach it away from home through a Cloudflare Tunnel with Access in
+  front. `deploy/pi/install.sh` installs it with a systemd unit and an Avahi
+  advertisement, `make hub-demo` runs it against a fake inverter, and
+  `docs/hub.md` has the runbook for moving control from the Mac to the Pi.
+- The menu-bar app has a Connection setting: Direct (the default, unchanged) or
+  Hub. Hub mode never starts a local poller, shows the last data with its age
+  when the hub is unreachable, and never falls back to Direct on its own.
+  Direct mode that finds a hub on the network asks before starting its own
+  poller. Hub settings take a LAN URL or a Bonjour-discovered hub, a remote URL,
+  the token and optional Cloudflare Access credentials, kept in the Keychain.
+- `SolisHubKit`, a Swift package shared by the menu bar and the iOS app, with
+  the stream models, the hub client, endpoint resolution and Keychain storage.
+- Hub clients (the menu bar and SolisHubKit) send the Cloudflare Access pair only
+  to the remote endpoint, use a Bonjour-found hub only after it is chosen, refuse
+  HTTP redirects, reconnect LAN-first when the network path changes, and back off
+  with downward jitter that resets only after a stable connection.
+- The menu-bar app's Info.plist now declares `_solis-hub._tcp` for Bonjour
+  discovery, so macOS may ask once for local network access after upgrading.
+  The stream models moved from the app into `SolisHubKit` with unchanged
+  behaviour, and the Homebrew formula installs `solis-hub`.
+- `fake_inverter.py --grid-charging` starts in a state the voltage controller
+  acts on.
+- A test that the poller restores the inverter's baseline on SIGTERM, which is
+  how systemd stops it.
+
 ## 0.6.1
 
 This release adds the optional Hypervolt EV charger and Intelligent Octopus
@@ -46,39 +83,6 @@ testing an installation.
   rate the car is drawing, its current limit and the session energy.
 
 ### Added
-
-- An optional always-on hub, `solis-hub`, for a Raspberry Pi. It supervises one
-  `solis-poll` and shares its live stream with any number of viewers over an
-  authenticated WebSocket and a small read-only HTTP API on one port, so voltage
-  control keeps running with the Mac asleep or away, and the Mac and an iPhone
-  see the same real-time data. It also serves in-memory sample history and the
-  poller's control history, and can send ntfy notifications for emergencies, a
-  down poller, an unreachable inverter and a pending restoration. It uses only
-  the standard library, never speaks Modbus, and has no write path or control
-  settings. Reach it away from home through a Cloudflare Tunnel with Access in
-  front. `deploy/pi/install.sh` installs it with a systemd unit and an Avahi
-  advertisement, `make hub-demo` runs it against a fake inverter, and
-  `docs/hub.md` has the runbook for moving control from the Mac to the Pi.
-- The menu-bar app has a Connection setting: Direct (the default, unchanged) or
-  Hub. Hub mode never starts a local poller, shows the last data with its age
-  when the hub is unreachable, and never falls back to Direct on its own.
-  Direct mode that finds a hub on the network asks before starting its own
-  poller. Hub settings take a LAN URL or a Bonjour-discovered hub, a remote URL,
-  the token and optional Cloudflare Access credentials, kept in the Keychain.
-- `SolisHubKit`, a Swift package shared by the menu bar and the iOS app, with
-  the stream models, the hub client, endpoint resolution and Keychain storage.
-- Hub clients (the menu bar and SolisHubKit) send the Cloudflare Access pair only
-  to the remote endpoint, use a Bonjour-found hub only after it is chosen, refuse
-  HTTP redirects, reconnect LAN-first when the network path changes, and back off
-  with downward jitter that resets only after a stable connection.
-- The menu-bar app's Info.plist now declares `_solis-hub._tcp` for Bonjour
-  discovery, so macOS may ask once for local network access after upgrading.
-  The stream models moved from the app into `SolisHubKit` with unchanged
-  behaviour, and the Homebrew formula installs `solis-hub`.
-- `fake_inverter.py --grid-charging` starts in a state the voltage controller
-  acts on.
-- A test that the poller restores the inverter's baseline on SIGTERM, which is
-  how systemd stops it.
 
 - The menu-bar app shows an Intelligent Octopus card outside the diagnostics:
   when the next charging slot is, the voltage band it narrows from and to,
