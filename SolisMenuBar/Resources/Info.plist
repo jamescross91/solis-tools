@@ -26,7 +26,11 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_solis-hub._tcp</string>
+    </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Solis Menu Bar connects to your inverter data logger on the local network.</string>
+    <string>Solis Menu Bar connects to your inverter data logger, and finds a solis-hub, on the local network.</string>
 </dict>
 </plist>

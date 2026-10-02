@@ -1,4 +1,5 @@
 import Darwin
+import SolisHubKit
 import SwiftUI
 
 @main
@@ -57,10 +58,15 @@ private struct MenuBarMetricsView: View {
     private func metricsLabel(for reading: InverterReading) -> Text {
         var label = Text("")
         var hasMetric = false
+        // Read through explicitly typed locals: a property path on an
+        // @ObservedObject inside a ternary or an initialiser argument makes
+        // newer compilers resolve it as the wrapper's dynamic member.
+        let alertSymbol: String = presentation.snapshot.symbol
+        let hasAlert: Bool = presentation.snapshot.hasAlert
 
-        if presentation.snapshot.hasAlert {
+        if hasAlert {
             label = append(
-                metric(value: "", symbol: presentation.snapshot.symbol),
+                metric(value: "", symbol: alertSymbol),
                 to: label,
                 hasMetric: &hasMetric
             )
@@ -101,7 +107,7 @@ private struct MenuBarMetricsView: View {
             )
         }
 
-        return hasMetric ? label : Text(Image(systemName: presentation.snapshot.symbol))
+        return hasMetric ? label : Text(Image(systemName: alertSymbol))
     }
 
     private func append(_ metric: Text, to label: Text, hasMetric: inout Bool) -> Text {

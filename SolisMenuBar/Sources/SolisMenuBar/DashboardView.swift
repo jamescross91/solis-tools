@@ -1,4 +1,5 @@
 import Charts
+import SolisHubKit
 import SwiftUI
 
 struct DashboardView: View {
@@ -47,8 +48,13 @@ struct DashboardView: View {
 
     @StateObject private var hypervoltLogin = HypervoltLoginRunner()
     @StateObject private var octopusLogin = OctopusLoginRunner()
+    @StateObject private var hubSettings = HubSettingsModel()
 
     @State private var showingSettings = false
+    /// The mode chosen in the settings form. The active mode only changes when
+    /// the person applies it, because changing it stops the current source.
+    @State private var pendingMode: ConnectionMode = .direct
+    @State private var confirmingDirectSwitch = false
     @State private var selectedMetric: HistoryMetric = .house
     @State private var hypervoltEmail = ""
     @State private var hypervoltPassword = ""
@@ -65,7 +71,9 @@ struct DashboardView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    if showingSettings || host.isEmpty {
+                    hubDetectedBanners
+                    hubStatusBanner
+                    if showingSettings || needsSetup {
                         settings
                     } else if let sample = monitor.latest {
                         status(sample)
@@ -75,14 +83,15 @@ struct DashboardView: View {
                         }
                         if let control = sample.voltageControl {
                             voltageControlStatus(control, reading: sample.reading)
+                            let bounds = chartBounds(for: control)
                             VoltageControlChartView(
                                 liveHistory: monitor.controlHistory,
                                 longHistory: monitor.history,
-                                minimumVoltage: minimumVoltage,
-                                maximumVoltage: maximumVoltage,
-                                safetyMargin: voltageSafetyMargin,
-                                maximumImportKw: maximumImportKw,
-                                maximumExportKw: min(maximumExportKw, siteExportPermissionKw)
+                                minimumVoltage: bounds.minimumVoltage,
+                                maximumVoltage: bounds.maximumVoltage,
+                                safetyMargin: bounds.safetyMargin,
+                                maximumImportKw: bounds.maximumImportKw,
+                                maximumExportKw: bounds.maximumExportKw
                             )
                         } else {
                             Label("Dynamic voltage control disabled", systemImage: "pause.circle")
@@ -103,13 +112,156 @@ struct DashboardView: View {
         }
         .frame(width: 450, height: 680)
         .onAppear {
+            pendingMode = monitor.policy.mode
             monitor.setDashboardVisible(true)
-            if !host.isEmpty, !monitor.isRunning {
+            if !needsSetup, !monitor.isRunning {
                 connect()
             }
         }
         .onDisappear {
             monitor.setDashboardVisible(false)
+        }
+    }
+
+    /// The mode the app is actually running in, as opposed to the one chosen
+    /// in the settings form.
+    private var isHubMode: Bool {
+        let mode: ConnectionMode = monitor.policy.mode
+        return mode == .hub
+    }
+
+    private var needsSetup: Bool {
+        if isHubMode {
+            let complete: Bool = hubSettings.isComplete
+            return !complete
+        }
+        return host.isEmpty
+    }
+
+    private struct ChartBounds {
+        let minimumVoltage: Double
+        let maximumVoltage: Double
+        let safetyMargin: Double
+        let maximumImportKw: Double
+        let maximumExportKw: Double
+    }
+
+    /// Direct mode charts against the settings this Mac passed to its poller.
+    /// In Hub mode those settings are the hub's, so the chart follows what the
+    /// hub reports; a field it did not send falls back to the stored value.
+    private func chartBounds(for control: VoltageControlDetails) -> ChartBounds {
+        guard isHubMode, let configuration = control.configuration else {
+            return ChartBounds(
+                minimumVoltage: minimumVoltage,
+                maximumVoltage: maximumVoltage,
+                safetyMargin: voltageSafetyMargin,
+                maximumImportKw: maximumImportKw,
+                maximumExportKw: min(maximumExportKw, siteExportPermissionKw)
+            )
+        }
+        let exportKw = (configuration.maximumExportW ?? maximumExportKw * 1_000) / 1_000
+        let permissionKw = (configuration.siteExportPermissionW ?? siteExportPermissionKw * 1_000) / 1_000
+        return ChartBounds(
+            minimumVoltage: configuration.minimumVoltageV ?? minimumVoltage,
+            maximumVoltage: configuration.maximumVoltageV ?? maximumVoltage,
+            safetyMargin: configuration.safetyMarginV ?? voltageSafetyMargin,
+            maximumImportKw: (configuration.maximumImportW ?? maximumImportKw * 1_000) / 1_000,
+            maximumExportKw: min(exportKw, permissionKw)
+        )
+    }
+
+    /// Direct mode, a hub is on the network and nobody has decided yet: the
+    /// local poller is held back until they do.
+    @ViewBuilder
+    private var hubDetectedBanners: some View {
+        let mode: ConnectionMode = monitor.policy.mode
+        if mode == .direct {
+            ForEach(monitor.policy.blockingHubs) { hub in
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("A solis-hub (\(hub.name)) is on this network", systemImage: "server.rack")
+                        .font(.subheadline.weight(.semibold))
+                    Text(
+                        "Only one controller may talk to the inverter. This Mac will not start or "
+                            + "restart its own poller until you choose."
+                    )
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Switch to Hub") {
+                            if !monitor.switchToHub() {
+                                pendingMode = .hub
+                                showingSettings = true
+                            }
+                        }
+                        Button("Ignore for this hub ID") {
+                            monitor.ignoreHub(id: hub.id)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            }
+        }
+    }
+
+    /// Hub mode: unreachable, or reachable with its poller restarting. The
+    /// last data stays below with its age; this app never starts its own
+    /// poller to fill the gap.
+    @ViewBuilder
+    private var hubStatusBanner: some View {
+        if isHubMode, let message = hubBannerMessage, !showingSettings {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(message, systemImage: "wifi.exclamationmark")
+                    .font(.caption.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let received = monitor.lastEnvelopeAt {
+                    HStack(spacing: 4) {
+                        Text("Showing data from")
+                        Text(received, style: .relative)
+                        Text("ago")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(10)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+        }
+    }
+
+    private var hubBannerMessage: String? {
+        if let detail = monitor.statusDetail {
+            return detail
+        }
+        if case let .failed(message) = monitor.state {
+            return message
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private var ignoredHubsList: some View {
+        let ignored: [String] = monitor.policy.ignoredHubIDs.sorted()
+        if !ignored.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ignored hubs")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(ignored, id: \.self) { id in
+                    HStack {
+                        Text(id)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("Stop ignoring") {
+                            monitor.stopIgnoringHub(id: id)
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
+            Divider()
         }
     }
 
@@ -479,11 +631,130 @@ struct DashboardView: View {
         if case let .failed(message) = monitor.state {
             return message
         }
+        if isHubMode {
+            return "Waiting for the first reading from the hub."
+        }
         return "Waiting for the first inverter reading from \(host)."
     }
 
     private var settings: some View {
         VStack(alignment: .leading, spacing: 12) {
+            connectionModePicker
+            if pendingMode == .hub {
+                hubSettingsForm
+            } else {
+                directSettings
+            }
+        }
+        .confirmationDialog(
+            "Switch to Direct mode?",
+            isPresented: $confirmingDirectSwitch,
+            titleVisibility: .visible
+        ) {
+            Button("The hub service is stopped. Switch to Direct", role: .destructive) {
+                monitor.switchToDirect(hubServiceConfirmedStopped: true)
+                showingSettings = false
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The logger accepts one connection, so this Mac and the hub must never both control "
+                    + "it. Stop solis-hub on the hub first and wait for it to finish. This Mac will "
+                    + "then stop watching for that hub's advertisement."
+            )
+        }
+    }
+
+    private var connectionModePicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Connection mode")
+                .font(.headline)
+            Picker("Mode", selection: $pendingMode) {
+                ForEach(ConnectionMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(
+                "Direct runs the poller on this Mac. Hub watches a solis-hub that runs it for you; "
+                    + "this Mac then never talks to the inverter."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Hub mode: where the hub is, and the controller settings it is running,
+    /// shown read-only. Display preferences stay editable.
+    private var hubSettingsForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HubSettingsSection(model: hubSettings)
+            Divider()
+            HubControlSummary(configuration: monitor.latest?.voltageControl?.configuration)
+            Divider()
+            Text("Hypervolt and Octopus")
+                .font(.headline)
+            Text(
+                "Sign in on the hub: run hypervolt-login and octopus-login there. The hub keeps "
+                    + "those credentials; this app never sees them."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Divider()
+            Text("Display")
+                .font(.headline)
+            Toggle("Show PV figures", isOn: $pvEnabled)
+            Divider()
+            menuBarMetricsSettings
+            HStack {
+                Button("Save and connect") {
+                    saveAndConnectToHub()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!hubSettings.isComplete)
+                if monitor.isRunning {
+                    Button("Disconnect") {
+                        monitor.stop()
+                    }
+                }
+            }
+            if !isHubMode {
+                Text("Switching to Hub stops this Mac's own poller first and waits for it to restore the inverter.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func saveAndConnectToHub() {
+        guard hubSettings.save() else { return }
+        if isHubMode {
+            monitor.startHub()
+        } else {
+            monitor.switchToHub()
+        }
+        showingSettings = false
+    }
+
+    @ViewBuilder
+    private var menuBarMetricsSettings: some View {
+        Text("Menu bar metrics")
+            .font(.headline)
+        Toggle("House load", isOn: $showHouseLoad)
+        Toggle("Battery state of charge", isOn: $showBattery)
+        Toggle("Grid flow", isOn: $showGrid)
+        Toggle("Inverter temperature", isOn: $showTemperature)
+        Toggle("PV generation", isOn: $showPV)
+            .disabled(!pvEnabled)
+        Text("Choose the live values shown without opening the dashboard.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private var directSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ignoredHubsList
             Text("Connection")
                 .font(.headline)
             LabeledContent("Logger IP") {
@@ -627,22 +898,17 @@ struct DashboardView: View {
             .foregroundStyle(.secondary)
 
             Divider()
-            Text("Menu bar metrics")
-                .font(.headline)
-            Toggle("House load", isOn: $showHouseLoad)
-            Toggle("Battery state of charge", isOn: $showBattery)
-            Toggle("Grid flow", isOn: $showGrid)
-            Toggle("Inverter temperature", isOn: $showTemperature)
-            Toggle("PV generation", isOn: $showPV)
-                .disabled(!pvEnabled)
-            Text("Choose the live values shown without opening the dashboard.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            menuBarMetricsSettings
 
             HStack {
                 Button("Save and connect") {
-                    showingSettings = false
-                    connect()
+                    if isHubMode {
+                        // Leaving Hub mode is never automatic.
+                        confirmingDirectSwitch = true
+                    } else {
+                        showingSettings = false
+                        connect()
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(
@@ -876,12 +1142,29 @@ struct DashboardView: View {
     }
 
     private var connectionLabel: String {
+        if isHubMode {
+            return hubConnectionLabel
+        }
         switch monitor.state {
         case .stopped: host.isEmpty ? "Setup required" : "Stopped"
         case .connecting: "Connecting to \(host)"
         case .connected: "Connected to \(host)"
         case .degraded: "Connection degraded"
         case .failed: "Connection failed"
+        }
+    }
+
+    private var hubConnectionLabel: String {
+        let link: HubLinkInfo? = monitor.hubLink
+        let route: String = link?.endpointKind.map { " via \($0.label)" } ?? ""
+        switch monitor.state {
+        case .stopped: return needsSetup ? "Setup required" : "Stopped"
+        case .connecting: return "Connecting to hub"
+        case .connected: return "Connected to hub\(route)"
+        case .degraded:
+            let detail: String? = monitor.statusDetail
+            return detail ?? "Connection degraded"
+        case .failed: return "Hub unreachable, retrying"
         }
     }
 
@@ -912,6 +1195,10 @@ struct DashboardView: View {
     }
 
     private func connect() {
+        if isHubMode {
+            monitor.startHub()
+            return
+        }
         // @AppStorage has already written these, so read them back the same way
         // the launch path does rather than assembling a second copy here.
         guard let configuration = MonitorConfiguration.stored() else { return }

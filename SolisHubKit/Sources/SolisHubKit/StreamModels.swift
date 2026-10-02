@@ -1,9 +1,9 @@
 import Foundation
 
-enum StreamError: LocalizedError {
+public enum StreamError: LocalizedError {
     case unsupportedSchema(Int)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case let .unsupportedSchema(version):
             let supported = StreamDecoder.supportedSchemaVersion
@@ -13,113 +13,152 @@ enum StreamError: LocalizedError {
     }
 }
 
-struct StreamEnvelope: Decodable, Sendable {
-    let schemaVersion: Int
-    let timestamp: String
-    let device: DeviceDetails
-    let reading: InverterReading
-    let health: ConnectionDetails
-    var voltageControl: VoltageControlDetails?
-    let cadence: StreamCadence?
-    let error: String?
+public struct StreamEnvelope: Decodable, Sendable {
+    public let schemaVersion: Int
+    public let timestamp: String
+    public let device: DeviceDetails
+    public let reading: InverterReading
+    public let health: ConnectionDetails
+    public var voltageControl: VoltageControlDetails?
+    public let cadence: StreamCadence?
+    public let error: String?
 }
 
 /// How often the poller is sampling. `idle` is true while nobody is watching
 /// and dynamic control has nothing to regulate or restore.
-struct StreamCadence: Decodable, Sendable {
-    let intervalS: Double
-    let idle: Bool
+public struct StreamCadence: Decodable, Sendable, Equatable {
+    public let intervalS: Double
+    public let idle: Bool
 }
 
-struct DeviceDetails: Decodable, Sendable {
-    let modelCode: Int
-    let dspVersion: Int
-    let hmiVersion: Int
-    let protocolVersion: Int
-    let typeDefinition: Int?
-    let profileValidated: Bool
-    let remoteDispatchSupported: Bool?
-    let remoteDispatchVersion: Int?
+public struct DeviceDetails: Decodable, Sendable {
+    public let modelCode: Int
+    public let dspVersion: Int
+    public let hmiVersion: Int
+    public let protocolVersion: Int
+    public let typeDefinition: Int?
+    public let profileValidated: Bool
+    public let remoteDispatchSupported: Bool?
+    public let remoteDispatchVersion: Int?
 }
 
-struct InverterReading: Decodable, Sendable {
-    let gridVoltageV: Double
-    let meterVoltageV: Double?
-    let inverterTemperatureC: Double
-    let inverterStatusCode: Int
-    let inverterStatus: String
-    let batterySocPercent: Int
-    let houseLoadKw: Double
-    let batteryKw: Double
-    let batteryFlowKw: Double
-    let batteryStatus: String
-    let gridKw: Double
-    let gridStatus: String
-    let pvKw: Double?
-    let pvTodayKwh: Double?
-    let alarms: [InverterAlarm]
+public struct InverterReading: Decodable, Sendable {
+    public let gridVoltageV: Double
+    public let meterVoltageV: Double?
+    public let inverterTemperatureC: Double
+    public let inverterStatusCode: Int
+    public let inverterStatus: String
+    public let batterySocPercent: Int
+    public let houseLoadKw: Double
+    public let batteryKw: Double
+    public let batteryFlowKw: Double
+    public let batteryStatus: String
+    public let gridKw: Double
+    public let gridStatus: String
+    public let pvKw: Double?
+    public let pvTodayKwh: Double?
+    public let alarms: [InverterAlarm]
 
     /// Grid power with the display convention used by the menu bar: imports are positive and exports are negative.
-    var gridImportPositiveKw: Double { -gridKw }
+    public var gridImportPositiveKw: Double { -gridKw }
 }
 
-struct VoltageControlDetails: Decodable, Sendable {
-    let state: String
-    let action: String
-    let mode: String?
-    let desiredLimitW: Int?
-    let rawVoltageV: Double?
-    let filteredVoltageV: Double?
-    let reason: String
-    let emergency: Bool
-    let voltageSource: String
-    let estimatedVoltageSensitivityVPerKw: Double?
-    let importDemandCeilingW: Int?
-    let importActuator: ActuatorDetails
-    let exportActuator: ActuatorDetails
-    let exportWriteValidated: Bool
+public struct VoltageControlDetails: Decodable, Sendable {
+    public let state: String
+    public let action: String
+    public let mode: String?
+    public let desiredLimitW: Int?
+    public let rawVoltageV: Double?
+    public let filteredVoltageV: Double?
+    public let reason: String
+    public let emergency: Bool
+    public let voltageSource: String
+    public let estimatedVoltageSensitivityVPerKw: Double?
+    public let importDemandCeilingW: Int?
+    public let importActuator: ActuatorDetails
+    public let exportActuator: ActuatorDetails
+    public let exportWriteValidated: Bool
     /// Sent only when the log has changed since the previous sample.
-    /// MonitorStore carries the last list forward, so views see nil only
+    /// StreamStateMerger carries the last list forward, so views see nil only
     /// before the first control sample of a run.
-    var recentEvents: [VoltageControlEvent]?
-    let dailySummary: VoltageControlDailySummary?
-    let recoveryNote: String?
+    public var recentEvents: [VoltageControlEvent]?
+    public let dailySummary: VoltageControlDailySummary?
+    public let recoveryNote: String?
     /// All three are nil unless --hypervolt-enable is on: which controllable
     /// load ("battery", "ev" or "balanced") is backed off first, whether a
     /// car is confirmed charging right now, and the EV actuator's own
     /// diagnostics. An older poller without Hypervolt support omits all
     /// three, which decodes the same way as Hypervolt simply being disabled.
-    let evPriority: String?
-    let evCharging: Bool?
-    let hypervoltActuator: HypervoltActuatorDetails?
+    public let evPriority: String?
+    public let evCharging: Bool?
+    public let hypervoltActuator: HypervoltActuatorDetails?
     /// Whether the EV charger's tighter band governed the last sample, and
     /// the band itself. Nil only from a poller older than the Octopus
     /// integration.
-    let evVoltageLimitsActive: Bool?
-    let effectiveMinimumVoltageV: Double?
-    let effectiveMaximumVoltageV: Double?
+    public let evVoltageLimitsActive: Bool?
+    public let effectiveMinimumVoltageV: Double?
+    public let effectiveMaximumVoltageV: Double?
     /// Nil unless --octopus-enable is on. Sent only when the plan or its
-    /// active window changes; MonitorStore carries the last one forward.
-    var octopusSchedule: OctopusScheduleDetails?
+    /// active window changes; StreamStateMerger carries the last one forward.
+    public var octopusSchedule: OctopusScheduleDetails?
+    /// The controller's effective settings. Sent in the first sample of a run
+    /// only, so StreamStateMerger carries it forward; a client that does not run
+    /// the poller shows these read-only. Nil from a poller that predates the
+    /// field being decoded, or before the first sample of a run.
+    public var configuration: VoltageControlConfiguration?
+}
+
+/// The poller's effective control settings, as sent in `configuration`.
+///
+/// Every field is optional and numeric fields are Doubles whatever Python's
+/// dataclass calls them: this is display-only, and a poller that adds, drops
+/// or retypes a field must not stop the whole sample decoding.
+public struct VoltageControlConfiguration: Decodable, Sendable, Equatable {
+    public let enabled: Bool?
+    public let importEnabled: Bool?
+    public let exportEnabled: Bool?
+    public let exportControlValidated: Bool?
+    public let minimumVoltageV: Double?
+    public let maximumVoltageV: Double?
+    public let safetyMarginV: Double?
+    public let deadbandV: Double?
+    public let maximumImportW: Double?
+    public let maximumExportW: Double?
+    public let siteExportPermissionW: Double?
+    public let minimumImportW: Double?
+    public let importHeadroomW: Double?
+    public let increaseStepW: Double?
+    public let reductionStepW: Double?
+    public let nearLimitReductionW: Double?
+    public let emergencyReductionW: Double?
+    public let settleTimeS: Double?
+    public let activationDelayS: Double?
+    public let deactivationDelayS: Double?
+    public let importActivationW: Double?
+    public let exportActivationW: Double?
+    public let hypervoltEnabled: Bool?
+    public let evPriority: String?
+    public let octopusEnabled: Bool?
+    public let octopusLeadTimeS: Double?
 }
 
 /// One planned Intelligent Octopus charge. Times carry their UTC offset.
-struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
-    let start: String
-    let end: String
-    let kind: String
+public struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
+    public let start: String
+    public let end: String
+    public let kind: String
     /// Parsed once at decode. The window is carried forward for hours and
     /// its label is rendered on every dashboard refresh.
-    let startDate: Date?
-    let endDate: Date?
+    public let startDate: Date?
+    public let endDate: Date?
 
-    var id: String { start }
+    public var id: String { start }
 
     private enum CodingKeys: String, CodingKey {
         case start, end, kind
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         start = try container.decode(String.self, forKey: .start)
         end = try container.decode(String.self, forKey: .end)
@@ -128,7 +167,7 @@ struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
         endDate = StreamDecoder.date(from: end)
     }
 
-    var label: String {
+    public var label: String {
         guard let from = startDate, let to = endDate else { return "\(start)–\(end)" }
         let sameDay = Calendar.current.isDate(from, inSameDayAs: Date())
         let day = sameDay ? "" : from.formatted(.dateTime.weekday(.abbreviated)) + " "
@@ -139,24 +178,24 @@ struct OctopusChargeWindow: Decodable, Sendable, Identifiable {
 
 /// The charge plan the poller last read from Octopus. A failed refresh keeps
 /// the previous plan and reports `lastError`; see docs/octopus-integration.md.
-struct OctopusScheduleDetails: Decodable, Sendable {
-    let chargeWindowActive: Bool
-    let activeWindow: OctopusChargeWindow?
-    let nextWindow: OctopusChargeWindow?
-    let plannedWindows: [OctopusChargeWindow]
-    let leadTimeS: Double
-    let fetchedAt: String?
-    let lastError: String?
+public struct OctopusScheduleDetails: Decodable, Sendable {
+    public let chargeWindowActive: Bool
+    public let activeWindow: OctopusChargeWindow?
+    public let nextWindow: OctopusChargeWindow?
+    public let plannedWindows: [OctopusChargeWindow]
+    public let leadTimeS: Double
+    public let fetchedAt: String?
+    public let lastError: String?
     /// The band held outside a charge and the band held during one, so the
     /// dashboard can say what a planned charge changes and what it returns
     /// to. Nil from a poller that predates them.
-    let normalMinimumVoltageV: Double?
-    let normalMaximumVoltageV: Double?
-    let chargeMinimumVoltageV: Double?
-    let chargeMaximumVoltageV: Double?
+    public let normalMinimumVoltageV: Double?
+    public let normalMaximumVoltageV: Double?
+    public let chargeMinimumVoltageV: Double?
+    public let chargeMaximumVoltageV: Double?
 
     /// When the tighter band starts: the lead-in before the next charge.
-    var nextLeadInDate: Date? {
+    public var nextLeadInDate: Date? {
         nextWindow?.startDate.map { $0.addingTimeInterval(-leadTimeS) }
     }
 }
@@ -164,7 +203,7 @@ struct OctopusScheduleDetails: Decodable, Sendable {
 extension OctopusScheduleDetails {
     /// Plain-language lines for the dashboard: when the next slot is, what it
     /// does to the voltage band and when the band goes back.
-    func summaryLines(now: Date) -> [String] {
+    public func summaryLines(now: Date) -> [String] {
         let normal = Self.band(normalMinimumVoltageV, normalMaximumVoltageV)
         let charge = Self.band(chargeMinimumVoltageV, chargeMaximumVoltageV)
         let unchanged = normal != nil && normal == charge
@@ -228,67 +267,67 @@ extension OctopusScheduleDetails {
 /// ActuatorDetails: that shape is a Solis register (a PDU address, a
 /// watt-per-raw-tick resolution); Hypervolt's own control surface is a
 /// current in amps with no register behind it, so the two do not share one.
-struct HypervoltActuatorDetails: Decodable, Sendable {
-    let connected: Bool
-    let commandedCurrentA: Double
-    let minimumCurrentA: Double
-    let maximumCurrentA: Double
-    let totalWriteCount: Int
-    let lastError: String?
+public struct HypervoltActuatorDetails: Decodable, Sendable {
+    public let connected: Bool
+    public let commandedCurrentA: Double
+    public let minimumCurrentA: Double
+    public let maximumCurrentA: Double
+    public let totalWriteCount: Int
+    public let lastError: String?
     /// What the car is actually drawing, as distinct from the commanded cap.
     /// Nil from a poller that predates them, or before the charger reports.
-    let measuredCurrentA: Double?
-    let chargingPowerKw: Double?
-    let sessionEnergyKwh: Double?
-    let telemetryAgeS: Double?
+    public let measuredCurrentA: Double?
+    public let chargingPowerKw: Double?
+    public let sessionEnergyKwh: Double?
+    public let telemetryAgeS: Double?
 }
 
-struct VoltageControlDailySummary: Decodable, Sendable {
-    let lowestVoltageV: Double
-    let highestVoltageV: Double
-    let importRegulatingS: Double
-    let exportRegulatingS: Double
-    let emergencyInterventions: Int
-    let maximumImportKw: Double
-    let maximumExportKw: Double
-    let averageGridKw: Double
+public struct VoltageControlDailySummary: Decodable, Sendable {
+    public let lowestVoltageV: Double
+    public let highestVoltageV: Double
+    public let importRegulatingS: Double
+    public let exportRegulatingS: Double
+    public let emergencyInterventions: Int
+    public let maximumImportKw: Double
+    public let maximumExportKw: Double
+    public let averageGridKw: Double
 }
 
-struct ActuatorDetails: Decodable, Sendable {
-    let pduAddress: Int
-    let resolutionW: Int
-    let baselineRaw: Int?
-    let lastCommandedRaw: Int?
-    let lastRequestedRaw: Int?
-    let lastWriteAt: String?
-    let writesLastHour: Int
-    let totalWriteCount: Int?
-    let lastError: String?
+public struct ActuatorDetails: Decodable, Sendable {
+    public let pduAddress: Int
+    public let resolutionW: Int
+    public let baselineRaw: Int?
+    public let lastCommandedRaw: Int?
+    public let lastRequestedRaw: Int?
+    public let lastWriteAt: String?
+    public let writesLastHour: Int
+    public let totalWriteCount: Int?
+    public let lastError: String?
 
-    var commandedW: Int? { lastCommandedRaw.map { $0 * resolutionW } }
+    public var commandedW: Int? { lastCommandedRaw.map { $0 * resolutionW } }
 }
 
-struct VoltageControlEvent: Decodable, Identifiable, Sendable {
-    let timestamp: String
-    let state: String
-    let action: String
-    let mode: String?
-    let message: String
-    let voltageV: Double?
-    let gridKw: Double?
-    let limitW: Int?
-    let previousLimitW: Int?
-    let limitDeltaW: Int?
+public struct VoltageControlEvent: Decodable, Identifiable, Sendable {
+    public let timestamp: String
+    public let state: String
+    public let action: String
+    public let mode: String?
+    public let message: String
+    public let voltageV: Double?
+    public let gridKw: Double?
+    public let limitW: Int?
+    public let previousLimitW: Int?
+    public let limitDeltaW: Int?
 
-    var id: String { "\(timestamp)-\(state)-\(message)" }
+    public var id: String { "\(timestamp)-\(state)-\(message)" }
 
-    var date: Date? { StreamDecoder.date(from: timestamp) }
+    public var date: Date? { StreamDecoder.date(from: timestamp) }
 
-    var timeLabel: String {
+    public var timeLabel: String {
         date?.formatted(date: .omitted, time: .standard) ?? timestamp
     }
 
-    var changeLabel: String {
+    public var changeLabel: String {
         let subject = mode.map { "\($0.capitalized) limit" } ?? "Control limit"
         guard let limitW else { return state }
         let current = Self.power(limitW)
@@ -309,295 +348,29 @@ struct VoltageControlEvent: Decodable, Identifiable, Sendable {
     }
 }
 
-struct InverterAlarm: Decodable, Identifiable, Sendable {
-    let code: String
-    let message: String
-    let severity: String
+public struct InverterAlarm: Decodable, Identifiable, Sendable {
+    public let code: String
+    public let message: String
+    public let severity: String
 
-    var id: String { "\(code)-\(message)" }
+    public var id: String { "\(code)-\(message)" }
 }
 
-struct ConnectionDetails: Decodable, Sendable {
-    let lastSampleAgeS: Double?
-    let latencyMs: Double
-    let successfulPolls: Int
-    let totalFailures: Int
-    let consecutiveFailures: Int
-    let reconnects: Int
-    let rejectedSamples: Int?
+public struct ConnectionDetails: Decodable, Sendable {
+    public let lastSampleAgeS: Double?
+    public let latencyMs: Double
+    public let successfulPolls: Int
+    public let totalFailures: Int
+    public let consecutiveFailures: Int
+    public let reconnects: Int
+    public let rejectedSamples: Int?
 }
 
-struct HistoryPoint: Identifiable, Sendable {
-    let id = UUID()
-    let date: Date
-    let meterVoltageV: Double?
-    let inverterTemperatureC: Double
-    let houseLoadKw: Double
-    let batteryFlowKw: Double
-    let gridImportPositiveKw: Double
-    let pvKw: Double?
-    let controlState: String?
-    let controlAction: String?
-    let controlReason: String?
-    let controlEmergency: Bool
-    let controlMode: String?
-    let importLimitW: Int?
-    let exportLimitW: Int?
-
-    init(date: Date, reading: InverterReading, voltageControl: VoltageControlDetails? = nil) {
-        self.date = date
-        meterVoltageV = reading.meterVoltageV
-        inverterTemperatureC = reading.inverterTemperatureC
-        houseLoadKw = reading.houseLoadKw
-        batteryFlowKw = reading.batteryFlowKw
-        gridImportPositiveKw = reading.gridImportPositiveKw
-        pvKw = reading.pvKw
-        controlState = voltageControl?.state
-        controlAction = voltageControl?.action
-        controlReason = voltageControl?.reason
-        controlEmergency = voltageControl?.emergency ?? false
-        controlMode = voltageControl?.mode
-        importLimitW = voltageControl?.importActuator.commandedW
-        exportLimitW = voltageControl?.exportActuator.commandedW
-    }
-}
-
-private struct TimeSeriesStorage<Element: Sendable>: Sendable {
-    private var storage: [Element] = []
-    private var startIndex = 0
-
-    var elements: [Element] {
-        guard startIndex < storage.count else { return [] }
-        return Array(storage[startIndex...])
-    }
-
-    var last: Element? {
-        startIndex < storage.count ? storage.last : nil
-    }
-
-    mutating func append(_ element: Element) {
-        storage.append(element)
-    }
-
-    mutating func discardPrefix(while shouldDiscard: (Element) -> Bool) {
-        while startIndex < storage.count, shouldDiscard(storage[startIndex]) {
-            startIndex += 1
-        }
-        // Array.removeFirst shifts every retained element. Compact only
-        // occasionally so steady-state history insertion remains amortised O(1).
-        if startIndex >= 1_024, startIndex * 2 >= storage.count {
-            storage.removeFirst(startIndex)
-            startIndex = 0
-        }
-    }
-
-    mutating func removeAll() {
-        storage.removeAll(keepingCapacity: true)
-        startIndex = 0
-    }
-}
-
-struct ControlHistoryBuffer: Sendable {
-    static let retentionInterval: TimeInterval = 30 * 60
-    private var storage = TimeSeriesStorage<HistoryPoint>()
-
-    var points: [HistoryPoint] { storage.elements }
-
-    mutating func append(_ point: HistoryPoint) {
-        storage.append(point)
-        let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
-        storage.discardPrefix { $0.date < cutoff }
-    }
-
-    mutating func removeAll() {
-        storage.removeAll()
-    }
-}
-
-struct HistoryBuffer: Sendable {
-    static let displaySampleInterval: TimeInterval = 30
-    static let retentionInterval: TimeInterval = 24 * 60 * 60
-
-    private var storage = TimeSeriesStorage<HistoryPoint>()
-
-    var points: [HistoryPoint] { storage.elements }
-
-    @discardableResult
-    mutating func append(_ point: HistoryPoint) -> Bool {
-        if let last = storage.last,
-           point.date.timeIntervalSince(last.date) < Self.displaySampleInterval {
-            return false
-        }
-
-        storage.append(point)
-        let cutoff = point.date.addingTimeInterval(-Self.retentionInterval)
-        storage.discardPrefix { $0.date < cutoff }
-        return true
-    }
-
-    mutating func removeAll() {
-        storage.removeAll()
-    }
-}
-
-struct MonitorConfiguration: Equatable, Sendable {
-    var host: String
-    var port: Int
-    var slave: Int
-    var interval: Double
-    var slowInterval: Double
-    var idleInterval: Double
-    var inverterMaxKw: Double
-    var gridMaxKw: Double
-    var pvEnabled: Bool
-    var dynamicVoltageEnabled: Bool
-    var dynamicImportEnabled: Bool
-    var dynamicExportEnabled: Bool
-    var minimumVoltage: Double
-    var maximumVoltage: Double
-    var voltageSafetyMargin: Double
-    var voltageDeadband: Double
-    var maximumImportKw: Double
-    var importHeadroomKw: Double
-    var maximumExportKw: Double
-    var siteExportPermissionKw: Double
-    var increaseStepW: Int
-    var reductionStepW: Int
-    var nearLimitReductionW: Int
-    var emergencyReductionW: Int
-    var controlSettleTime: Double
-    var controlActivationDelay: Double
-    var controlDeactivationDelay: Double
-    var importActivationKw: Double
-    var exportActivationKw: Double
-    var minimumWriteInterval: Double
-    var hypervoltEnabled: Bool
-    var evPriority: String
-    /// Empty means the poller's own default, <state dir>/hypervolt.json,
-    /// written once by hypervolt-login.
-    var hypervoltCredentialsPath: String
-    var octopusEnabled: Bool
-    /// Empty means the poller's own default, <state dir>/octopus.json,
-    /// written once by octopus-login.
-    var octopusCredentialsPath: String
-
-    static var defaultOctopusCredentialsPath: String {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("SolisTools", isDirectory: true)
-            .appendingPathComponent("octopus.json")
-            .path
-    }
-
-    /// Where hypervolt-login writes credentials when the user has not
-    /// overridden the path, matching solis_poll.py's own default exactly so
-    /// a poller launched without --hypervolt-credentials finds them.
-    static var defaultHypervoltCredentialsPath: String {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("SolisTools", isDirectory: true)
-            .appendingPathComponent("hypervolt.json")
-            .path
-    }
-
-    /// Read the settings the dashboard stores, or nil if no host is set yet.
-    ///
-    /// The keys match DashboardView's @AppStorage so the launch path and the
-    /// settings form cannot drift apart.
-    static func stored(_ defaults: UserDefaults = .standard) -> MonitorConfiguration? {
-        let host = (defaults.string(forKey: "host") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else { return nil }
-        let interval = max(0.5, defaults.object(forKey: "pollInterval") as? Double ?? 2)
-        return MonitorConfiguration(
-            host: host,
-            port: defaults.object(forKey: "port") as? Int ?? 502,
-            slave: defaults.object(forKey: "slave") as? Int ?? 1,
-            interval: interval,
-            slowInterval: max(1, defaults.object(forKey: "slowInterval") as? Double ?? 10),
-            // The poller rejects an idle interval shorter than the fast one.
-            idleInterval: max(interval, defaults.object(forKey: "idlePollInterval") as? Double ?? 5),
-            inverterMaxKw: max(0.1, defaults.object(forKey: "inverterMaxKw") as? Double ?? 10),
-            gridMaxKw: max(0.1, defaults.object(forKey: "gridMaxKw") as? Double ?? 23),
-            pvEnabled: defaults.bool(forKey: "pvEnabled"),
-            dynamicVoltageEnabled: defaults.bool(forKey: "dynamicVoltageEnabled"),
-            dynamicImportEnabled: defaults.object(forKey: "dynamicImportEnabled") as? Bool ?? true,
-            dynamicExportEnabled: defaults.bool(forKey: "dynamicExportEnabled"),
-            minimumVoltage: min(279, max(180, defaults.object(forKey: "minimumVoltage") as? Double ?? 215)),
-            maximumVoltage: min(280, max(181, defaults.object(forKey: "maximumVoltage") as? Double ?? 258)),
-            voltageSafetyMargin: max(0.1, defaults.object(forKey: "voltageSafetyMargin") as? Double ?? 1.5),
-            voltageDeadband: max(0.1, defaults.object(forKey: "voltageDeadband") as? Double ?? 0.75),
-            maximumImportKw: max(1, defaults.object(forKey: "maximumImportKw") as? Double ?? 14),
-            importHeadroomKw: max(
-                0, defaults.object(forKey: "importHeadroomKw") as? Double ?? 2
-            ),
-            maximumExportKw: max(0, defaults.object(forKey: "maximumExportKw") as? Double ?? 10),
-            siteExportPermissionKw: max(0, defaults.object(forKey: "siteExportPermissionKw") as? Double ?? 10),
-            increaseStepW: max(100, defaults.object(forKey: "increaseStepW") as? Int ?? 200),
-            reductionStepW: max(100, defaults.object(forKey: "reductionStepW") as? Int ?? 500),
-            nearLimitReductionW: max(100, defaults.object(forKey: "nearLimitReductionW") as? Int ?? 1_000),
-            emergencyReductionW: max(100, defaults.object(forKey: "emergencyReductionW") as? Int ?? 2_000),
-            controlSettleTime: max(0, defaults.object(forKey: "controlSettleTime") as? Double ?? 5),
-            controlActivationDelay: max(0, defaults.object(forKey: "controlActivationDelay") as? Double ?? 5),
-            controlDeactivationDelay: max(0, defaults.object(forKey: "controlDeactivationDelay") as? Double ?? 10),
-            importActivationKw: max(0, defaults.object(forKey: "importActivationKw") as? Double ?? 1),
-            exportActivationKw: max(0, defaults.object(forKey: "exportActivationKw") as? Double ?? 0.5),
-            minimumWriteInterval: max(5, defaults.object(forKey: "minimumWriteInterval") as? Double ?? 5),
-            hypervoltEnabled: defaults.bool(forKey: "hypervoltEnabled"),
-            evPriority: defaults.string(forKey: "evPriority") ?? "battery",
-            hypervoltCredentialsPath: defaults.string(forKey: "hypervoltCredentialsPath") ?? "",
-            octopusEnabled: defaults.bool(forKey: "octopusEnabled"),
-            octopusCredentialsPath: defaults.string(forKey: "octopusCredentialsPath") ?? ""
-        )
-    }
-}
-
-enum HistoryMetric: String, CaseIterable, Identifiable {
-    case house = "House"
-    case battery = "Battery"
-    case grid = "Grid"
-    case voltage = "Voltage"
-    case temperature = "Temperature"
-    case pv = "PV"
-
-    var id: Self { self }
-
-    var unit: String {
-        switch self {
-        case .voltage: "V"
-        case .temperature: "°C"
-        default: "kW"
-        }
-    }
-
-    func value(from reading: InverterReading) -> Double? {
-        switch self {
-        case .house: reading.houseLoadKw
-        case .battery: reading.batteryFlowKw
-        // Imports positive, matching the Grid card rather than the poller's
-        // export-positive convention.
-        case .grid: reading.gridImportPositiveKw
-        case .voltage: reading.gridVoltageV
-        case .temperature: reading.inverterTemperatureC
-        case .pv: reading.pvKw
-        }
-    }
-
-    func value(from point: HistoryPoint) -> Double? {
-        switch self {
-        case .house: point.houseLoadKw
-        case .battery: point.batteryFlowKw
-        case .grid: point.gridImportPositiveKw
-        case .voltage: point.meterVoltageV
-        case .temperature: point.inverterTemperatureC
-        case .pv: point.pvKw
-        }
-    }
-}
-
-enum StreamDecoder {
+public enum StreamDecoder {
     /// Stream schema this build knows how to read. solis_poll.py emits the same
     /// number; a newer poller means the app is out of date, not that the line
     /// is corrupt, and the two need telling apart in the UI.
-    static let supportedSchemaVersion = 2
+    public static let supportedSchemaVersion = 2
     private static let fractionalDateStyle = Date.ISO8601FormatStyle(
         includingFractionalSeconds: true
     )
@@ -605,9 +378,16 @@ enum StreamDecoder {
         includingFractionalSeconds: false
     )
 
-    static func decode(_ data: Data) throws -> StreamEnvelope {
+    /// One decoder shape for the stream and the hub's messages, so the
+    /// snake_case convention cannot drift between them.
+    static func makeJSONDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
+
+    public static func decode(_ data: Data) throws -> StreamEnvelope {
+        let decoder = makeJSONDecoder()
         let envelope = try decoder.decode(StreamEnvelope.self, from: data)
         guard envelope.schemaVersion == supportedSchemaVersion else {
             throw StreamError.unsupportedSchema(envelope.schemaVersion)
@@ -615,7 +395,7 @@ enum StreamDecoder {
         return envelope
     }
 
-    static func date(from value: String) -> Date? {
+    public static func date(from value: String) -> Date? {
         if let date = try? Date(value, strategy: fractionalDateStyle) {
             return date
         }
