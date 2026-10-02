@@ -630,6 +630,8 @@ For Hub mode, `make hub-demo` prints a token; choose Hub mode with LAN URL
   migrating control from the Mac
 - [docs/hub-protocol.md](docs/hub-protocol.md): hub messages, endpoints and
   versioning
+- [docs/hub-build-spec.md](docs/hub-build-spec.md): the specification the hub was
+  built against, and where the implementation differs
 - [docs/hub-remote-access.md](docs/hub-remote-access.md): Cloudflare Tunnel and
   Access setup
 - [docs/hub-ios-integration.md](docs/hub-ios-integration.md): SolisHubKit and the

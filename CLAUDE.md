@@ -181,7 +181,8 @@ narrowest supported width.
   arbitration and credential handling.
 - `docs/hub.md`, `docs/hub-protocol.md`, `docs/hub-remote-access.md`,
   `docs/hub-ios-integration.md`: the hub, its wire format, the Cloudflare
-  Tunnel setup and the iOS contract.
+  Tunnel setup and the iOS contract. `docs/hub-build-spec.md` is the original
+  build spec, for the reasoning; it is not the current reference.
 - `docs/octopus-integration.md`: the Octopus charge plan, the lead-in and the
   failure rules.
 - `docs/releasing.md` — the release runbook.
