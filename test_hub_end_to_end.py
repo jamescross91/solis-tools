@@ -261,6 +261,8 @@ class HubStreamTests(HubEndToEndCase):
 
     async def test_killing_the_poller_gives_backoff_a_restart_and_a_fresh_snapshot(self):
         if shutil.which("pgrep") is None:
+            if os.environ.get("CI"):
+                self.fail("pgrep is needed to find the poller child and CI must not skip this")
             self.skipTest("pgrep is needed to find the poller child")
         with FakeInverter() as inverter:
             hub = self.start_hub(inverter)

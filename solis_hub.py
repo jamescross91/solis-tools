@@ -1413,7 +1413,9 @@ class Hub:
         raw_since = request.query.get("since", [None])[0]
         since = None
         if raw_since is not None:
-            since = parse_timestamp(raw_since)
+            # An unencoded "+" in a UTC offset arrives as a space; an ISO
+            # timestamp never contains one, so restoring it is unambiguous.
+            since = parse_timestamp(raw_since.replace(" ", "+"))
             if since is None:
                 await self._respond(writer, http_response(400, json_bytes({"error": "bad since"})))
                 return
@@ -1574,14 +1576,20 @@ class Hub:
         self.supervisor.request_stop()
         # Clients stay connected while the poller winds down, so they see the
         # restoration it performs; only then are they sent away.
-        try:
-            await asyncio.wait_for(asyncio.shield(supervisor_task), RESTORATION_WAIT_S)
-        except asyncio.TimeoutError:
+        # A second signal at any point abandons the wait, so an impatient
+        # operator is never stuck behind a poller that will not finish.
+        waiter: asyncio.Future[Any] = asyncio.ensure_future(force.wait())
+        done, _ = await asyncio.wait(
+            {supervisor_task, waiter},
+            timeout=RESTORATION_WAIT_S,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if supervisor_task not in done:
             log("poller has not exited; baseline restoration is pending, leaving it running")
             self.supervisor.mark_restoration_pending()
-            waiter: asyncio.Future[Any] = asyncio.ensure_future(force.wait())
-            await asyncio.wait({supervisor_task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-            waiter.cancel()
+            if waiter not in done:
+                await asyncio.wait({supervisor_task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        waiter.cancel()
         for client in tuple(self.clients):
             await client.close(1001, "hub stopping")
         if self.server is not None:
@@ -1672,7 +1680,8 @@ def token_command(args: argparse.Namespace) -> int:
     if args.action == "new":
         print(write_token(path))
         print(
-            f"solis-hub: wrote {path}; this is the only time the token is printed", file=sys.stderr
+            f"solis-hub: wrote {path}; restart solis-hub for the new token to take effect",
+            file=sys.stderr,
         )
     else:
         print(read_token(path))

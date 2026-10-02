@@ -935,6 +935,16 @@ class HistoryEndpointTests(HubTestCase):
         self.assertEqual(headers["content-encoding"], "gzip")
         self.assertEqual(len(json.loads(gzip.decompress(body))), 1)
 
+    async def test_an_unencoded_plus_in_since_is_read_as_a_plus(self):
+        self.process.feed(envelope("2026-08-19T16:00:00.000+01:00"))
+        await eventually(lambda: len(self.hub.history.native) == 1)
+        for since, expected in (
+            ("2026-08-19T15:00:00+01:00", 1),  # one hour before, unencoded plus
+            ("2026-08-19T17:00:00+01:00", 0),
+        ):
+            _, _, body = await self.http(f"/v1/history/samples?since={since}", self.token)
+            self.assertEqual(len(json.loads(body)), expected, since)
+
     async def test_bad_query_values_are_400(self):
         for path in (
             "/v1/history/samples?since=yesterday",
@@ -1150,6 +1160,20 @@ class ShutdownTests(HubTestCase):
         await asyncio.wait_for(shutdown, 5)
         self.assertEqual(len(self.spawner.processes), 1)
         stop.set()
+
+    async def test_a_second_signal_inside_the_wait_abandons_it_at_once(self):
+        force = asyncio.Event()
+        force.set()
+        started = time.monotonic()
+        await asyncio.wait_for(
+            self.hub.shutdown(
+                self.supervisor_task, asyncio.ensure_future(asyncio.sleep(60)), force
+            ),
+            5,
+        )
+        self.assertLess(time.monotonic() - started, solis_hub.RESTORATION_WAIT_S / 2)
+        self.assertEqual(self.hub.supervisor.status.state, "restoration_pending")
+        self.assertIsNone(self.process.returncode)  # still never killed
 
     async def test_a_poller_that_will_not_exit_is_left_running_and_reported(self):
         with patch.object(solis_hub, "RESTORATION_WAIT_S", 0.05):
