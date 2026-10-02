@@ -13,7 +13,8 @@ solis-poll --host 192.168.1.57 --stream-json
 ```
 
 Produced by `stream_payload` in `solis_poll.py`; consumed by `StreamDecoder` and
-the types in `SolisMenuBar/Sources/SolisMenuBar/Models.swift`.
+the types in `SolisHubKit/Sources/SolisHubKit/StreamModels.swift`, which the
+menu bar and the iOS app share.
 
 The menu-bar app is not the only consumer. `solis-hub` is a second one: it
 reads this stream from a poller child on a Raspberry Pi and forwards each
@@ -188,7 +189,7 @@ message rather than silently mis-rendering.
 
 When you bump it, change the constant in both places:
 `STREAM_SCHEMA_VERSION` in `solis_poll.py`, and
-`StreamDecoder.supportedSchemaVersion` in `Models.swift`.
+`StreamDecoder.supportedSchemaVersion` in `StreamModels.swift`.
 
 | Version | Change |
 | --- | --- |

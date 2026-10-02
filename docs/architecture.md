@@ -240,7 +240,7 @@ from one to the other.
 
 `SolisHubKit/` is a Swift package (macOS 13, iOS 17; Foundation and Network
 only) shared by the menu bar and the iOS app. It holds the stream contract
-types and `StreamDecoder` (moved out of `Models.swift`, with their contract
+types and `StreamDecoder` (moved out of the menu bar's `Models.swift`, with their contract
 tests), the hub message types, `HubClient`, the merged state, endpoint
 resolution (Bonjour then LAN then remote), the history client and Keychain
 storage. See [hub-ios-integration.md](hub-ios-integration.md).
@@ -260,6 +260,11 @@ while a hub is advertised until the user has decided.
 | --- | --- |
 | `Models.swift` | `HistoryBuffer`, `HistoryMetric` and chart projections (the stream contract types live in `SolisHubKit`) |
 | `MonitorStore.swift` | Observable state and the receive path shared by both sources |
+| `TelemetrySource.swift` | The source protocol: `events`, `start()`, `stop()` and `setAttention(_:)` |
+| `PollerProcessSource.swift` | Direct mode: the child-process lifecycle, retry and restoration code moved out of `MonitorStore` |
+| `HubSource.swift` | Hub mode: wraps the `SolisHubKit` client, Bonjour discovery and history backfill |
+| `ConnectionPolicy.swift` | Pure rules for the single-controller guards, unit-tested |
+| `HubSettings.swift` | Hub connection settings, Keychain-backed secrets and "Test connection" |
 | `DashboardView.swift` | Popover: metric cards, chart, alarms, settings |
 | `SolisMenuBarApp.swift` | `MenuBarExtra` scene and the compact menu-bar label |
 | `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `MonitorStore` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |

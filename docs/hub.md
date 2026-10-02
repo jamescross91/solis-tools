@@ -185,6 +185,15 @@ _solis-hub._tcp` from another machine, and `systemctl stop solis-hub` returning
 within a few seconds, with the poller's `voltage control shutdown` lines in the
 journal, when control is on.
 
+### Local network prompt on the Mac
+
+The menu-bar app now declares `_solis-hub._tcp` in its Info.plist so it can find
+a hub by Bonjour. macOS may ask once for local network access the first time the
+upgraded app starts. In Hub mode the token and any Cloudflare Access credentials
+are kept in the Keychain; after a Homebrew upgrade the ad-hoc-signed app can
+trigger a Keychain "Always Allow" prompt again. Direct-only use never creates or
+reads Keychain items.
+
 ## Tokens
 
 ```sh
