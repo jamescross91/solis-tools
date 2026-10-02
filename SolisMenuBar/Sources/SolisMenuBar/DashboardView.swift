@@ -1146,11 +1146,11 @@ struct DashboardView: View {
             return hubConnectionLabel
         }
         switch monitor.state {
-        case .stopped: host.isEmpty ? "Setup required" : "Stopped"
-        case .connecting: "Connecting to \(host)"
-        case .connected: "Connected to \(host)"
-        case .degraded: "Connection degraded"
-        case .failed: "Connection failed"
+        case .stopped: return host.isEmpty ? "Setup required" : "Stopped"
+        case .connecting: return "Connecting to \(host)"
+        case .connected: return "Connected to \(host)"
+        case .degraded: return "Connection degraded"
+        case .failed: return "Connection failed"
         }
     }
 
