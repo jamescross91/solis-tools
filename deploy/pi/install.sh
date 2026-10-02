@@ -40,7 +40,10 @@ install -d -m 0755 "$config_dir"
 if [[ ! -x "$prefix/bin/python" ]]; then
   python3 -m venv "$prefix"
 fi
-"$prefix/bin/python" -m pip install --quiet "$source_dir"
+"$prefix/bin/python" -m pip install --quiet --no-cache-dir "$source_dir"
+# pip builds in the checkout as root; leave nothing there that blocks a later
+# git pull or make as a normal user.
+rm -rf "$source_dir/build" "$source_dir"/*.egg-info
 
 fresh_config=0
 if [[ ! -f "$config" ]]; then
@@ -53,7 +56,7 @@ as_solis() {
 }
 
 if [[ ! -f "$token_file" ]]; then
-  token="$(as_solis "$prefix/bin/solis-hub" token new --config "$config" 2>/dev/null)"
+  token="$(as_solis "$prefix/bin/solis-hub" token new --config "$config")"
   echo
   echo "Hub token (shown once, enter it in the menu-bar app): $token"
   echo

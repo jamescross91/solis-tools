@@ -11,12 +11,16 @@ User=solis
 Environment=XDG_STATE_HOME=/var/lib
 ExecStart=/opt/solis-tools/bin/solis-hub serve --config /etc/solis-tools/hub.json
 Restart=on-failure
+# Long enough for an orphaned poller to notice its closed pipe and restore the
+# inverter before a replacement hub starts its own.
 RestartSec=5
 # SIGTERM goes to the hub alone, which forwards it to the poller and waits for
 # the inverter's baseline to be restored. Only after TimeoutStopSec, which must
 # stay above the hub's 20 s restoration wait, does systemd kill what remains.
 KillMode=mixed
 TimeoutStopSec=30
+# The hub also serves unauthenticated sockets for a few seconds each; leave room.
+LimitNOFILE=4096
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

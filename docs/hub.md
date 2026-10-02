@@ -100,7 +100,10 @@ Octopus are enabled by `--hypervolt-enable`, `--octopus-enable` and
 only stores the credentials.
 
 `solis-hub check --config PATH` validates the file, the token permissions and
-that `solis-poll` can be found, then exits.
+that `solis-poll` can be found, then exits. The hub looks for `solis-poll` beside
+its own executable, then on `PATH`; set `SOLIS_POLL_PATH` to use a specific
+binary. It runs the poller with the state directory as its working directory, so
+a relative `--csv` or `--jsonl` path lands inside it.
 
 ### Push notifications (ntfy)
 
@@ -270,7 +273,9 @@ makes the hub exit without waiting further. Under systemd, `KillMode=mixed`
 still sends SIGKILL to what remains when `TimeoutStopSec=30` ends, so "leaves it
 running" holds for the hub's own behaviour and outside systemd; the 30 s is why
 the unit allows 10 s above the hub's wait. Recover from an unclean stop on the Pi the way the README
-describes for an unclean shutdown on a Mac.
+describes for an unclean shutdown on a Mac. If the hub itself is killed or
+crashes, the poller notices its closed pipe at its next write and restores the
+inverter on its own, which is why the unit waits 5 s before restarting it.
 
 ## Troubleshooting
 

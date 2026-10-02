@@ -26,7 +26,6 @@ import gzip
 import hashlib
 import hmac
 import ipaddress
-import itertools
 import json
 import os
 import queue
@@ -61,7 +60,17 @@ DEFAULT_PORT = 8765
 CLIENT_QUEUE_LIMIT = 16
 MAX_CLIENT_MESSAGE_BYTES = 64 * 1024
 MAX_REQUEST_HEAD_BYTES = 16 * 1024
-REQUEST_TIMEOUT_S = 10.0
+REQUEST_TIMEOUT_S = 5.0
+# Connections that have not yet sent a complete request head. A LAN host is
+# untrusted, and each such socket holds a file descriptor, so both the total and
+# the number from one address are capped (cloudflared connects from loopback, so
+# the per-address cap is generous).
+MAX_PENDING_CONNECTIONS = 128
+MAX_PENDING_PER_PEER = 32
+# More messages than this in the window ends the connection; a real client sends
+# an attention change and an occasional ping.
+CLIENT_MESSAGE_LIMIT = 60
+CLIENT_MESSAGE_WINDOW_S = 10.0
 PING_INTERVAL_S = 20.0
 PONG_TIMEOUT_S = 40.0
 SEND_TIMEOUT_S = 15.0
@@ -169,6 +178,12 @@ def default_state_dir() -> Path:
 
 def ensure_state_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # An existing directory may have been made with a looser mode. It holds the
+    # token and the poller's journal, so tighten it when it is ours to change.
+    status = path.stat()
+    if status.st_mode & 0o077 and status.st_uid == os.getuid():
+        os.chmod(path, 0o700)
+        log(f"tightened {path} to mode 0700")
 
 
 def _resolve_path(value: str, state_dir: Path) -> Path:
@@ -511,6 +526,20 @@ def http_response(
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
 
 
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def strict_json_loads(text: str) -> Any:
+    """json.loads that refuses NaN and Infinity, which strict decoders (Swift's)
+    cannot read, and that treats pathological nesting as invalid rather than as
+    an exception that would end a connection."""
+    try:
+        return json.loads(text, parse_constant=_reject_constant)
+    except RecursionError as exc:
+        raise ValueError("nested too deeply") from exc
+
+
 def json_bytes(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode()
 
@@ -553,7 +582,13 @@ class FrameError(Exception):
 
 
 def unmask(payload: bytes, mask: bytes) -> bytes:
-    return bytes(a ^ b for a, b in zip(payload, itertools.cycle(mask)))
+    if not payload:
+        return b""
+    # One big-integer XOR is an order of magnitude faster than a byte loop, which
+    # matters for a 64 KiB frame on a Raspberry Pi.
+    length = len(payload)
+    key = (mask * (length // 4 + 1))[:length]
+    return (int.from_bytes(payload, "big") ^ int.from_bytes(key, "big")).to_bytes(length, "big")
 
 
 async def read_client_frame(
@@ -665,9 +700,11 @@ def parse_timestamp(value: Any) -> datetime | None:
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
-    except ValueError:
+        return parsed if parsed.tzinfo else parsed.astimezone()
+    except (ValueError, OverflowError, OSError):
+        # Year 1 or 9999 in a naive timestamp overflows the local-time
+        # conversion; any such value is simply not a usable timestamp.
         return None
-    return parsed if parsed.tzinfo else parsed.astimezone()
 
 
 class SampleHistory:
@@ -737,17 +774,20 @@ class SampleHistory:
 def locate_poller() -> list[str]:
     """The command that starts solis-poll, mirroring ExecutableLocator.swift.
 
-    Beside the hub's own executable first (a virtualenv's bin, or Homebrew's),
-    then PATH. A source checkout has neither, so it falls back to the script
+    SOLIS_POLL_PATH overrides everything (as in the menu bar). Otherwise beside
+    the hub's own executable first (a virtualenv's bin, or Homebrew's), then PATH. A source checkout has neither, so it falls back to the script
     next to this file, which is also what the tests run.
     """
+    override = os.environ.get("SOLIS_POLL_PATH")
+    if override and os.access(override, os.X_OK):
+        return [str(Path(override).absolute())]
     candidates = [
         Path(sys.argv[0]).parent,
         Path(sys.argv[0]).resolve().parent,
         Path(sys.executable).parent,
     ]
     for directory in candidates:
-        found = directory / "solis-poll"
+        found = directory.absolute() / "solis-poll"
         if found.is_file() and os.access(found, os.X_OK):
             return [str(found)]
     on_path = shutil.which("solis-poll")
@@ -762,13 +802,18 @@ def locate_poller() -> list[str]:
 SpawnFactory = Callable[[Sequence[str]], Awaitable[Any]]
 
 
-async def spawn_process(command: Sequence[str]) -> asyncio.subprocess.Process:
-    # stderr is inherited so the poller's own diagnostics reach journald.
+async def spawn_process(
+    command: Sequence[str], cwd: Path | None = None
+) -> asyncio.subprocess.Process:
+    # stderr is inherited so the poller's own diagnostics reach journald. The
+    # working directory is the state directory because that is what relative
+    # poller paths were validated against.
     return await asyncio.create_subprocess_exec(
         *command,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         limit=POLLER_LINE_LIMIT,
+        cwd=cwd,
     )
 
 
@@ -854,9 +899,14 @@ class PollerSupervisor:
         self._sync_attention()
         try:
             await self._drain(process)
-        finally:
-            code = await process.wait()
+        except asyncio.CancelledError:
+            # The hub is exiting after a second signal. Waiting for a poller
+            # that will not finish restoring would hang the exit, so leave it
+            # (it restores itself when its pipe closes).
             self.process = None
+            raise
+        code = await process.wait()
+        self.process = None
         self.status.last_exit_code = code
         if not self.stopping:
             log(f"solis-poll exited with status {code}")
@@ -873,7 +923,14 @@ class PollerSupervisor:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
-            if self.on_line(line) and self.status.state in (STARTING, BACKOFF):
+            try:
+                accepted = self.on_line(line)
+            except Exception as exc:
+                # One hostile line must not end supervision, or the child would
+                # block on a full pipe and the hub would look alive but be deaf.
+                log(f"dropped a line that could not be processed ({type(exc).__name__})")
+                continue
+            if accepted and self.status.state in (STARTING, BACKOFF):
                 self._set_state(RUNNING)
 
     def set_attention(self, on: bool) -> None:
@@ -1074,7 +1131,8 @@ class HubClient:
         self.overflows = 0
         self.last_pong = time.monotonic()
         self.bad_messages = 0
-        self.ignored_types: set[str] = set()
+        self.warned_unknown = False
+        self.message_times: collections.deque[float] = collections.deque()
         self._queue: collections.deque[str] = collections.deque()
         self._wake = asyncio.Event()
         self._send_lock = asyncio.Lock()
@@ -1180,9 +1238,17 @@ class Hub:
         self.cache = StateCache()
         self.history = SampleHistory(config.history_native_minutes, config.history_compact_hours)
         self.limiter = RateLimiter()
+        self.pending = 0
+        self.pending_by_peer: dict[str, int] = {}
         self.clients: set[HubClient] = set()
         self.health = HealthMonitor(self._alert)
         command = list(poller_command or locate_poller())
+        if spawn is spawn_process:
+            state_dir = config.state_dir
+
+            async def spawn(command: Sequence[str]) -> Any:  # noqa: F811
+                return await spawn_process(command, state_dir)
+
         self.supervisor = PollerSupervisor(
             [*command, "--stream-json", *config.poller_args],
             on_line=self._on_line,
@@ -1240,7 +1306,7 @@ class Hub:
 
     def _on_line(self, line: str) -> bool:
         try:
-            envelope = json.loads(line)
+            envelope = strict_json_loads(line)
         except ValueError:
             log(f"dropped an undecodable line from solis-poll ({len(line)} bytes)")
             return False
@@ -1281,7 +1347,7 @@ class Hub:
 
     def handle_message(self, client: HubClient, text: str) -> None:
         try:
-            message = json.loads(text)
+            message = strict_json_loads(text)
         except ValueError:
             message = None
         if not isinstance(message, dict) or not isinstance(message.get("type"), str):
@@ -1306,8 +1372,8 @@ class Hub:
                 client.bad_messages += 1
                 return
             client.enqueue(json.dumps({"type": "pong", "nonce": nonce}, separators=(",", ":")))
-        elif kind not in client.ignored_types:
-            client.ignored_types.add(kind)
+        elif not client.warned_unknown:
+            client.warned_unknown = True
             log(f"ignored an unknown message type from {client.source}: {kind[:32]!r}")
 
     # HTTP API --------------------------------------------------------------
@@ -1378,12 +1444,26 @@ class Hub:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         peer_host = peer[0] if peer else ""
+        if (
+            self.pending >= MAX_PENDING_CONNECTIONS
+            or self.pending_by_peer.get(peer_host, 0) >= MAX_PENDING_PER_PEER
+        ):
+            return  # shed load before spending anything on the request
+        self.pending += 1
+        self.pending_by_peer[peer_host] = self.pending_by_peer.get(peer_host, 0) + 1
         try:
             request = await read_request(reader)
         except BadRequest as exc:
             status = 431 if "large" in str(exc) else 400
             await self._respond(writer, http_response(status))
             return
+        finally:
+            self.pending -= 1
+            remaining = self.pending_by_peer.get(peer_host, 1) - 1
+            if remaining > 0:
+                self.pending_by_peer[peer_host] = remaining
+            else:
+                self.pending_by_peer.pop(peer_host, None)
         if request.method != "GET":
             await self._respond(writer, http_response(405, headers=[("Allow", "GET")]))
             return
@@ -1527,6 +1607,13 @@ class Hub:
                 except UnicodeDecodeError:
                     await client.refuse(1007, "protocol", "text frames must be UTF-8")
                     return
+                now = time.monotonic()
+                client.message_times.append(now)
+                while client.message_times[0] < now - CLIENT_MESSAGE_WINDOW_S:
+                    client.message_times.popleft()
+                if len(client.message_times) > CLIENT_MESSAGE_LIMIT:
+                    await client.refuse(1008, "policy", "too many messages")
+                    return
                 self.handle_message(client, text)
                 if client.bad_messages >= 10:
                     await client.refuse(1008, "policy", "too many invalid messages")
@@ -1631,7 +1718,12 @@ async def serve_forever(config: HubConfig) -> int:
 
     for name in ("SIGTERM", "SIGINT"):
         loop.add_signal_handler(getattr(signal, name), interrupted)
-    await hub.run(stop, force)
+    try:
+        await hub.run(stop, force)
+    except OSError as exc:
+        raise HubConfigError(
+            f"cannot listen on {config.listen_host}:{config.listen_port}: {exc.strerror or exc}"
+        ) from exc
     return 0
 
 

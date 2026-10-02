@@ -14,6 +14,7 @@ import os
 import signal
 import sqlite3
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -1203,6 +1204,274 @@ class ProtocolMessageTests(unittest.TestCase):
         self.assertTrue(solis_hub.valid_websocket_key(GUID_SAMPLE_KEY))
         self.assertFalse(solis_hub.valid_websocket_key("short"))
         self.assertFalse(solis_hub.valid_websocket_key(base64.b64encode(b"x" * 8).decode()))
+
+
+class RobustnessTests(HubTestCase):
+    """Hostile or odd input must cost a connection or a line, never the hub."""
+
+    async def test_a_hostile_timestamp_does_not_end_supervision(self):
+        self.process.feed(envelope("0001-01-01T00:00:00"))
+        self.process.feed(envelope("2026-08-19T16:30:00.000+01:00", state="after"))
+        await eventually(
+            lambda: (self.hub.cache.latest or {}).get("voltage_control", {}).get("state") == "after"
+        )
+        # A history request with the same kind of value is refused, not reset.
+        status, _, _ = await self.http("/v1/history/samples?since=0001-01-01T00:00:00", self.token)
+        self.assertIn(status, (200, 400))
+
+    async def test_nan_and_infinity_are_not_forwarded_or_echoed(self):
+        client = await self.connect()
+        await client.receive_json()
+        await client.receive_json()
+        self.process.feed('{"schema_version":2,"reading":{"x":NaN}}')
+        self.process.feed(envelope("2026-08-19T16:30:00.000+01:00", state="clean"))
+        message = await client.receive_json()
+        while message["type"] != "sample":
+            message = await client.receive_json()
+        self.assertEqual(message["envelope"]["voltage_control"]["state"], "clean")
+        await client.send(client_frame(solis_hub.OP_TEXT, b'{"type":"ping","nonce":NaN}'))
+        await client.send_json({"type": "ping", "nonce": "ok"})
+        reply = await client.receive_json()
+        while reply["type"] != "pong":
+            reply = await client.receive_json()
+        self.assertEqual(reply["nonce"], "ok")
+        await client.close()
+
+    async def test_deeply_nested_json_is_a_bad_message_not_a_dropped_connection(self):
+        client = await self.connect()
+        await client.receive_json()
+        await client.receive_json()
+        await client.send(client_frame(solis_hub.OP_TEXT, b"[" * 40000))
+        await client.send_json({"type": "ping", "nonce": 1})
+        self.assertEqual((await client.receive_json())["type"], "pong")
+        await client.close()
+
+    async def test_distinct_unknown_types_log_once_and_keep_no_state(self):
+        client = await self.connect()
+        await client.receive_json()
+        await client.receive_json()
+        with patch.object(solis_hub, "log") as log:
+            for index in range(100):
+                await client.send_json({"type": f"t{index}" + "x" * 500})
+            await client.send_json({"type": "ping", "nonce": 1})
+            await client.receive_json()
+        ignored = [call for call in log.call_args_list if "unknown message type" in call.args[0]]
+        self.assertEqual(len(ignored), 1)
+        await client.close()
+
+    async def test_a_message_flood_ends_the_connection(self):
+        client = await self.connect()
+        await client.receive_json()
+        await client.receive_json()
+        for _ in range(solis_hub.CLIENT_MESSAGE_LIMIT + 5):
+            await client.send_json({"type": "nothing"})
+        self.assertEqual(await client.receive_close(), 1008)
+
+    async def test_every_response_is_no_store(self):
+        for path, token in (
+            ("/v1/healthz", None),
+            ("/v1/status", None),
+            ("/v1/status", self.token),
+            ("/v1/nope", self.token),
+            ("/v1/history/samples", self.token),
+            ("/v1/stream", self.token),
+        ):
+            _, headers, _ = await self.http(path, token)
+            self.assertEqual(headers["cache-control"], "no-store", path)
+
+    async def test_oversize_request_head_is_431(self):
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        writer.write(b"GET /v1/status HTTP/1.1\r\nX: " + b"a" * 20000 + b"\r\n\r\n")
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(100), 5)
+        self.assertTrue(data.startswith(b"HTTP/1.1 431"))
+        writer.close()
+
+    async def test_max_clients_returns_503(self):
+        self.hub.config = make_config(self.directory, max_clients=1)
+        first = await self.connect("10.0.0.1")
+        client, status, _, _ = await WsClient.request(
+            self.port,
+            "/v1/stream",
+            {
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Key": GUID_SAMPLE_KEY,
+                "Sec-WebSocket-Version": "13",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        await client.close()
+        self.assertEqual(status, 503)
+        await first.close()
+
+    async def test_idle_unauthenticated_connections_are_capped_and_recover(self):
+        with patch.object(solis_hub, "MAX_PENDING_PER_PEER", 3):
+            held = [await asyncio.open_connection("127.0.0.1", self.port) for _ in range(3)]
+            await eventually(lambda: self.hub.pending == 3)
+            reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+            self.assertEqual(await asyncio.wait_for(reader.read(10), 5), b"")  # shed at once
+            writer.close()
+            for _, held_writer in held:
+                held_writer.close()
+            await eventually(lambda: self.hub.pending == 0)
+            status, _, _ = await self.http("/v1/healthz")
+            self.assertEqual(status, 200)
+
+    async def test_a_silent_connection_is_closed_after_the_head_timeout(self):
+        with patch.object(solis_hub, "REQUEST_TIMEOUT_S", 0.2):
+            reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+            self.assertEqual(await asyncio.wait_for(reader.read(10), 5), b"")
+            writer.close()
+        self.assertEqual(self.hub.pending, 0)
+
+
+class SupervisorBackoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backoff_doubles_to_sixty_seconds_and_resets_after_a_healthy_run(self):
+        delays: list[float] = []
+        clock = [0.0]
+        spawner = Spawner()
+
+        async def record_wait(awaitable, timeout):
+            delays.append(timeout)
+            awaitable.close()  # the wake event is never set; this is a timeout
+            raise asyncio.TimeoutError
+
+        supervisor = solis_hub.PollerSupervisor(
+            ["poller"],
+            on_line=lambda line: True,
+            on_status=lambda status: None,
+            on_spawn=lambda: None,
+            spawn=spawner,
+            monotonic=lambda: clock[0],
+        )
+        with patch.object(solis_hub.asyncio, "wait_for", record_wait):
+            task = asyncio.ensure_future(supervisor.run())
+            for index in range(10):
+                await eventually(lambda wanted=index + 1: len(spawner.processes) == wanted)
+                if index == 8:
+                    clock[0] += solis_hub.HEALTHY_RUN_S + 1  # a long, healthy run
+                spawner.processes[index].finish(1)
+                await eventually(lambda wanted=index + 1: len(delays) == wanted)
+            supervisor.request_stop()
+            for process in spawner.processes:
+                if process.returncode is None:
+                    process.finish(0)
+            await task
+        self.assertEqual(delays[:8], [1, 2, 4, 8, 16, 32, 60, 60])
+        self.assertEqual(delays[8], 1)  # the ninth run was healthy, so the delay restarts
+
+    async def test_stop_during_backoff_ends_supervision_at_once(self):
+        spawner = Spawner()
+        supervisor = solis_hub.PollerSupervisor(
+            ["poller"],
+            on_line=lambda line: True,
+            on_status=lambda status: None,
+            on_spawn=lambda: None,
+            spawn=spawner,
+        )
+        task = asyncio.ensure_future(supervisor.run())
+        await eventually(lambda: bool(spawner.processes))
+        spawner.processes[0].finish(1)
+        await eventually(lambda: supervisor.status.state == "backoff")
+        supervisor.request_stop()
+        await asyncio.wait_for(task, 2)
+        self.assertEqual(len(spawner.processes), 1)
+
+
+class HelperTests(unittest.TestCase):
+    def test_unmask_matches_the_reference_for_every_length(self):
+        mask = b"\x12\x34\x56\x78"
+        for length in (0, 1, 3, 4, 5, 63, 64, 1001):
+            payload = bytes(range(256)) * 4
+            payload = payload[:length]
+            expected = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            self.assertEqual(solis_hub.unmask(payload, mask), expected, length)
+
+    def test_locate_poller_returns_an_absolute_path_and_honours_the_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / "solis-poll"
+            stub.write_text("#!/bin/sh\n")
+            stub.chmod(0o755)
+            with patch.dict(os.environ, {"SOLIS_POLL_PATH": str(stub)}):
+                self.assertEqual(solis_hub.locate_poller(), [str(stub)])
+            with (
+                patch.object(solis_hub.sys, "argv", ["solis-hub"]),
+                patch.dict(os.environ, {"SOLIS_POLL_PATH": ""}),
+            ):
+                (Path(directory) / "bin").mkdir()
+                # Relative argv[0] must still give an absolute command.
+                for command in (solis_hub.locate_poller(),):
+                    self.assertTrue(Path(command[-1]).is_absolute() or command[0] == sys.executable)
+
+    def test_hub_id_is_stable_across_restarts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = solis_hub.load_hub_id(Path(directory) / "state")
+            self.assertEqual(solis_hub.load_hub_id(Path(directory) / "state"), first)
+
+    def test_a_loose_state_directory_is_tightened(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir(mode=0o755)
+            os.chmod(state, 0o755)
+            with patch.object(solis_hub, "log"):
+                solis_hub.ensure_state_dir(state)
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+
+    def test_relative_poller_paths_land_in_the_state_directory(self):
+        async def run(directory: Path) -> str:
+            process = await solis_hub.spawn_process(
+                [sys.executable, "-c", "import os; print(os.getcwd())"], directory
+            )
+            assert process.stdout is not None
+            line = await process.stdout.readline()
+            await process.wait()
+            return line.decode().strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            reported = asyncio.run(run(Path(directory)))
+            self.assertEqual(Path(reported).resolve(), Path(directory).resolve())
+
+    def test_a_busy_port_exits_with_a_clear_message(self):
+        import socket
+
+        with tempfile.TemporaryDirectory() as directory, socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen(1)
+            state = Path(directory)
+            write_token(state / "hub-token")
+            config = state / "hub.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "listen_host": "127.0.0.1",
+                        "listen_port": busy.getsockname()[1],
+                        "state_dir": str(state),
+                        "poller_args": ["--host", "127.0.0.1"],
+                    }
+                )
+            )
+            with patch("builtins.print") as printed:
+                self.assertEqual(solis_hub.main(["serve", "--config", str(config)]), 2)
+            self.assertIn("cannot listen", " ".join(str(c.args) for c in printed.call_args_list))
+
+    def test_cli_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            config = state / "hub.json"
+            config.write_text(
+                json.dumps({"state_dir": str(state), "poller_args": ["--host", "127.0.0.1"]})
+            )
+            with patch("builtins.print"):
+                self.assertEqual(solis_hub.main(["check", "--config", str(config)]), 2)  # no token
+                self.assertEqual(solis_hub.main(["token", "new", "--config", str(config)]), 0)
+                self.assertEqual(solis_hub.main(["token", "show", "--config", str(config)]), 0)
+                self.assertEqual(solis_hub.main(["check", "--config", str(config)]), 0)
+                os.chmod(state / "hub-token", 0o644)
+                self.assertEqual(solis_hub.main(["check", "--config", str(config)]), 2)
+                self.assertEqual(solis_hub.main(["serve", "--config", str(config)]), 2)
+                config.write_text('{"state_dir": "/x", "bogus": 1, "poller_args": ["a"]}')
+                self.assertEqual(solis_hub.main(["check", "--config", str(config)]), 2)
 
 
 if __name__ == "__main__":

@@ -57,8 +57,8 @@ demo: setup ## Run the dashboard against a fake inverter, no hardware needed
 # throwaway directory, never in your real state directory.
 hub-demo: setup ## Run solis-hub against a fake inverter, for the menu bar's Hub mode
 	@dir=$$(mktemp -d); \
-	$(BIN)/python fake_inverter.py --port $(PORT) --grid-charging & \
-	trap 'kill %1 2>/dev/null; rm -rf "$$dir"' EXIT; \
+	$(BIN)/python fake_inverter.py --port $(PORT) --grid-charging & fake=$$!; \
+	trap 'kill $$fake 2>/dev/null; rm -rf "$$dir"' EXIT; \
 	sleep 1; \
 	printf '{"listen_host":"127.0.0.1","listen_port":%s,"state_dir":"%s","poller_args":["--host","127.0.0.1","--port","%s","--interval","0.5","--idle-interval","2","--pv","--dynamic-voltage-control","--control-activation-delay","2","--control-settle-time","2","--control-journal","%s/journal.json","--voltage-history-db","%s/voltage-history.sqlite3"]}' \
 		$(HUB_PORT) "$$dir" $(PORT) "$$dir" "$$dir" > "$$dir/hub.json"; \

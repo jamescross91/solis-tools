@@ -9,6 +9,7 @@ restarts its poller.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -38,7 +39,10 @@ def free_port() -> int:
 class HubProcess:
     """`solis-hub serve` as a subprocess with its own state directory."""
 
-    def __init__(self, inverter_port: int, *poller_args: str):
+    def __init__(
+        self, inverter_port: int, *poller_args: str, environment: dict[str, str] | None = None
+    ):
+        self.extra_environment = environment or {}
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
         self.state = root / "solis-tools"
@@ -70,7 +74,9 @@ class HubProcess:
         self.process: subprocess.Popen[bytes] | None = None
 
     def start(self) -> None:
-        environment = dict(os.environ, XDG_STATE_HOME=str(self.state.parent))
+        environment = dict(
+            os.environ, XDG_STATE_HOME=str(self.state.parent), **self.extra_environment
+        )
         with open(self.log_path, "wb") as log:
             self.process = subprocess.Popen(
                 [sys.executable, HUB, "serve", "--config", str(self.config)],
@@ -350,6 +356,41 @@ class HubShutdownTests(HubEndToEndCase):
             self.assertEqual(inverter.writes[-1], (43488, 100))
             self.assertEqual(inverter.maximum_active_connections, 1)
             self.assertEqual(inverter.active_connections, 0)
+
+    async def test_a_second_signal_exits_the_hub_and_never_kills_a_stubborn_poller(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        pid_file = Path(directory.name) / "pid"
+        stub = Path(directory.name) / "solis-poll"
+        # A poller that ignores SIGTERM stands in for one that cannot finish
+        # restoring the inverter's baseline.
+        stub.write_text(
+            f"#!/bin/sh\necho $$ > {pid_file}\ntrap '' TERM\nwhile :; do sleep 0.2; done\n"
+        )
+        stub.chmod(0o755)
+        hub = HubProcess(1, environment={"SOLIS_POLL_PATH": str(stub)})
+        self.addCleanup(hub.cleanup)
+        hub.start()
+        await self.wait_ready(hub)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        poller_pid = int(pid_file.read_text())
+        try:
+            assert hub.process is not None
+            hub.process.send_signal(signal.SIGTERM)
+            await asyncio.sleep(0.5)
+            hub.process.send_signal(signal.SIGTERM)
+            code = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: hub.process.wait(timeout=10),  # type: ignore[union-attr]
+            )
+            self.assertEqual(code, 0, hub.log())
+            self.assertIn("restoration is pending", hub.log())
+            os.kill(poller_pid, 0)  # still alive: the hub never kills it
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(poller_pid, signal.SIGKILL)
 
     async def test_clients_receive_a_going_away_close_when_the_hub_stops(self):
         with FakeInverter() as inverter:
