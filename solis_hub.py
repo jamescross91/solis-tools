@@ -805,16 +805,25 @@ SpawnFactory = Callable[[Sequence[str]], Awaitable[Any]]
 async def spawn_process(
     command: Sequence[str], cwd: Path | None = None
 ) -> asyncio.subprocess.Process:
-    # stderr is inherited so the poller's own diagnostics reach journald. The
+    # stderr is piped so the hub can see the poller's restoration result, and is
+    # forwarded line by line to the hub's own stderr (and so to journald). The
     # working directory is the state directory because that is what relative
     # poller paths were validated against.
     return await asyncio.create_subprocess_exec(
         *command,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         limit=POLLER_LINE_LIMIT,
         cwd=cwd,
     )
+
+
+def backoff_delay(first: float, attempt: int) -> float:
+    """1 s doubling to the cap. The exponent is bounded before it is used:
+    2**attempt overflows a float after about 17 hours of failed starts, which
+    ended supervision for good."""
+    return min(BACKOFF_MAX_S, first * 2 ** min(attempt, 16))
 
 
 class PollerSupervisor:
@@ -832,6 +841,7 @@ class PollerSupervisor:
         on_line: Callable[[str], bool],
         on_status: Callable[[PollerStatus], None],
         on_spawn: Callable[[], None],
+        on_stderr: Callable[[str], None] | None = None,
         spawn: SpawnFactory = spawn_process,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
@@ -840,6 +850,7 @@ class PollerSupervisor:
         self.on_line = on_line
         self.on_status = on_status
         self.on_spawn = on_spawn
+        self.on_stderr = on_stderr
         self._spawn = spawn
         self._monotonic = monotonic
         self._sleep = sleep
@@ -871,7 +882,7 @@ class PollerSupervisor:
                 break
             if self._monotonic() - started >= HEALTHY_RUN_S:
                 attempt = 0
-            delay = min(BACKOFF_MAX_S, self.backoff_first_s * 2**attempt)
+            delay = backoff_delay(self.backoff_first_s, attempt)
             attempt += 1
             deadline = datetime.now(timezone.utc).timestamp() + delay
             self._set_state(BACKOFF, next_attempt_at=datetime.fromtimestamp(deadline, timezone.utc))
@@ -897,9 +908,15 @@ class PollerSupervisor:
                 process.send_signal(signal.SIGTERM)
         self.on_spawn()
         self._sync_attention()
+        stderr = getattr(process, "stderr", None)
+        stderr_task: asyncio.Future[None] | None = None
+        if stderr is not None and self.on_stderr is not None:
+            stderr_task = asyncio.ensure_future(self._forward_stderr(stderr))
         try:
             await self._drain(process)
         except asyncio.CancelledError:
+            if stderr_task is not None:
+                stderr_task.cancel()
             # The hub is exiting after a second signal. Waiting for a poller
             # that will not finish restoring would hang the exit, so leave it
             # (it restores itself when its pipe closes).
@@ -907,9 +924,29 @@ class PollerSupervisor:
             raise
         code = await process.wait()
         self.process = None
+        if stderr_task is not None:
+            # The pipe closes with the child, so this is prompt; the bound only
+            # guards against a grandchild holding it open.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stderr_task, 5.0)
         self.status.last_exit_code = code
         if not self.stopping:
             log(f"solis-poll exited with status {code}")
+
+    async def _forward_stderr(self, stderr: Any) -> None:
+        while True:
+            try:
+                raw = await stderr.readline()
+            except ValueError:
+                continue
+            if not raw:
+                return
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if self.on_stderr is not None:
+                try:
+                    self.on_stderr(line)
+                except Exception as exc:
+                    log(f"dropped a poller log line ({type(exc).__name__})")
 
     async def _drain(self, process: Any) -> None:
         while True:
@@ -965,6 +1002,17 @@ class PollerSupervisor:
 
 
 # --- Notifications -------------------------------------------------------
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would forward the Authorization header to
+    wherever it points, including another origin or plain http."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str):
+        return None
+
+
+_NO_REDIRECTS = urllib.request.build_opener(_RefuseRedirects)
 
 
 class Notifier:
@@ -1029,7 +1077,7 @@ class Notifier:
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=10):  # noqa: S310
+        with _NO_REDIRECTS.open(request, timeout=10):
             pass
 
 
@@ -1044,7 +1092,7 @@ _ALERTS = {
     ),
     RESTORATION: (
         "Restoration pending",
-        "The hub is stopping but the poller has not yet restored the inverter's baseline.",
+        "The poller stopped without restoring the inverter's baseline; check it.",
     ),
 }
 _RECOVERIES = {
@@ -1182,14 +1230,22 @@ class HubClient:
         except (ConnectionError, OSError, asyncio.TimeoutError):
             self.abort()
 
-    async def close(self, code: int, reason: str = "") -> None:
-        """Send a close frame, then end the connection."""
+    async def close(self, code: int, reason: str = "", flush: bool = False) -> None:
+        """Send a close frame, then end the connection.
+
+        With `flush`, messages already queued go first, so a hub that is stopping
+        delivers its last status (such as restoration_pending) before saying
+        goodbye. A protocol error skips this: that peer is not to be trusted.
+        """
         if self.closed:
             return
         self.closed = True
         self._wake.set()
         try:
             async with self._send_lock:
+                while flush and self._queue:
+                    self.writer.write(encode_frame(OP_TEXT, self._queue.popleft().encode()))
+                    await asyncio.wait_for(self.writer.drain(), 5.0)
                 self.writer.write(encode_close(code, reason))
                 await asyncio.wait_for(self.writer.drain(), 5.0)
         except (ConnectionError, OSError, asyncio.TimeoutError):
@@ -1239,6 +1295,9 @@ class Hub:
         self.history = SampleHistory(config.history_native_minutes, config.history_compact_hours)
         self.limiter = RateLimiter()
         self.abandoned_poller = False
+        self.restoration_incomplete = False
+        self._last_successful_polls: int | None = None
+        self.reserved_upgrades = 0
         self.pending = 0
         self.pending_by_peer: dict[str, int] = {}
         self.clients: set[HubClient] = set()
@@ -1255,6 +1314,7 @@ class Hub:
             on_line=self._on_line,
             on_status=self._on_status,
             on_spawn=self._on_spawn,
+            on_stderr=self._on_poller_log,
             spawn=spawn,
         )
         self.server: asyncio.Server | None = None
@@ -1319,7 +1379,8 @@ class Hub:
             self._warned_schema = True
             log(f"poller reports stream schema {version!r}; forwarding unchanged")
         self.cache.update(envelope, time.monotonic())
-        self.history.add(envelope)
+        if self._is_new_measurement(envelope):
+            self.history.add(envelope)
         self.health.on_sample(envelope)
         # The poller's own bytes go out untouched inside the wrapper.
         self._broadcast('{"type":"sample","envelope":' + line + "}")
@@ -1330,8 +1391,39 @@ class Hub:
         message = {"type": "poller_status", **status.to_dict()}
         self._broadcast(json.dumps(message, separators=(",", ":")))
 
+    def _is_new_measurement(self, envelope: dict[str, Any]) -> bool:
+        """False for an envelope that only repeats the last good reading.
+
+        During an outage or a rejected sample the poller keeps emitting its last
+        successful reading under a fresh timestamp, with the successful-poll
+        counter unchanged. Recording those would chart stale values as new.
+        """
+        health = envelope.get("health")
+        polls = health.get("successful_polls") if isinstance(health, dict) else None
+        if not isinstance(polls, int) or isinstance(polls, bool):
+            return True
+        if polls == self._last_successful_polls:
+            return False
+        self._last_successful_polls = polls
+        return True
+
+    def _on_poller_log(self, line: str) -> None:
+        """Pass the poller's own diagnostics through, noting a failed restore.
+
+        The poller reports restoration only as text on stderr, and exits just as
+        promptly when restoration failed or was deferred as when it succeeded, so
+        the exit alone cannot be taken as proof the baseline is back.
+        """
+        print(line, file=sys.stderr, flush=True)
+        if "voltage control shutdown:" in line and (
+            "restoration failed" in line or "restoration deferred" in line
+        ):
+            self.restoration_incomplete = True
+
     def _on_spawn(self) -> None:
         """A new poller run: nothing cached from the last one still applies."""
+        self.restoration_incomplete = False
+        self._last_successful_polls = None
         self.cache.reset()
         self._broadcast(self.snapshot_message())
 
@@ -1402,8 +1494,11 @@ class Hub:
             connection.row_factory = sqlite3.Row
             if kind == "minutes":
                 floor = int(since.timestamp()) if since else 0
+                # The cap keeps the newest rows, returned oldest first, so a long
+                # retention never hides the latest history.
                 rows = connection.execute(
-                    "SELECT * FROM voltage_minutes WHERE minute >= ? ORDER BY minute LIMIT ?",
+                    "SELECT * FROM (SELECT * FROM voltage_minutes WHERE minute >= ? "
+                    "ORDER BY minute DESC LIMIT ?) ORDER BY minute",
                     (floor, HISTORY_ROW_LIMIT),
                 ).fetchall()
                 return [dict(row) for row in rows]
@@ -1547,16 +1642,25 @@ class Hub:
         if not valid_websocket_key(key):
             await self._respond(writer, http_response(400))
             return
-        if not self.accepting or len(self.clients) >= self.config.max_clients:
+        if (
+            not self.accepting
+            or len(self.clients) + self.reserved_upgrades >= self.config.max_clients
+        ):
             await self._respond(writer, http_response(503))
             return
-        await self._respond(
-            writer,
-            (
-                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                f"Connection: Upgrade\r\nSec-WebSocket-Accept: {websocket_accept(key)}\r\n\r\n"
-            ).encode("latin-1"),
-        )
+        # The slot is taken before the first await: the upgrade response yields,
+        # and several handlers could otherwise all see the same free slot.
+        self.reserved_upgrades += 1
+        try:
+            await self._respond(
+                writer,
+                (
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\nSec-WebSocket-Accept: {websocket_accept(key)}\r\n\r\n"
+                ).encode("latin-1"),
+            )
+        finally:
+            self.reserved_upgrades -= 1
         client = HubClient(self, writer, source)
         # Registered with no await after the snapshot is built, so no sample can
         # fall between the snapshot and the first live message.
@@ -1644,6 +1748,15 @@ class Hub:
         await self.start_server()
         log(f"listening on {self.config.listen_host}:{self.port}")
         supervisor_task = asyncio.ensure_future(self.supervisor.run())
+
+        def supervisor_ended(task: asyncio.Future[None]) -> None:
+            # A supervisor that died would leave the hub serving with no poller
+            # and no way to start one. Failing loudly lets systemd restart it.
+            if not task.cancelled() and task.exception() is not None and not stop.is_set():
+                log(f"the poller supervisor failed ({type(task.exception()).__name__}); stopping")
+                stop.set()
+
+        supervisor_task.add_done_callback(supervisor_ended)
         ticker = asyncio.ensure_future(self._health_ticks())
         try:
             await stop.wait()
@@ -1681,8 +1794,11 @@ class Hub:
         # Recorded before clients are told, so the caller knows to skip the
         # interpreter's normal teardown (see serve_forever).
         self.abandoned_poller = self.supervisor.process is not None
+        if self.restoration_incomplete and self.supervisor.status.state != RESTORATION_PENDING:
+            log("the poller exited without restoring the baseline; reporting restoration pending")
+            self.supervisor.mark_restoration_pending()
         for client in tuple(self.clients):
-            await client.close(1001, "hub stopping")
+            await client.close(1001, "hub stopping", flush=True)
         if self.server is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.server.wait_closed(), 5.0)

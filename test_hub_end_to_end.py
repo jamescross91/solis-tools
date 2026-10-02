@@ -357,6 +357,44 @@ class HubShutdownTests(HubEndToEndCase):
             self.assertEqual(inverter.maximum_active_connections, 1)
             self.assertEqual(inverter.active_connections, 0)
 
+    async def test_stopping_during_an_inverter_outage_reports_restoration_pending(self):
+        """The poller exits promptly when it cannot restore, so exit proves nothing."""
+        with self.control_inverter() as inverter:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            hub = HubProcess(inverter.port, *self.control_arguments(Path(directory.name)))
+            self.addCleanup(hub.cleanup)
+            hub.start()
+            await self.wait_ready(hub)
+            client = await self.connect(hub)
+            await client.send_json({"type": "attention", "on": True})
+            deadline = time.monotonic() + TIMEOUT
+            while (43488, 40) not in inverter.writes and time.monotonic() < deadline:
+                await self.collect(client, "sample", 1)
+            self.assertIn((43488, 40), inverter.writes, hub.log())
+            inverter.close()
+            await asyncio.sleep(6)  # longer than the controller's telemetry freshness window
+            assert hub.process is not None
+            hub.process.send_signal(signal.SIGTERM)
+            states: list[str] = []
+            try:
+                while True:
+                    opcode, payload = await client.receive(timeout=20)
+                    if opcode == 8:
+                        break
+                    message = json.loads(payload)
+                    if message["type"] == "poller_status":
+                        states.append(message["state"])
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass
+            code = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: hub.process.wait(timeout=TIMEOUT),  # type: ignore[union-attr]
+            )
+            self.assertEqual(code, 0, hub.log())
+            self.assertIn("restoration pending", hub.log())
+            self.assertIn("restoration_pending", states, hub.log())
+
     async def test_a_second_signal_exits_the_hub_and_never_kills_a_stubborn_poller(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

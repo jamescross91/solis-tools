@@ -69,9 +69,13 @@ if [[ ! -s "$state/hub-id" ]]; then
   chmod 0600 "$state/hub-id"
 fi
 hub_id="$(tr -d '[:space:]' <"$state/hub-id")"
+# Read the port back from the retained configuration, so an upgrade does not
+# advertise 8765 for a hub that was moved to another port.
+listen_port="$("$prefix/bin/python" -c \
+  'import json, sys; print(json.load(open(sys.argv[1])).get("listen_port", 8765))' "$config")"
 
 install -m 0644 "$here/solis-hub.service" /etc/systemd/system/solis-hub.service
-sed "s/@HUB_ID@/$hub_id/" "$here/solis-hub.avahi.service" \
+sed -e "s/@HUB_ID@/$hub_id/" -e "s/@PORT@/$listen_port/" "$here/solis-hub.avahi.service" \
   >/etc/avahi/services/solis-hub.service
 chmod 0644 /etc/avahi/services/solis-hub.service
 

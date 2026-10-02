@@ -42,7 +42,12 @@ class DeploymentFileTests(unittest.TestCase):
         service = tree.find("service")
         assert service is not None
         self.assertEqual(service.findtext("type"), "_solis-hub._tcp")
-        self.assertEqual(int(service.findtext("port") or 0), self.example()["listen_port"])
+        # The port is rendered from hub.json by install.sh, so an upgrade keeps a
+        # custom listen_port advertised.
+        self.assertEqual(service.findtext("port"), "@PORT@")
+        installer = (PI / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("listen_port", installer)
+        self.assertIn("s/@PORT@/$listen_port/", installer)
         records = [item.text for item in service.findall("txt-record")]
         self.assertIn(f"proto={solis_hub.HUB_PROTOCOL_VERSION}", records)
         self.assertIn("hub_id=@HUB_ID@", records)

@@ -1125,12 +1125,12 @@ class NotifierTests(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-        def fake_urlopen(request, timeout):
+        def fake_open(request, timeout):
             captured["request"] = request
             return Response()
 
         notifier = Notifier(self.config(), token="secret", sender=lambda *a: None)
-        with patch.object(solis_hub.urllib.request, "urlopen", fake_urlopen):
+        with patch.object(solis_hub._NO_REDIRECTS, "open", fake_open):
             notifier._post("Title", "Body", "high")
         notifier.close()
         request = captured["request"]
@@ -1472,6 +1472,190 @@ class HelperTests(unittest.TestCase):
                 self.assertEqual(solis_hub.main(["serve", "--config", str(config)]), 2)
                 config.write_text('{"state_dir": "/x", "bogus": 1, "poller_args": ["a"]}')
                 self.assertEqual(solis_hub.main(["check", "--config", str(config)]), 2)
+
+
+class ReviewFindingsTests(HubTestCase):
+    """Regressions for defects found in an independent review of the hub."""
+
+    def test_the_backoff_exponent_cannot_overflow(self):
+        for attempt in (0, 1, 5, 6, 1024, 1025, 10**6):
+            self.assertLessEqual(solis_hub.backoff_delay(1.0, attempt), solis_hub.BACKOFF_MAX_S)
+        self.assertEqual(solis_hub.backoff_delay(1.0, 1025), solis_hub.BACKOFF_MAX_S)
+        self.assertEqual(
+            [solis_hub.backoff_delay(1.0, n) for n in range(8)], [1, 2, 4, 8, 16, 32, 60, 60]
+        )
+
+    async def test_a_failed_supervisor_stops_the_hub_instead_of_leaving_it_deaf(self):
+        async def broken() -> None:
+            raise RuntimeError("boom")
+
+        stop, force = asyncio.Event(), asyncio.Event()
+        hub = Hub(
+            make_config(self.directory),
+            self.token,
+            "hub-id-2",
+            poller_command=["solis-poll"],
+            spawn=Spawner(),
+        )
+        hub.supervisor.run = broken  # type: ignore[method-assign]
+        with patch.object(solis_hub, "log"):
+            await asyncio.wait_for(hub.run(stop, force), 10)
+        self.assertTrue(stop.is_set())
+
+    async def test_a_failed_restore_reported_on_stderr_makes_restoration_pending(self):
+        client = await self.connect()
+        await client.receive_json()
+        await client.receive_json()
+        self.process.stderr = asyncio.StreamReader()
+        # The supervisor attaches its stderr reader when a child starts, so use
+        # the next child, which the exit below provokes.
+        self.process.finish(1)
+        await eventually(lambda: len(self.spawner.processes) == 2)
+        second = self.spawner.processes[1]
+        second.stderr = asyncio.StreamReader()
+        self.hub.supervisor.on_stderr = self.hub._on_poller_log
+        task = asyncio.ensure_future(self.hub.supervisor._forward_stderr(second.stderr))
+        with patch("builtins.print"):
+            second.stderr.feed_data(
+                b"voltage control shutdown: import: baseline restoration failed: boom\n"
+            )
+            second.stderr.feed_eof()
+            await task
+        self.assertTrue(self.hub.restoration_incomplete)
+        force = asyncio.Event()
+        shutdown = asyncio.ensure_future(
+            self.hub.shutdown(self.supervisor_task, asyncio.ensure_future(asyncio.sleep(60)), force)
+        )
+        await eventually(lambda: bool(second.signals))
+        second.finish(0)
+        await asyncio.wait_for(shutdown, 10)
+        self.assertEqual(self.hub.supervisor.status.state, "restoration_pending")
+
+    async def test_deferred_restoration_is_also_incomplete(self):
+        with patch("builtins.print"):
+            self.hub._on_poller_log(
+                "voltage control shutdown: baseline restoration deferred: telemetry is not fresh"
+            )
+        self.assertTrue(self.hub.restoration_incomplete)
+        self.hub.restoration_incomplete = False
+        with patch("builtins.print"):
+            self.hub._on_poller_log("voltage control shutdown: import: limit restored to 14.0 kW")
+            self.hub._on_poller_log("some other poller message about restoration failed")
+        self.assertFalse(self.hub.restoration_incomplete)
+
+    async def test_simultaneous_upgrades_cannot_exceed_max_clients(self):
+        self.hub.config = make_config(self.directory, max_clients=1)
+        real = self.hub._respond
+
+        async def slow(writer, data):
+            if data.startswith(b"HTTP/1.1 101"):
+                await asyncio.sleep(0.2)
+            await real(writer, data)
+
+        headers = {
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": GUID_SAMPLE_KEY,
+            "Sec-WebSocket-Version": "13",
+            "Authorization": f"Bearer {self.token}",
+        }
+        with patch.object(self.hub, "_respond", slow):
+            results = await asyncio.gather(
+                WsClient.request(self.port, "/v1/stream", headers),
+                WsClient.request(self.port, "/v1/stream", headers),
+            )
+        statuses = sorted(result[1] for result in results)
+        self.assertEqual(statuses, [101, 503])
+        self.assertEqual(self.hub.reserved_upgrades, 0)
+        for result in results:
+            await result[0].close()
+
+    async def test_failed_polls_are_not_recorded_as_fresh_measurements(self):
+        good = envelope("2026-08-19T16:00:00.000+01:00")
+        good["health"]["successful_polls"] = 7
+        failing = envelope("2026-08-19T16:00:02.000+01:00")
+        failing["health"]["successful_polls"] = 7
+        failing["error"] = "link down"
+        later = envelope("2026-08-19T16:00:04.000+01:00")
+        later["health"]["successful_polls"] = 8
+        for item in (good, failing, later):
+            self.process.feed(item)
+        await eventually(
+            lambda: (
+                (self.hub.cache.latest or {}).get("timestamp", "").endswith("16:00:04.000+01:00")
+            )
+        )
+        self.assertEqual(len(self.hub.history.native), 2)
+
+    async def test_a_restarted_poller_counts_from_scratch(self):
+        first = envelope("2026-08-19T16:00:00.000+01:00")
+        first["health"]["successful_polls"] = 900
+        self.process.feed(first)
+        await eventually(lambda: len(self.hub.history.native) == 1)
+        self.process.finish(1)
+        await eventually(lambda: len(self.spawner.processes) == 2)
+        restarted = envelope("2026-08-19T16:05:00.000+01:00")
+        restarted["health"]["successful_polls"] = 1
+        self.spawner.processes[1].feed(restarted)
+        await eventually(lambda: len(self.hub.history.native) == 2)
+
+    async def test_the_minute_cap_keeps_the_newest_rows(self):
+        path = Path(self.directory) / "voltage-history.sqlite3"
+        store = VoltageHistoryStore(path)
+        for minute in (60, 120, 180, 240):
+            store.connection.execute(
+                "INSERT INTO voltage_minutes VALUES (?, 240, 250, 7440, -1, 1, 0, 1000, 4000, 0, 31, 1, 1, 1, 1, 1, 0)",
+                (minute,),
+            )
+        store.connection.commit()
+        store.connection.close()
+        with patch.object(solis_hub, "HISTORY_ROW_LIMIT", 2):
+            rows = self.hub.history_control("minutes", None)
+        self.assertEqual([row["minute"] for row in rows], [180, 240])
+
+
+class NotifierRedirectTests(unittest.TestCase):
+    def test_a_redirect_is_refused_and_never_forwards_the_token(self):
+        import http.server
+
+        received: list[dict[str, str]] = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                return None
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        destination = f"http://127.0.0.1:{target.server_address[1]}/stolen"
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", destination)
+                self.end_headers()
+
+            def log_message(self, *args):
+                return None
+
+        redirector = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+        threading.Thread(target=redirector.serve_forever, daemon=True).start()
+        config = NtfyConfig(f"http://127.0.0.1:{redirector.server_address[1]}", "topic", None, 0.0)
+        notifier = Notifier(config, token="secret-token", sender=lambda *a: None)
+        try:
+            with self.assertRaises(Exception) as caught:
+                notifier._post("t", "m", "high")
+            self.assertIn("307", str(caught.exception))
+            time.sleep(0.2)
+            self.assertEqual(received, [])
+        finally:
+            notifier.close()
+            target.shutdown()
+            redirector.shutdown()
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ at `/etc/solis-tools/hub.json`. Unknown keys are an error, not ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens (port 0 to 65535). Change `listen_port` in the Avahi file and the Cloudflare route as well |
+| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens (port 0 to 65535). After changing `listen_port`, re-run `deploy/pi/install.sh` (it renders the Bonjour advertisement from this file) and update the Cloudflare route |
 | `state_dir` | platform state directory | Where the token and hub ID live, and where `/v1/history/control` looks for `voltage-history.sqlite3`. `null` resolves like `solis-poll` does. The hub does not pass it to the poller, which keeps its own state directory (`$XDG_STATE_HOME/solis-tools`; the unit sets these to the same place). If you set `state_dir` elsewhere, also pass `--control-journal` and `--voltage-history-db` in `poller_args`. On a Pi leave it `null`: `install.sh` and the unit assume `/var/lib/solis-tools`. Relative `token_file` paths resolve against it |
 | `token_file` | `hub-token` in the state directory | Bearer token file. Must not be readable by group or others |
 | `poller_args` | required | Passed to `solis-poll` verbatim. Control flags go here |
