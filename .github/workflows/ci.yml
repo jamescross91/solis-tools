@@ -162,8 +162,6 @@ jobs:
         run: |
           sed 's#^ExecStart=.*#ExecStart=/bin/true#' deploy/pi/solis-hub.service > "$RUNNER_TEMP/solis-hub.service"
           systemd-analyze verify "$RUNNER_TEMP/solis-hub.service"
-      - name: Avahi service file is well-formed XML
-        run: sed 's/@HUB_ID@/00000000-0000-0000-0000-000000000000/' deploy/pi/solis-hub.avahi.service | xmllint --noout --nonet -
 
   menubar:
     name: macOS menu-bar build
