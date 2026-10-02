@@ -1238,6 +1238,7 @@ class Hub:
         self.cache = StateCache()
         self.history = SampleHistory(config.history_native_minutes, config.history_compact_hours)
         self.limiter = RateLimiter()
+        self.abandoned_poller = False
         self.pending = 0
         self.pending_by_peer: dict[str, int] = {}
         self.clients: set[HubClient] = set()
@@ -1677,6 +1678,9 @@ class Hub:
             if waiter not in done:
                 await asyncio.wait({supervisor_task, waiter}, return_when=asyncio.FIRST_COMPLETED)
         waiter.cancel()
+        # Recorded before clients are told, so the caller knows to skip the
+        # interpreter's normal teardown (see serve_forever).
+        self.abandoned_poller = self.supervisor.process is not None
         for client in tuple(self.clients):
             await client.close(1001, "hub stopping")
         if self.server is not None:
@@ -1724,6 +1728,14 @@ async def serve_forever(config: HubConfig) -> int:
         raise HubConfigError(
             f"cannot listen on {config.listen_host}:{config.listen_port}: {exc.strerror or exc}"
         ) from exc
+    if hub.abandoned_poller:
+        # asyncio closes a subprocess transport by killing a child that is still
+        # running, which would defeat leaving it to finish restoring. Leaving
+        # without finalising the loop keeps the poller alive; its pipes close
+        # with this process and it restores the baseline on its own.
+        log("exiting with the poller still running")
+        sys.stderr.flush()
+        os._exit(0)
     return 0
 
 
