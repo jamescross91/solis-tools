@@ -3,7 +3,7 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.6.0
+## 0.6.1
 
 This release adds the optional Hypervolt EV charger and Intelligent Octopus
 integrations. Both are off by default and need their own sign-in; dynamic
