@@ -193,19 +193,24 @@ private final class StubPresence: HubPresenceWatching, @unchecked Sendable {
     private let continuation: AsyncStream<HubNetworkState>.Continuation
     private let hubs: [DiscoveredHub]
     private let problem: String?
+    private let scanPending: Bool
 
-    init(hubs: [DiscoveredHub], problem: String? = nil) {
+    init(hubs: [DiscoveredHub], problem: String? = nil, scanPending: Bool = false) {
         self.hubs = hubs
         self.problem = problem
+        self.scanPending = scanPending
         var captured: AsyncStream<HubNetworkState>.Continuation?
         updates = AsyncStream<HubNetworkState> { captured = $0 }
         continuation = captured!
     }
 
     func start() {
+        // The real resolver publishes an empty state first and completes the
+        // scan about a second later; `scanPending` reproduces that order.
         continuation.yield(
             HubNetworkState(
-                discovered: hubs, pathSatisfied: true, scanCompleted: problem == nil,
+                discovered: scanPending ? [] : hubs, pathSatisfied: true,
+                scanCompleted: problem == nil && !scanPending,
                 discoveryProblem: problem
             )
         )
@@ -229,8 +234,8 @@ private final class PresenceLog {
 
     var latest: StubPresence? { created.last }
 
-    func make(hubs: [DiscoveredHub], problem: String?) -> StubPresence {
-        let presence = StubPresence(hubs: hubs, problem: problem)
+    func make(hubs: [DiscoveredHub], problem: String?, scanPending: Bool = false) -> StubPresence {
+        let presence = StubPresence(hubs: hubs, problem: problem, scanPending: scanPending)
         created.append(presence)
         return presence
     }
@@ -261,6 +266,7 @@ final class MonitorStoreModeTests: XCTestCase {
         hubConfigured: Bool = true,
         preferredHubID: String? = nil,
         discoveryProblem: String? = nil,
+        scanPending: Bool = false,
         defaults existing: UserDefaults? = nil
     ) throws -> Fixture {
         let defaults: UserDefaults
@@ -279,7 +285,11 @@ final class MonitorStoreModeTests: XCTestCase {
         let store = MonitorStore(
             defaults: defaults,
             factory: log.factory,
-            makePresence: { presences.make(hubs: advertising, problem: discoveryProblem) },
+            makePresence: {
+                presences.make(
+                    hubs: advertising, problem: discoveryProblem, scanPending: scanPending
+                )
+            },
             loadHubSettings: { settings }
         )
         return Fixture(store: store, defaults: defaults, log: log, presences: presences)
@@ -384,6 +394,34 @@ final class MonitorStoreModeTests: XCTestCase {
         XCTAssertEqual(fixture.log.locals.count, 1)
         XCTAssertEqual(fixture.log.locals.first?.startCount, 1)
         XCTAssertEqual(fixture.defaults.stringArray(forKey: ConnectionPolicy.ignoredHubsKey), ["hub-1"])
+    }
+
+    /// The resolver's first state is empty and incomplete. Launching on it would
+    /// start a second controller beside a hub that appears a moment later.
+    func testNoLocalPollerLaunchesBeforeTheFirstScanCompletes() async throws {
+        let fixture = try makeFixture(mode: .direct, scanPending: true)
+        fixture.store.startIfConfigured()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(fixture.log.locals.count, 0, "the scan has not finished")
+
+        // The scan completes and finds the hub that was already there.
+        fixture.presences.latest?.update([advertised])
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.log.locals.count, 0, "a hub is advertised, so the person decides")
+        XCTAssertFalse(fixture.store.policy.localPollerMayStart)
+    }
+
+    func testTheLocalPollerStartsOnceAScanFindsNoHub() async throws {
+        let fixture = try makeFixture(mode: .direct, scanPending: true)
+        fixture.store.startIfConfigured()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(fixture.log.locals.count, 0)
+
+        fixture.presences.latest?.update([])
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.log.locals.count, 1)
     }
 
     func testDirectModeStartsAsBeforeWhenNoHubIsAdvertised() async throws {

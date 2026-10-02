@@ -81,6 +81,10 @@ public struct HubFeedState: Sendable {
         case let .snapshot(snapshot):
             poller = snapshot.poller ?? poller
             if let received = snapshot.envelope {
+                // A snapshot is the hub's complete merged state, so what this
+                // client carried from an earlier run must not fill its gaps: a
+                // null plan in it means Octopus is off, not "unchanged".
+                merger.reset()
                 envelope = merger.merge(received)
             } else {
                 // The hub has no sample from this run yet, so nothing carried

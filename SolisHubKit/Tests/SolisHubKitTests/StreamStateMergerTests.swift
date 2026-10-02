@@ -86,6 +86,21 @@ final class StreamStateMergerTests: XCTestCase {
         XCTAssertEqual(twice.voltageControl?.configuration, once.voltageControl?.configuration)
     }
 
+    /// A reconnect snapshot after the hub restarted with Octopus off carries a
+    /// null plan; it must not be read as "unchanged" and refilled from the
+    /// previous run.
+    func testASnapshotIsAuthoritativeAndDropsEarlierRunState() throws {
+        var feed = HubFeedState()
+        feed.apply(.sample(try envelope(extra: full)))
+        XCTAssertNotNil(feed.envelope?.voltageControl?.octopusSchedule)
+
+        let fresh = try envelope(extra: ", \"octopus_schedule\": null")
+        feed.apply(.snapshot(HubSnapshot(envelope: fresh, poller: nil)))
+        XCTAssertNil(feed.envelope?.voltageControl?.octopusSchedule)
+        XCTAssertNil(feed.envelope?.voltageControl?.configuration)
+        XCTAssertEqual(feed.envelope?.voltageControl?.recentEvents?.count, 0)
+    }
+
     func testFeedStateFollowsTheEvents() throws {
         var feed = HubFeedState()
         let endpoint = HubEndpoint(kind: .lan, baseURL: try XCTUnwrap(URL(string: "http://pi.local:8765")))

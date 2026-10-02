@@ -109,6 +109,9 @@ final class HubSource: TelemetrySource {
                 apply(poller)
             }
             if let envelope = snapshot.envelope {
+                // Authoritative: drop whatever was carried from an earlier run
+                // before applying it (see StreamStateMerger).
+                continuation.yield(.carriedStateReset)
                 continuation.yield(.envelope(envelope))
             } else {
                 continuation.yield(.carriedStateReset)

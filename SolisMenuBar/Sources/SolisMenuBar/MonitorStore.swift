@@ -404,7 +404,11 @@ final class MonitorStore: ObservableObject {
         guard policy.mode == .direct, wantsLocalRun else { return }
         if let running = source as? PollerProcessSource {
             running.resumeAfterHubDecision()
-        } else {
+        } else if scanCompleted {
+            // Until the first scan has finished the start path is still waiting
+            // for it. Launching here, on the empty state discovery publishes
+            // first, would start a second controller beside a hub that has not
+            // been seen yet.
             launchLocalPollerIfAllowed()
         }
     }
