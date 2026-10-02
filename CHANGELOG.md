@@ -11,7 +11,7 @@ versioning](https://semver.org/spec/v2.0.0.html).
   downloading a prebuilt universal binary, which removes the two-push release
   flow. The formula needs Xcode or the Command Line Tools on macOS.
 
-## 0.6.0
+## 0.6.1
 
 This release adds the optional Hypervolt EV charger and Intelligent Octopus
 integrations. Both are off by default and need their own sign-in; dynamic
