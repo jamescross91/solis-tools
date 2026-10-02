@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SolisHubKit
 
 struct MenuBarSnapshot: Sendable {
     let reading: InverterReading?
@@ -28,52 +29,16 @@ private struct DashboardPresentation {
     var controlHistory: [HistoryPoint] = []
 }
 
-private enum StreamProcessingResult: Sendable {
-    case envelope(StreamEnvelope?)
-    case unsupportedSchema(Int)
-    case malformed
+
+/// Something that reports which solis-hubs are on the local network. The
+/// Bonjour-backed implementation is HubKit's resolver; tests substitute one.
+protocol HubPresenceWatching: AnyObject, Sendable {
+    var updates: AsyncStream<HubNetworkState> { get }
+    func start()
+    func stop()
 }
 
-private actor StreamProcessor {
-    private var buffer = Data()
-    private let decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return decoder
-    }()
-
-    func consume(_ data: Data) -> StreamProcessingResult {
-        buffer.append(data)
-        var latest: StreamEnvelope?
-        var searchStart = buffer.startIndex
-        while searchStart < buffer.endIndex,
-              let newline = buffer[searchStart...].firstIndex(of: 0x0A) {
-            let line = buffer[searchStart..<newline]
-            searchStart = buffer.index(after: newline)
-            guard !line.isEmpty else { continue }
-            let envelope: StreamEnvelope
-            do {
-                envelope = try decoder.decode(StreamEnvelope.self, from: Data(line))
-            } catch {
-                return .malformed
-            }
-            guard envelope.schemaVersion == StreamDecoder.supportedSchemaVersion else {
-                return .unsupportedSchema(envelope.schemaVersion)
-            }
-            // UI telemetry is a snapshot. If several complete frames arrive in
-            // one read, rendering only the newest avoids replaying stale work.
-            latest = envelope
-        }
-        if searchStart > buffer.startIndex {
-            buffer.removeSubrange(buffer.startIndex..<searchStart)
-        }
-        if buffer.count > 1 << 20 {
-            buffer.removeAll(keepingCapacity: false)
-            return .malformed
-        }
-        return .envelope(latest)
-    }
-}
+extension HubEndpointResolver: HubPresenceWatching {}
 
 @MainActor
 final class MonitorStore: ObservableObject {
@@ -89,43 +54,76 @@ final class MonitorStore: ObservableObject {
     @Published private var presentation = DashboardPresentation()
     @Published private(set) var executablePath: String?
     @Published private(set) var shutdownMessage: String?
+    /// Why the source is impaired, in words: a hub whose poller is
+    /// restarting, or a local poller held back by a detected hub.
+    @Published private(set) var statusDetail: String?
+    @Published private(set) var policy: ConnectionPolicy
+    @Published private(set) var hubLink: HubLinkInfo?
+    /// Set while this Mac cannot look for a solis-hub (Local Network access
+    /// denied, say). The hub-detected guard then cannot see a hub, so it fails
+    /// open, and the person is told rather than left to assume it is working.
+    @Published private(set) var discoveryWarning: String?
 
     let menuPresentation = MenuBarPresentation()
 
     var latest: StreamEnvelope? { presentation.latest }
     var history: [HistoryPoint] { presentation.history }
     var controlHistory: [HistoryPoint] { presentation.controlHistory }
+    /// When the newest envelope arrived, so a stale display can say how stale.
+    private(set) var lastEnvelopeAt: Date?
 
-    private var process: Process?
-    private var inputPipe: Pipe?
-    private var outputPipe: Pipe?
-    private var errorPipe: Pipe?
-    private var errorBuffer = Data()
+    private let defaults: UserDefaults
+    private let factory: TelemetrySourceFactory
+    private let makePresence: @MainActor () -> any HubPresenceWatching
+    private let loadHubSettings: @MainActor () -> HubSourceSettings?
+
+    private var source: (any TelemetrySource)?
+    private var eventTask: Task<Void, Never>?
+    private var presence: (any HubPresenceWatching)?
+    private var presenceTask: Task<Void, Never>?
+    private var scanCompleted = false
     private var activeConfiguration: MonitorConfiguration?
-    private var retryTask: Task<Void, Never>?
-    private var shouldRun = false
+    private var wantsLocalRun = false
     private var lastSuccessfulPolls = 0
-    private var retryAttempt = 0
     private var historyBuffer = HistoryBuffer()
     private var controlHistoryBuffer = ControlHistoryBuffer()
+    private var lastHistoryDate: Date?
     private var lifecycleTask: Task<Void, Never>?
     private var lifecycleRevision = 0
-    private var terminationRequested = false
     private var latestReceived: StreamEnvelope?
-    private var streamProcessor: StreamProcessor?
+    private var merger = StreamStateMerger()
     private var dashboardVisible = false
     private var lastMenuUpdate = Date.distantPast
     private var lastUrgentSignature: String?
-    private var retainedEvents: [VoltageControlEvent] = []
-    private var retainedOctopusSchedule: OctopusScheduleDetails?
 
-    private static let maximumBufferedBytes = 1 << 20
-    private static let maximumRetryDelay: TimeInterval = 60
     private static let closedMenuRefreshInterval: TimeInterval = 5
+    /// Long enough for a slow first Bonjour answer: a hub missed here lets the
+    /// local poller start beside it.
+    private static let initialScanTimeout: TimeInterval = 3.0
+
+    init(
+        defaults: UserDefaults = .standard,
+        factory: TelemetrySourceFactory = .live,
+        makePresence: @escaping @MainActor () -> any HubPresenceWatching = {
+            HubEndpointResolver(resolveAddresses: false)
+        },
+        loadHubSettings: @escaping @MainActor () -> HubSourceSettings? = {
+            HubSettingsStore.sourceSettings()
+        }
+    ) {
+        self.defaults = defaults
+        self.factory = factory
+        self.makePresence = makePresence
+        self.loadHubSettings = loadHubSettings
+        policy = ConnectionPolicy.stored(defaults)
+    }
 
     var isRunning: Bool {
         switch state {
-        case .stopped, .failed: false
+        case .stopped: false
+        // A hub that is unreachable is still being retried by its source, so
+        // it counts as running; otherwise every popover open would restart it.
+        case .failed: policy.mode == .hub && source != nil
         default: true
         }
     }
@@ -158,7 +156,7 @@ final class MonitorStore: ObservableObject {
         }
         switch state {
         case .degraded: return "Solis connection degraded"
-        case .failed: return "Solis connection failed"
+        case .failed: return policy.mode == .hub ? "Solis hub unreachable" : "Solis connection failed"
         case .stopped: return "Solis stopped"
         case .connecting: return "Solis connecting"
         case .connected: return "Solis connected"
@@ -174,27 +172,59 @@ final class MonitorStore: ObservableObject {
             && latestReceived?.voltageControl?.exportWriteValidated == true
     }
 
+    // MARK: Starting and stopping
+
     /// Start from stored settings if they are complete and nothing is running.
     ///
     /// Called when the menu-bar item itself appears, so a configured install
     /// begins polling at login rather than waiting for its first click.
     func startIfConfigured() {
-        guard !isRunning, let configuration = MonitorConfiguration.stored() else { return }
-        start(configuration: configuration)
+        guard !isRunning else { return }
+        switch policy.mode {
+        case .hub:
+            guard loadHubSettings() != nil else { return }
+            startHub()
+        case .direct:
+            guard let configuration = MonitorConfiguration.stored(defaults) else { return }
+            start(configuration: configuration)
+        }
     }
 
+    /// Direct mode only. Refused outright in Hub mode, so no caller can start
+    /// a local poller while a hub is the controller.
     func start(configuration: MonitorConfiguration) {
+        guard policy.mode == .direct else { return }
         lifecycleRevision += 1
         let revision = lifecycleRevision
         let previous = lifecycleTask
         lifecycleTask = Task {
             await previous?.value
-            guard revision == lifecycleRevision, await stopAndWaitForRestoration() else { return }
+            guard revision == lifecycleRevision, await stopSource() else { return }
             guard revision == lifecycleRevision else { return }
             activeConfiguration = configuration
             shutdownMessage = nil
-            shouldRun = true
-            launch(configuration: configuration)
+            wantsLocalRun = true
+            startPresence()
+            // A hub may already be advertising; the guard needs to know
+            // before the first launch, not after it.
+            await waitForInitialScan()
+            guard revision == lifecycleRevision else { return }
+            launchLocalPollerIfAllowed()
+        }
+    }
+
+    /// Hub mode only.
+    func startHub() {
+        guard policy.mode == .hub else { return }
+        lifecycleRevision += 1
+        let revision = lifecycleRevision
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            guard revision == lifecycleRevision, await stopSource() else { return }
+            guard revision == lifecycleRevision else { return }
+            shutdownMessage = nil
+            beginHubSource()
         }
     }
 
@@ -203,296 +233,335 @@ final class MonitorStore: ObservableObject {
         let previous = lifecycleTask
         lifecycleTask = Task {
             await previous?.value
-            if await stopAndWaitForRestoration() {
-                clearStoppedProcess(clearReading: clearReading)
+            wantsLocalRun = false
+            if await stopSource() {
+                // With no source (Direct mode held back by a hub) nothing
+                // emits .stopped, so the state would never leave "degraded".
+                statusDetail = nil
+                setState(.stopped)
+                if clearReading {
+                    clearReadings()
+                }
             }
         }
-    }
-
-    private func clearStoppedProcess(clearReading: Bool) {
-        shouldRun = false
-        retryTask?.cancel()
-        retryTask = nil
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
-        process?.terminationHandler = nil
-        process = nil
-        terminationRequested = false
-        inputPipe = nil
-        outputPipe = nil
-        errorPipe = nil
-        errorBuffer.removeAll(keepingCapacity: true)
-        streamProcessor = nil
-        setState(.stopped)
-        if clearReading {
-            latestReceived = nil
-            retainedEvents = []
-            retainedOctopusSchedule = nil
-            historyBuffer.removeAll()
-            controlHistoryBuffer.removeAll()
-            presentation = DashboardPresentation()
-            publishMenu(force: true)
-            lastSuccessfulPolls = 0
-        }
-    }
-
-    func setDashboardVisible(_ visible: Bool) {
-        guard dashboardVisible != visible else { return }
-        dashboardVisible = visible
-        sendAttention()
-        if visible {
-            publishDashboard()
-        }
-    }
-
-    /// Tell the poller whether anyone is looking, so it can slow its cadence
-    /// while the popover is closed and nothing is being regulated.
-    private func sendAttention() {
-        guard let handle = inputPipe?.fileHandleForWriting else { return }
-        let line = Data("attention \(dashboardVisible ? "on" : "off")\n".utf8)
-        // A poller that has just exited leaves a broken pipe. SIGPIPE is
-        // ignored at launch, so that surfaces here as an error to drop, and
-        // the restart path sends the state again.
-        try? handle.write(contentsOf: line)
     }
 
     func stopForApplicationTermination() async -> Bool {
         lifecycleRevision += 1
         await lifecycleTask?.value
-        return await stopAndWaitForRestoration()
+        wantsLocalRun = false
+        stopPresence()
+        return await stopSource()
     }
 
-    private func stopAndWaitForRestoration() async -> Bool {
-        shouldRun = false
-        retryTask?.cancel()
-        retryTask = nil
-        if let running = process, running.isRunning {
-            // SIGTERM is handled by the poller, which ownership-checks and
-            // restores captured limits before closing its one Modbus session.
-            running.terminationHandler = nil
-            setState(.degraded)
-            shutdownMessage = "Stopping control and checking baseline restoration…"
-            if !terminationRequested {
-                terminationRequested = true
-                running.terminate()
-            }
-            let deadline = Date().addingTimeInterval(15)
-            while running.isRunning {
-                if Date() >= deadline {
-                    setState(.failed("Restoration is still pending. The poller is retained; try stopping again."))
-                    shutdownMessage = "Restoration is still pending; the poller has not been replaced."
-                    return false
-                }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            let diagnostics = String(data: errorBuffer, encoding: .utf8) ?? ""
-            shutdownMessage = diagnostics.components(separatedBy: .newlines).last {
-                $0.contains("voltage control shutdown:") && ($0.contains("deferred") || $0.contains("failed"))
-            }
+    /// Completes when every queued start or stop has finished.
+    func waitUntilIdle() async {
+        await lifecycleTask?.value
+    }
+
+    func setDashboardVisible(_ visible: Bool) {
+        guard dashboardVisible != visible else { return }
+        dashboardVisible = visible
+        source?.setAttention(visible)
+        if visible {
+            publishDashboard()
         }
-        clearStoppedProcess(clearReading: false)
+    }
+
+    // MARK: Choosing a controller
+
+    /// "Switch to Hub". The current source is stopped completely first, which
+    /// for Direct means waiting for the poller to restore the inverter's
+    /// limits, so the hub never meets a half-stopped local poller. Returns
+    /// false, changing nothing, when no hub address and token are saved yet.
+    @discardableResult
+    func switchToHub() -> Bool {
+        guard loadHubSettings() != nil else { return false }
+        lifecycleRevision += 1
+        let revision = lifecycleRevision
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            guard revision == lifecycleRevision else { return }
+            wantsLocalRun = false
+            // Only after a clean stop does the mode change; if restoration is
+            // still pending the local poller stays the one controller.
+            guard await stopSource() else { return }
+            guard revision == lifecycleRevision else { return }
+            stopPresence()
+            policy.chooseHub()
+            policy.persist(defaults)
+            shutdownMessage = nil
+            beginHubSource()
+        }
         return true
     }
 
-    private func launch(configuration: MonitorConfiguration) {
-        guard shouldRun else { return }
-        guard let path = locatePoller() else {
-            setState(.failed(
-                "solis-poll was not found. Install or upgrade solis-tools with Homebrew."
-            ))
-            // A Homebrew upgrade replaces the binary, so this is often temporary.
-            scheduleRetry()
+    /// Hub to Direct. Never automatic: the caller must have shown the person
+    /// a confirmation that the hub service is stopped, and passes `true` only
+    /// once they gave it.
+    @discardableResult
+    func switchToDirect(hubServiceConfirmedStopped: Bool) -> Bool {
+        guard hubServiceConfirmedStopped else { return false }
+        lifecycleRevision += 1
+        let revision = lifecycleRevision
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            guard revision == lifecycleRevision, await stopSource() else { return }
+            guard revision == lifecycleRevision else { return }
+            // Presence only runs in Direct mode, so the policy has seen no
+            // advertisements and cannot ignore the hub being left itself.
+            let leftHubID = hubLink?.hubID ?? loadHubSettings()?.connection.preferredHubID
+            policy.switchToDirect(hubServiceConfirmedStopped: true)
+            if let leftHubID {
+                policy.ignore(hubID: leftHubID)
+            }
+            policy.persist(defaults)
+            hubLink = nil
+            shutdownMessage = nil
+            if let configuration = MonitorConfiguration.stored(defaults) {
+                activeConfiguration = configuration
+                wantsLocalRun = true
+                startPresence()
+                await waitForInitialScan()
+                guard revision == lifecycleRevision else { return }
+                launchLocalPollerIfAllowed()
+            } else {
+                setState(.stopped)
+            }
+        }
+        return true
+    }
+
+    /// "Ignore for this hub ID": the person has seen the hub and wants this
+    /// Mac to carry on as before.
+    func ignoreHub(id: String) {
+        policy.ignore(hubID: id)
+        policy.persist(defaults)
+        resumeAfterHubDecision()
+    }
+
+    func stopIgnoringHub(id: String) {
+        policy.stopIgnoring(hubID: id)
+        policy.persist(defaults)
+    }
+
+    // MARK: Sources
+
+    private func launchLocalPollerIfAllowed() {
+        guard policy.mode == .direct, wantsLocalRun, source == nil,
+              let configuration = activeConfiguration
+        else { return }
+        guard policy.localPollerMayStart else {
+            statusDetail = "A solis-hub is on this network. Choose Switch to Hub or Ignore before "
+                + "this Mac starts its own poller."
+            setState(.degraded)
             return
         }
-
-        executablePath = path
-        setState(.connecting)
-        // Each run sends its plan (or null when Octopus is off) first; a
-        // plan from an earlier run must not survive a settings change.
-        retainedOctopusSchedule = nil
-        errorBuffer.removeAll(keepingCapacity: true)
-
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let errors = Pipe()
-        let streamProcessor = StreamProcessor()
-        self.streamProcessor = streamProcessor
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments(for: configuration)
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = errors
-
-        output.fileHandleForReading.readabilityHandler = { [weak self, streamProcessor] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task(priority: .utility) { [weak self, streamProcessor] in
-                switch await streamProcessor.consume(data) {
-                case let .envelope(envelope):
-                    if let envelope {
-                        await self?.receive(envelope)
-                    }
-                case let .unsupportedSchema(version):
-                    await self?.unsupportedStreamSchema(version)
-                case .malformed:
-                    await self?.malformedStream()
-                }
-            }
+        let newSource = factory.makeLocalPoller(configuration) { [weak self] in
+            self?.policy.localPollerMayStart ?? false
         }
-        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.errorBuffer.append(data)
-                if self.errorBuffer.count > Self.maximumBufferedBytes {
-                    // Keep the tail: the last thing written before it died is
-                    // what explains why.
-                    self.errorBuffer.removeFirst(
-                        self.errorBuffer.count - Self.maximumBufferedBytes
-                    )
-                }
-            }
-        }
-        process.terminationHandler = { [weak self] terminated in
-            let status = terminated.terminationStatus
-            Task { @MainActor [weak self] in
-                self?.processTerminated(status: status)
-            }
-        }
+        attach(newSource)
+        newSource.start()
+    }
 
-        self.process = process
-        inputPipe = input
-        outputPipe = output
-        errorPipe = errors
-        do {
-            try process.run()
-            sendAttention()
-        } catch {
-            setState(.failed("Could not start solis-poll: \(error.localizedDescription)"))
-            scheduleRetry()
+    private func beginHubSource() {
+        guard policy.mode == .hub, source == nil else { return }
+        guard let settings = loadHubSettings() else {
+            statusDetail = nil
+            setState(.failed("Enter the hub address and token in Settings."))
+            return
+        }
+        let newSource = factory.makeHub(settings)
+        attach(newSource)
+        newSource.start()
+    }
+
+    private func attach(_ newSource: any TelemetrySource) {
+        source = newSource
+        newSource.setAttention(dashboardVisible)
+        let stream = newSource.events
+        eventTask = Task { [weak self] in
+            for await event in stream {
+                self?.handle(event)
+            }
         }
     }
 
-    private func arguments(for configuration: MonitorConfiguration) -> [String] {
-        var result = [
-            "--host", configuration.host,
-            "--port", String(configuration.port),
-            "--slave", String(configuration.slave),
-            "--interval", String(configuration.interval),
-            "--slow-interval", String(configuration.slowInterval),
-            "--idle-interval", String(configuration.idleInterval),
-            "--meter-voltage",
-            "--stream-json",
-        ]
-        if configuration.pvEnabled {
-            result.append("--pv")
+    /// Stops the current source and waits until it has finished. False means
+    /// it has not: a poller still restoring limits is kept, never replaced.
+    private func stopSource() async -> Bool {
+        guard let current = source else { return true }
+        guard await current.stop() else { return false }
+        await eventTask?.value
+        eventTask = nil
+        source = nil
+        return true
+    }
+
+    private func resumeAfterHubDecision() {
+        guard policy.mode == .direct, wantsLocalRun else { return }
+        if let running = source as? PollerProcessSource {
+            running.resumeAfterHubDecision()
+        } else if scanCompleted {
+            // Until the first scan has finished the start path is still waiting
+            // for it. Launching here, on the empty state discovery publishes
+            // first, would start a second controller beside a hub that has not
+            // been seen yet.
+            launchLocalPollerIfAllowed()
         }
-        if configuration.dynamicVoltageEnabled {
-            let stateDirectory = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            )[0].appendingPathComponent("SolisTools", isDirectory: true)
-            result.append(contentsOf: [
-                "--dynamic-voltage-control",
-                configuration.dynamicImportEnabled
-                    ? "--dynamic-import-control" : "--no-dynamic-import-control",
-                "--minimum-voltage", String(configuration.minimumVoltage),
-                "--maximum-voltage", String(configuration.maximumVoltage),
-                "--voltage-safety-margin", String(configuration.voltageSafetyMargin),
-                "--voltage-deadband", String(configuration.voltageDeadband),
-                "--maximum-import-kw", String(configuration.maximumImportKw),
-                "--import-headroom-kw", String(configuration.importHeadroomKw),
-                "--maximum-export-kw", String(configuration.maximumExportKw),
-                "--site-export-permission-kw", String(configuration.siteExportPermissionKw),
-                "--increase-step-w", String(configuration.increaseStepW),
-                "--reduction-step-w", String(configuration.reductionStepW),
-                "--near-limit-reduction-w", String(configuration.nearLimitReductionW),
-                "--emergency-reduction-w", String(configuration.emergencyReductionW),
-                "--control-settle-time", String(configuration.controlSettleTime),
-                "--control-activation-delay", String(configuration.controlActivationDelay),
-                "--control-deactivation-delay", String(configuration.controlDeactivationDelay),
-                "--import-activation-kw", String(configuration.importActivationKw),
-                "--export-activation-kw", String(configuration.exportActivationKw),
-                "--minimum-write-interval", String(configuration.minimumWriteInterval),
-                "--control-journal",
-                stateDirectory.appendingPathComponent("voltage-control-journal.json").path,
-                "--voltage-history-db",
-                stateDirectory.appendingPathComponent("voltage-history.sqlite3").path,
-            ])
-            if configuration.dynamicExportEnabled {
-                result.append("--dynamic-export-control")
-            }
-            if configuration.hypervoltEnabled {
-                result.append(contentsOf: ["--hypervolt-enable", "--ev-priority", configuration.evPriority])
-                if !configuration.hypervoltCredentialsPath.isEmpty {
-                    result.append(contentsOf: [
-                        "--hypervolt-credentials", configuration.hypervoltCredentialsPath,
-                    ])
-                }
-            }
-            if configuration.octopusEnabled {
-                result.append("--octopus-enable")
-                if !configuration.octopusCredentialsPath.isEmpty {
-                    result.append(contentsOf: [
-                        "--octopus-credentials", configuration.octopusCredentialsPath,
-                    ])
-                }
+    }
+
+    // MARK: Hub discovery (Direct mode)
+
+    private func startPresence() {
+        guard presence == nil else { return }
+        scanCompleted = false
+        let watcher = makePresence()
+        presence = watcher
+        let updates = watcher.updates
+        presenceTask = Task { [weak self] in
+            for await network in updates {
+                self?.presenceChanged(network)
             }
         }
-        return result
+        watcher.start()
     }
 
-    private func locatePoller() -> String? {
-        ExecutableLocator.locate(named: "solis-poll", environmentOverride: "SOLIS_POLL_PATH")
+    private func stopPresence() {
+        discoveryWarning = nil
+        presence?.stop()
+        presenceTask?.cancel()
+        presence = nil
+        presenceTask = nil
+        policy.updateDetectedHubs([])
     }
 
-    private func unsupportedStreamSchema(_ version: Int) {
-        // A schema the app cannot read will not fix itself; say so rather than
-        // sitting on "degraded" indefinitely.
-        stop()
-        let error = StreamError.unsupportedSchema(version)
-        setState(.failed(error.localizedDescription))
+    private func presenceChanged(_ network: HubNetworkState) {
+        // A browser that cannot run will never report, so waiting on it would
+        // only delay the launch; the warning below says what that costs.
+        scanCompleted = network.scanCompleted || !network.discovered.isEmpty
+            || network.discoveryProblem != nil
+        discoveryWarning = network.discoveryProblem
+        policy.updateDetectedHubs(
+            network.discovered.map { DetectedHub(id: $0.id, name: $0.name) }
+        )
+        // A hub that has gone away, or a decision just made, may free a held
+        // launch; this does nothing when nothing is held. A hub that appears
+        // after the local poller launched only raises the banner: stopping a
+        // running controller on the strength of an advertisement could leave
+        // the inverter unregulated, so the person decides.
+        resumeAfterHubDecision()
     }
 
-    private func malformedStream() {
-        setState(.degraded)
+    private func waitForInitialScan() async {
+        let deadline = Date().addingTimeInterval(Self.initialScanTimeout)
+        while !scanCompleted, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    // MARK: Events
+
+    private func handle(_ event: TelemetryEvent) {
+        switch event {
+        case let .envelope(envelope):
+            receive(envelope)
+        case let .status(status):
+            apply(status)
+        case let .unsupportedSchema(version):
+            // A schema the app cannot read will not fix itself; say so rather than
+            // sitting on "degraded" indefinitely.
+            stop()
+            let error = StreamError.unsupportedSchema(version)
+            setState(.failed(error.localizedDescription))
+        case let .shutdownMessage(message):
+            shutdownMessage = message
+        case let .executablePath(path):
+            executablePath = path
+        case .runStarted:
+            merger.forgetOctopusSchedule()
+        case .carriedStateReset:
+            merger.reset()
+        case let .hubLink(link):
+            hubLink = link
+        case let .backfill(long, control):
+            historyBuffer.merge(backfill: long)
+            controlHistoryBuffer.merge(backfill: control)
+            lastHistoryDate = controlHistoryBuffer.points.last?.date
+            if dashboardVisible {
+                publishDashboard()
+            }
+        }
+    }
+
+    private func apply(_ status: TelemetryStatus) {
+        switch status {
+        case .connecting:
+            statusDetail = nil
+            setState(.connecting)
+        case let .degraded(message):
+            statusDetail = message
+            setState(.degraded)
+        case let .failed(message):
+            statusDetail = nil
+            setState(.failed(message))
+        case .live:
+            statusDetail = nil
+            if let envelope = latestReceived {
+                setState(envelope.error == nil ? .connected : .degraded)
+            } else {
+                setState(.connecting)
+            }
+        case .stopped:
+            statusDetail = nil
+            setState(.stopped)
+        }
+    }
+
+    private func clearReadings() {
+        latestReceived = nil
+        lastEnvelopeAt = nil
+        merger.reset()
+        historyBuffer.removeAll()
+        controlHistoryBuffer.removeAll()
+        lastHistoryDate = nil
+        presentation = DashboardPresentation()
+        publishMenu(force: true)
+        lastSuccessfulPolls = 0
     }
 
     private func receive(_ received: StreamEnvelope) {
-        retryAttempt = 0
-        var envelope = received
-        // The poller sends the event log only when it changes; carry the last
-        // list forward so the dashboard never shows an empty activity section
-        // between changes.
-        if let control = envelope.voltageControl {
-            if let events = control.recentEvents {
-                retainedEvents = events
-            } else {
-                envelope.voltageControl?.recentEvents = retainedEvents
-            }
-            if let schedule = control.octopusSchedule {
-                retainedOctopusSchedule = schedule
-            } else {
-                envelope.voltageControl?.octopusSchedule = retainedOctopusSchedule
-            }
-        } else {
-            retainedEvents = []
-            retainedOctopusSchedule = nil
-        }
+        let envelope = merger.merge(received)
         latestReceived = envelope
-        setState(envelope.error == nil ? .connected : .degraded)
+        let now = Date()
+        // A hub replays its latest sample on every reconnect, so arrival time
+        // would call old data fresh. Clamped in case the hub's clock is ahead.
+        if policy.mode == .hub, let stamped = StreamDecoder.date(from: envelope.timestamp) {
+            lastEnvelopeAt = min(stamped, now)
+        } else {
+            lastEnvelopeAt = now
+        }
+        setState(envelope.error == nil && statusDetail == nil ? .connected : .degraded)
 
         if envelope.health.successfulPolls != lastSuccessfulPolls {
             lastSuccessfulPolls = envelope.health.successfulPolls
             let sampleDate = StreamDecoder.date(from: envelope.timestamp) ?? Date()
-            let point = HistoryPoint(
-                date: sampleDate,
-                reading: envelope.reading,
-                voltageControl: envelope.voltageControl
-            )
-            controlHistoryBuffer.append(point)
-            historyBuffer.append(point)
+            // A hub replays its latest sample on every reconnect and fills
+            // the charts from its own history, so a point already held is
+            // skipped. Direct mode's samples only ever move forward.
+            let isNew = policy.mode == .direct || lastHistoryDate.map { sampleDate > $0 } ?? true
+            if isNew {
+                let point = HistoryPoint(
+                    date: sampleDate,
+                    reading: envelope.reading,
+                    voltageControl: envelope.voltageControl
+                )
+                controlHistoryBuffer.append(point)
+                historyBuffer.append(point)
+                lastHistoryDate = sampleDate
+            }
         }
 
         let signature = urgentSignature(envelope)
@@ -502,25 +571,6 @@ final class MonitorStore: ObservableObject {
             publishDashboard()
         }
         publishMenu(force: urgent)
-    }
-
-    private func processTerminated(status: Int32) {
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
-        process = nil
-        inputPipe = nil
-        outputPipe = nil
-        errorPipe = nil
-        streamProcessor = nil
-        guard shouldRun else { return }
-        let message = String(data: errorBuffer, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        setState(.failed(
-            message?.isEmpty == false
-                ? message!
-                : "solis-poll stopped unexpectedly (exit status \(status))."
-        ))
-        scheduleRetry()
     }
 
     private func setState(_ newState: State) {
@@ -565,17 +615,5 @@ final class MonitorStore: ObservableObject {
             control?.emergency == true ? "emergency" : "normal",
             newestEvent,
         ].joined(separator: "|")
-    }
-
-    private func scheduleRetry() {
-        guard shouldRun, let configuration = activeConfiguration else { return }
-        retryTask?.cancel()
-        let delay = min(Self.maximumRetryDelay, pow(2, Double(min(retryAttempt, 6))) * 2)
-        retryAttempt += 1
-        retryTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            self?.launch(configuration: configuration)
-        }
     }
 }

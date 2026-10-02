@@ -8,8 +8,20 @@ let package = Package(
     products: [
         .executable(name: "SolisMenuBar", targets: ["SolisMenuBar"]),
     ],
+    dependencies: [
+        .package(path: "../SolisHubKit"),
+    ],
     targets: [
-        .executableTarget(name: "SolisMenuBar"),
-        .testTarget(name: "SolisMenuBarTests", dependencies: ["SolisMenuBar"]),
+        .executableTarget(
+            name: "SolisMenuBar",
+            dependencies: [.product(name: "SolisHubKit", package: "SolisHubKit")]
+        ),
+        .testTarget(
+            name: "SolisMenuBarTests",
+            dependencies: [
+                "SolisMenuBar",
+                .product(name: "SolisHubKit", package: "SolisHubKit"),
+            ]
+        ),
     ]
 )

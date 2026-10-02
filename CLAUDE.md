@@ -15,8 +15,13 @@ Two deliverables from one repository:
   Hypervolt EV charger — see docs/hypervolt-integration.md.
   `octopus_client.py` reads Intelligent Octopus charge plans on a background
   thread; see docs/octopus-integration.md.
+- `solis_hub.py` is the optional always-on hub for a Raspberry Pi: it supervises
+  one `solis-poll --stream-json` child and fans the stream out over an
+  authenticated WebSocket (docs/hub.md). `SolisHubKit/` is the Swift package the
+  menu bar and the iOS app share to talk to it.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
-  `solis-poll --stream-json` as a subprocess and renders its stdout.
+  `solis-poll --stream-json` as a subprocess and renders its stdout (Direct
+  mode, the default), or connects to a `solis-hub` instead (Hub mode).
 
 `Formula/solis-tools.rb` packages both; this repository is its own Homebrew tap.
 
@@ -25,7 +30,8 @@ Two deliverables from one repository:
 ```sh
 make          # everything CI runs: lint, format, types, version, tests
 make demo     # the real dashboard against a fake inverter, no hardware
-make swift    # macOS only
+make swift    # macOS only: SolisHubKit and the menu bar
+make hub-demo # solis-hub against a fake inverter, for Hub mode
 ```
 
 `make help` lists the rest. CI runs exactly these checks, so a green `make` is
@@ -40,6 +46,7 @@ inject the faults that matter:
 python3 fake_inverter.py --port 5020 --corrupt-after 8   # bad battery register
 python3 fake_inverter.py --port 5020 --drop-after 10     # forces a reconnect
 python3 fake_inverter.py --port 5020 --string-inverter   # wrong register family
+python3 fake_inverter.py --port 5020 --grid-charging     # a state voltage control acts on
 ```
 
 Point either the CLI or the menu-bar app at `127.0.0.1:5020`. Anything you can
@@ -77,6 +84,23 @@ rule keeps the band narrow for longer rather than relaxing it early. The API
 key is stored only by `octopus_login.py`, at 0600, and every value embedded in
 a query must pass its format check first. The HTTP call blocks, so it stays on
 `OctopusScheduleMonitor`'s thread; the control loop reads snapshots only.
+
+**One Modbus session, one controller.** Exactly one `solis-poll` holds the
+logger's session at any moment: the Mac's (Direct mode) or the Pi's (the hub).
+Nothing may open a second session. Hub mode in the menu bar never constructs a
+local poller, even when the hub is unreachable; there is no automatic fallback
+from Hub to Direct; and in Direct mode a Bonjour-detected `_solis-hub._tcp`
+service blocks the local poller until the user decides. See docs/hub.md.
+
+**The hub has no dependency and no write path.** `solis_hub.py` is standard
+library only (its WebSocket server is hand-rolled, as in `hypervolt_client.py`),
+never speaks Modbus, and passes the poller only `attention on` or `attention
+off`. It forwards stream envelopes byte for byte and must not change the stream
+or `schema_version`. It exposes no control or settings command: control
+settings live in the hub's config file. It never reads or relays Hypervolt or
+Octopus credentials, and never logs a token, Authorization header or Cloudflare
+secret. `hub_protocol_version` follows the same additive-only rule as the
+stream; the wire format is in docs/hub-protocol.md.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
@@ -131,8 +155,12 @@ the checksums; follow `docs/releasing.md`. Do not create a separate formula PR.
 snake_case; Swift decodes with `.convertFromSnakeCase`. Adding a field is safe.
 Renaming or removing one breaks the app, and `schema_version` must be bumped on
 both sides — the app refuses a version it does not know. Every field is pinned
-in `SolisMenuBar/Tests/SolisMenuBarTests/StreamContractTests.swift`; make new
-optional fields `Optional` in Swift so an older poller still decodes.
+in `SolisHubKit/Tests/SolisHubKitTests/StreamContractTests.swift` (the stream
+models live in `SolisHubKit/Sources/SolisHubKit/StreamModels.swift`, shared by
+the menu bar and the iOS app); make new optional fields `Optional` in Swift so
+an older poller still decodes. A numeric `voltage_control` field that should
+also chart in Hub mode needs adding to `HISTORY_CONTROL_FIELDS` in
+`solis_hub.py` and to the history types in SolisHubKit.
 
 **A bad sample is not a bad register map.** `checked()` raises
 `ImplausibleReadingError`, which is fatal only before the first successful poll.
@@ -151,6 +179,10 @@ narrowest supported width.
 - `docs/stream-contract.md` — the `--stream-json` payload and its versioning rules.
 - `docs/hypervolt-integration.md` — the Hypervolt cloud protocol, priority
   arbitration and credential handling.
+- `docs/hub.md`, `docs/hub-protocol.md`, `docs/hub-remote-access.md`,
+  `docs/hub-ios-integration.md`: the hub, its wire format, the Cloudflare
+  Tunnel setup and the iOS contract. `docs/hub-build-spec.md` is the original
+  build spec, for the reasoning; it is not the current reference.
 - `docs/octopus-integration.md`: the Octopus charge plan, the lead-in and the
   failure rules.
 - `docs/releasing.md` — the release runbook.

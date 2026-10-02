@@ -115,6 +115,30 @@ jobs:
         run: |
           expected="$(./scripts/version.py)"
           solis-poll --version | tee /dev/stderr | grep -qF "solis-poll $expected"
+      - name: Hub console script reports the working-tree version
+        run: |
+          expected="$(./scripts/version.py)"
+          solis-hub --version | tee /dev/stderr | grep -qF "solis-hub $expected"
+      - name: Installed hub serves a fake inverter
+        run: |
+          python fake_inverter.py --port 5021 &
+          state="$RUNNER_TEMP/hub"; mkdir -p "$state"
+          printf '{"listen_host":"127.0.0.1","listen_port":8765,"state_dir":"%s","poller_args":["--host","127.0.0.1","--port","5021","--interval","0.5"]}' "$state" > "$state/hub.json"
+          token="$(solis-hub token new --config "$state/hub.json" 2>/dev/null)"
+          solis-hub check --config "$state/hub.json"
+          solis-hub serve --config "$state/hub.json" & hub=$!
+          # The token must be required, and a running poller must be reported.
+          for _ in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/v1/status || true)"
+            if [ "$code" = 401 ] && curl -fsS -H "Authorization: Bearer $token" \
+                http://127.0.0.1:8765/v1/status | grep -q '"state":"running"'; then
+              kill -TERM "$hub"; wait "$hub"; exit 0
+            fi
+            sleep 0.5
+          done
+          kill -TERM "$hub" 2>/dev/null || true
+          echo "hub never reported a running poller behind its token" >&2
+          exit 1
       - name: Console script runs against a fake inverter
         run: |
           python fake_inverter.py --port 5020 &
@@ -125,12 +149,31 @@ jobs:
           echo "fake inverter never answered" >&2
           exit 1
 
+  deploy:
+    name: Pi deployment files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash -n deploy/pi/install.sh
+      - run: shellcheck deploy/pi/install.sh
+      - name: systemd accepts the unit
+        # ExecStart points at the venv install.sh creates, which this runner lacks.
+        run: |
+          sed 's#^ExecStart=.*#ExecStart=/bin/true#' deploy/pi/solis-hub.service > "$RUNNER_TEMP/solis-hub.service"
+          systemd-analyze verify "$RUNNER_TEMP/solis-hub.service"
+
   menubar:
     name: macOS menu-bar build
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: SolisHubKit builds from the repository root
+        # The iOS app resolves it by Git URL, which SwiftPM reads from the root manifest.
+        run: swift build --disable-sandbox
+      - name: Test the shared hub client package
+        run: swift test --disable-sandbox --package-path SolisHubKit
       - name: Test the Swift package
         run: swift test --disable-sandbox --package-path SolisMenuBar
       - name: Build Swift menu-bar app

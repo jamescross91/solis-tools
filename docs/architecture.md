@@ -1,6 +1,7 @@
 # Architecture
 
-Two programs, one repository, one interface between them.
+Two programs, one repository, one interface between them. An optional third,
+the hub, is a second consumer of that interface (see below).
 
 ```
              Modbus TCP: FC04 telemetry; typed FC03/FC06 control
@@ -19,6 +20,9 @@ Two programs, one repository, one interface between them.
                                                      SolisMenuBar.app
 ```
 
+With the optional hub the menu-bar app is a viewer instead of the poller's
+parent; see [The hub](#the-hub-optional) below.
+
 ## Python poller and controller
 
 `solis_poll.py` retains the register decoder, persistent connection, recording,
@@ -34,6 +38,7 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 | Presentation | `render`, `sparkline`, `bar`, `fit`, `Palette` |
 | Interfaces | `parse_args`, `print_once`, `stream_payload`, `main` |
 | Voltage control | Typed actuators, baseline ownership, SQLite minute history and event log |
+| Hub | `solis_hub.py`: supervises the poller and serves its stream to many clients; see [The hub](#the-hub-optional) |
 | Hypervolt | `hypervolt_client.py` — cloud auth and WebSocket transport for the EV charger, independent of Modbus |
 | Octopus | `octopus_client.py`, which reads Intelligent Octopus planned charges on a background thread |
 
@@ -189,20 +194,83 @@ The control section of a sample carries its configuration once per run and its
 event log only when the log changes; `MonitorStore.receive` carries the last
 event list forward so views never see the gap.
 
-`MonitorStore` owns the child process: it locates the binary, streams
-newline-delimited JSON, retries with backoff, and translates stream state into
-`.connecting` / `.connected` / `.degraded` / `.failed`. See
+In Direct mode `PollerProcessSource` owns the child process: it locates the
+binary, streams newline-delimited JSON and retries with backoff. `MonitorStore`
+translates stream state from either source into `.connecting` / `.connected` /
+`.degraded` / `.failed`. See
 [stream-contract.md](stream-contract.md) for the payload and how to change it.
+
+## The hub (optional)
+
+`solis_hub.py` (console script `solis-hub`) is a second consumer of exactly the
+stdout contract above. It runs on a Raspberry Pi, supervises one
+`solis-poll --stream-json` child and fans the stream out to any number of
+clients over an authenticated WebSocket, with a small HTTP API on the same
+port. Without it nothing changes.
+
+```text
+   inverter ◄── Modbus TCP, one session ── solis-poll ◄── attention on/off ──┐
+                                                │ one JSON object per sample │
+                                                ▼                            │
+                                            solis-hub                        │
+                      supervisor · state cache · history · fan-out ──────────┘
+                              │  ws:// (LAN)   wss:// (Cloudflare Tunnel)
+                     ┌────────┴───────┐
+            SolisMenuBar (Hub mode)   iOS app, through SolisHubKit
+```
+
+| Part | What it does |
+| --- | --- |
+| Poller supervisor | Finds `solis-poll` beside its own executable then on `PATH`, drops lines that are not JSON, restarts with 1 s to 60 s backoff, never runs two children, and on SIGTERM forwards it and waits up to 20 s for restoration |
+| State cache | Keeps `configuration`, `recent_events` and `octopus_schedule`, which the stream sends once or on change, so a late joiner's snapshot is complete |
+| Attention aggregation | Writes `attention on` when the first client wants it and `attention off` when the last stops |
+| Fan-out | A bounded queue of 16 per client; on overflow the queue is replaced by one snapshot |
+| History | Two in-memory rings (30 minutes native, 24 hours at one sample per 30 s) plus read-only endpoints over the poller's SQLite history |
+| Notifications | Optional ntfy posts from a background thread |
+
+The hub uses the standard library only. Its WebSocket server is hand-rolled,
+like the client in `hypervolt_client.py`, so PyModbus stays the only runtime
+dependency. It never speaks Modbus and has no write path: the only thing it
+passes to the poller is the two attention strings. Wire format and versioning
+are in [hub-protocol.md](hub-protocol.md); operation in [hub.md](hub.md).
+
+**The single-controller rule.** At any moment exactly one `solis-poll` holds
+the Modbus session and runs voltage control, either the Mac's (Direct mode) or
+the Pi's. No client opens a second session and none falls back automatically
+from one to the other.
+
+### SolisHubKit
+
+`SolisHubKit/` is a Swift package (macOS 13, iOS 17; Apple system frameworks
+only: Foundation, Network and Security, no third-party dependencies) shared by the menu bar and the iOS app. It holds the stream contract
+types and `StreamDecoder` (moved out of the menu bar's `Models.swift`, with their contract
+tests), the hub message types, `HubClient`, the merged state, endpoint
+resolution (Bonjour then LAN then remote), the history client and Keychain
+storage. See [hub-ios-integration.md](hub-ios-integration.md).
+
+### Two menu-bar sources
+
+`MonitorStore` reads from a `TelemetrySource`. `PollerProcessSource` is the
+child-process code described above, moved rather than rewritten, and is the
+default (Direct mode). `HubSource` wraps the `SolisHubKit` client. Both feed the
+same receive path, so every view is unchanged. A `ConnectionPolicy` decides
+whether a local poller may start: never in Hub mode, and in Direct mode not
+while a hub is advertised until the user has decided.
 
 ## SolisMenuBar
 
 | File | Responsibility |
 | --- | --- |
-| `Models.swift` | The stream contract, `HistoryBuffer`, `HistoryMetric`, decoding |
-| `MonitorStore.swift` | Child-process lifecycle and observable state |
+| `Models.swift` | `HistoryBuffer`, `HistoryMetric` and chart projections (the stream contract types live in `SolisHubKit`) |
+| `MonitorStore.swift` | Observable state and the receive path shared by both sources |
+| `TelemetrySource.swift` | The source protocol: `events`, `start()`, `stop()` and `setAttention(_:)` |
+| `PollerProcessSource.swift` | Direct mode: the child-process lifecycle, retry and restoration code moved out of `MonitorStore` |
+| `HubSource.swift` | Hub mode: wraps the `SolisHubKit` client, Bonjour discovery and history backfill |
+| `ConnectionPolicy.swift` | Pure rules for the single-controller guards, unit-tested |
+| `HubSettings.swift` | Hub connection settings, Keychain-backed secrets and "Test connection" |
 | `DashboardView.swift` | Popover: metric cards, chart, alarms, settings |
 | `SolisMenuBarApp.swift` | `MenuBarExtra` scene and the compact menu-bar label |
-| `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `MonitorStore` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
+| `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `PollerProcessSource` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
 | `HypervoltLoginRunner.swift` | Drives `hypervolt-login` as a one-shot subprocess for the dashboard's own sign-in form — see docs/hypervolt-integration.md |
 | `OctopusLoginRunner.swift` | Drives `octopus-login` the same way for the Octopus sign-in form; see docs/octopus-integration.md |
 
@@ -295,7 +363,9 @@ See [releasing.md](releasing.md).
 | Decoders, recorder, sparkline | `test_solis_poll.py`, with a fake client |
 | Control, freshness, write recovery, ownership and history | `test_voltage_control.py`, deterministic samples and fake clients |
 | Poll loop, reconnect, CLI, recording | `test_end_to_end.py`, real subprocess against `fake_inverter.py` |
-| Python/Swift contract | `SolisMenuBar/Tests/SolisMenuBarTests/` |
+| Hub: framing, auth, cache, attention, history, alerts | `test_solis_hub.py`, with a fake poller process |
+| Hub with the real poller | `test_hub_end_to_end.py`, real `solis-hub` and `solis-poll` against `fake_inverter.py`, asserting one Modbus session throughout |
+| Python/Swift contract | `SolisHubKit/Tests/`, `SolisMenuBar/Tests/SolisMenuBarTests/` |
 
 `fake_inverter.py` is the reason the middle row exists. Nothing in the main loop
 was reachable in a test before it, because it all needed an inverter on the LAN.

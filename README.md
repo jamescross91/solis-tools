@@ -221,7 +221,9 @@ solis-poll --host 192.168.1.57 --interval 2 \
 ```
 
 Do not run a second poller or Modbus client concurrently: the tested logger
-supports only one active Modbus TCP session. The controller journal, minute
+supports only one active Modbus TCP session. That includes the optional hub
+(below): while `solis-hub` is running, the Mac's menu-bar app must be in Hub
+mode and must not start its own poller. The controller journal, minute
 aggregates and sparse events are private files under the platform state or
 Application Support directory. `--dynamic-export-control` is rejected unless
 the endpoint-specific validation record proves register scaling, physical
@@ -452,6 +454,26 @@ on the high side with the defaults), when that starts and when it reverts;
 the same plan is in the stream. Details and
 failure handling are in [docs/octopus-integration.md](docs/octopus-integration.md).
 
+## Always-on hub (optional)
+
+Voltage control stops whenever the Mac running the menu-bar app sleeps. If you
+have a Raspberry Pi, `solis-hub` can run there instead: it owns the single
+Modbus session and the voltage controller, and shares the live stream with the
+Mac and an iPhone over an authenticated WebSocket, including from outside the
+home through a Cloudflare Tunnel with no VPN.
+
+```sh
+sudo deploy/pi/install.sh    # on the Pi; see docs/hub.md
+make hub-demo                # try Hub mode against a fake inverter, no hardware
+```
+
+In the menu bar, Connection defaults to Direct, which behaves exactly as it
+always has. Hub mode never starts a local poller, there is no automatic
+fallback from Hub to Direct, and a Direct-mode app that finds a hub on the
+network waits for you to decide. The hub exposes no write path and no control
+settings; those stay in its config file. See [docs/hub.md](docs/hub.md) for
+setup and the migration runbook.
+
 ## Recording and restored history
 
 Append every successful sample to CSV or JSONL:
@@ -564,7 +586,7 @@ individual targets.
 
 ```sh
 make
-make swift   # macOS: swift test for the menu-bar package
+make swift   # macOS: swift test for SolisHubKit and the menu-bar package
 make app     # macOS: build the .app bundle
 ```
 
@@ -572,7 +594,11 @@ make app     # macOS: build the .app bundle
 recording and restoration, and chart generation against a fake client.
 `test_end_to_end.py` runs the real CLI as a subprocess against
 `fake_inverter.py`, covering the poll loop, reconnection, the corrupt-sample
-path and recording.
+path and recording. `test_solis_hub.py` covers the hub's framing,
+authentication, state cache, attention, history and alerts;
+`test_hub_end_to_end.py` runs the real hub and poller against the fake inverter
+and asserts a single Modbus session throughout; `test_deploy.py` keeps the Pi
+files and the hub docs consistent with the code.
 
 ### Running without an inverter
 
@@ -586,9 +612,13 @@ python3 fake_inverter.py --port 5020 --drop-after 10      # forces a reconnect
 python3 fake_inverter.py --port 5020 --max-read 20        # refuses block reads
 python3 fake_inverter.py --port 5020 --corrupt-after 8    # a bad register mid-run
 python3 fake_inverter.py --port 5020 --string-inverter    # the wrong register family
+python3 fake_inverter.py --port 5020 --grid-charging      # a state voltage control acts on
+make hub-demo                                             # solis-hub against a fake inverter
 ```
 
 Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
+For Hub mode, `make hub-demo` prints a token; choose Hub mode with LAN URL
+`ws://127.0.0.1:8765` and that token.
 
 ## Documentation
 
@@ -596,6 +626,16 @@ Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
   addressing, the subprocess boundary
 - [docs/stream-contract.md](docs/stream-contract.md) — the `--stream-json`
   payload and how to change it
+- [docs/hub.md](docs/hub.md): the optional always-on hub, Pi install and
+  migrating control from the Mac
+- [docs/hub-protocol.md](docs/hub-protocol.md): hub messages, endpoints and
+  versioning
+- [docs/hub-build-spec.md](docs/hub-build-spec.md): the specification the hub was
+  built against, and where the implementation differs
+- [docs/hub-remote-access.md](docs/hub-remote-access.md): Cloudflare Tunnel and
+  Access setup
+- [docs/hub-ios-integration.md](docs/hub-ios-integration.md): SolisHubKit and the
+  iOS app contract
 - [docs/hypervolt-integration.md](docs/hypervolt-integration.md) — the
   Hypervolt EV charger cloud protocol and priority arbitration design
 - [docs/octopus-integration.md](docs/octopus-integration.md): reading
