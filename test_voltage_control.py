@@ -915,6 +915,51 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             self.assertEqual(len(runtime.events), event_count)
             runtime.shutdown()
 
+    def test_emergency_export_cut_ramps_back_instead_of_restoring_the_baseline(self):
+        """Replays the live loop: an emergency cut export to zero, the flow
+        stopped because of that cut, and the actuator restored the full
+        baseline, which pushed the voltage straight back over the limit."""
+        configuration = DynamicVoltageConfiguration(
+            enabled=True,
+            import_enabled=False,
+            export_enabled=True,
+            export_control_validated=True,
+            activation_delay_s=0,
+            deactivation_delay_s=0,
+            settle_time_s=0,
+            filter_time_constant_s=0.01,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient()
+            runtime = VoltageControlRuntime(
+                client, configuration, 0, Path(directory) / "journal.json", None, 30
+            )  # type: ignore[arg-type]
+            clock = [time.monotonic()]
+
+            def step(grid_kw: float, voltage: float) -> int:
+                clock[0] += 2
+                exporting = replace(
+                    reading(grid_kw, "Idle"),
+                    meter_voltage_v=voltage,
+                    meter_sample_monotonic=time.monotonic(),
+                )
+                runtime.update(exporting, clock[0], time.time())
+                return client.export_raw
+
+            for grid_kw in (5, 3, 1, 0):
+                step(grid_kw, 259)
+            self.assertEqual(client.export_raw, 0)
+
+            ramp = [step(0, 250) for _ in range(3)]
+            self.assertEqual(runtime.controller.decision.mode, "export")
+            # One increase step (200 W, raw 2) at a time, never the 5 kW baseline.
+            self.assertEqual(ramp, sorted(ramp))
+            self.assertGreater(ramp[-1], 0)
+            self.assertLessEqual(ramp[-1], 4)
+            runtime.shutdown()
+        # Stopping the monitor still hands the inverter back its own limit.
+        self.assertEqual(client.export_raw, 50)
+
     def test_restore_does_not_overwrite_an_external_change(self):
         client = FakeClient()
         actuator = ImportLimitActuator(client, 1_000, 14_000, 5)  # type: ignore[arg-type]

@@ -1,7 +1,7 @@
 {
-  "version": "0.5.4",
-  "source_sha256": "7b5a7ddc134134481e1fc3fb9ce4755a90452314910aab2cc26ef7e44a9b9f31",
-  "name": "solis-menubar-0.5.4-macos-universal.tar.gz",
-  "sha256": "433f7e997232add4bc4f981eceb453ac2dc8094bb253b070a36f36f4553f90ae",
-  "run_id": "34361080608"
+  "version": "0.6.1",
+  "source_sha256": "619cd472eba93ec5100f17555db745dcfadbb72f58c8f2aeafbf886567786314",
+  "name": "solis-menubar-0.6.1-macos-universal.tar.gz",
+  "sha256": "41df5266958a833d7620b6ee66f449e35234f804a9b23a3b98423b6ab3a23d07",
+  "run_id": "37057932510"
 }

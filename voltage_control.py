@@ -371,6 +371,9 @@ class OperatingStateDetector:
         self.candidate: str | None = None
         self.candidate_since: float | None = None
         self.inactive_since: float | None = None
+        # Set by the controller for each sample: the export limit is below the
+        # captured baseline, so any lack of export is our own doing.
+        self.export_curtailed = False
 
     def reset(self) -> None:
         self.mode = None
@@ -393,10 +396,17 @@ class OperatingStateDetector:
                 or (self.configuration.hypervolt_enabled and sample.ev_charging)
             )
         )
+        # A curtailed export limit stays under control even with no export
+        # flowing. Cutting the limit to zero stops the flow, and reading that
+        # as "export has ended" used to restore the full baseline in one write,
+        # which put the voltage straight back over the limit every few seconds.
         exporting = (
             self.configuration.export_enabled
             and self.configuration.export_control_validated
-            and sample.grid_kw * 1_000 >= self.configuration.export_activation_w
+            and (
+                sample.grid_kw * 1_000 >= self.configuration.export_activation_w
+                or self.export_curtailed
+            )
         )
         if importing:
             return "import"
@@ -639,10 +649,19 @@ class DynamicVoltageController:
         sample: GridTelemetrySample,
         current_import_w: int,
         current_export_w: int,
+        export_baseline_w: int | None = None,
     ) -> ControlDecision:
+        """`export_baseline_w` is the limit the export actuator restores when
+        control releases; below it, export is held under control and ramps
+        back up in normal increase steps instead of being released."""
         configuration = self.configuration
         if not configuration.enabled:
             return self.decision
+        if export_baseline_w is None:
+            self.detector.export_curtailed = False
+        else:
+            release_w = min(export_baseline_w, configuration.effective_maximum_export_w)
+            self.detector.export_curtailed = current_export_w < release_w
         if sample.age_s > configuration.stale_age_s:
             return self.communication_unavailable()
 

@@ -56,7 +56,7 @@ from voltage_control import (
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.5.4"
+VERSION = "0.6.1"
 # Bumped whenever a stream field is renamed, removed or changes meaning; the
 # menu-bar app refuses a version it does not know. Two sends configuration
 # once per run and recent_events only when they change.
@@ -1508,10 +1508,14 @@ class VoltageControlRuntime:
         )
         self.ev_limits_active = self.controller.ev_limits_apply(sample)
         self._synchronise_external_limit(sample, now)
+        export_baseline_raw = self.export_actuator.baseline_raw
         decision = self.controller.evaluate(
             sample,
             self.import_actuator.commanded_w,
             self.export_actuator.commanded_w,
+            None
+            if export_baseline_raw is None
+            else export_baseline_raw * self.export_actuator.resolution_w,
         )
         if (
             self.hypervolt_actuator is not None
@@ -1521,7 +1525,10 @@ class VoltageControlRuntime:
             and decision.action
             in (ControlAction.REDUCING, ControlAction.EMERGENCY, ControlAction.INCREASING)
         ):
-            decision = self._allocate_ev_priority(decision, sample, now)
+            battery_charge_w = (
+                round(reading.battery_kw * 1_000) if reading.battery_status == "Charging" else 0
+            )
+            decision = self._allocate_ev_priority(decision, sample, now, battery_charge_w)
         elif self.hypervolt_actuator is not None and ev_charging:
             decision = self._restore_ev_current(decision, sample, now)
         regulating_states = {
@@ -1648,19 +1655,28 @@ class VoltageControlRuntime:
         return decision
 
     def _allocate_ev_priority(
-        self, decision: ControlDecision, sample: GridTelemetrySample, now: float
+        self,
+        decision: ControlDecision,
+        sample: GridTelemetrySample,
+        now: float,
+        battery_charge_w: int,
     ) -> ControlDecision:
-        """Reallocate an import-ceiling change between the Solis battery
-        limit and the Hypervolt current, per --ev-priority.
+        """Decide which load inside the site import ceiling absorbs a change
+        to it, per --ev-priority.
 
-        Runs after the base controller has already decided how much to
-        change the Solis import ceiling by, exactly as it always has with no
-        knowledge of Hypervolt; this only decides which of the two
-        controllable consumers actually absorbs that change. If the
-        Hypervolt command itself fails, the base decision is returned
-        untouched — the full change lands on the Solis side, precisely as it
-        would without Hypervolt enabled — so a cloud outage can only fall
-        back to today's behaviour, never weaken voltage protection.
+        The Solis import register caps the whole site's grid import, the car
+        included: the inverter charges the battery with whatever the house
+        and the car leave under it. The controller's change to that ceiling
+        is therefore always applied in full, and the Hypervolt current only
+        chooses whose share moves. Cutting the car while leaving the ceiling
+        alone used to hand the freed import straight to the battery, so the
+        site demand and the voltage did not move and the next reduction cut
+        the car again.
+
+        If the Hypervolt command fails the ceiling change still lands, so a
+        cloud outage leaves the battery absorbing it exactly as it would
+        without Hypervolt enabled, and voltage protection never depends on
+        the cloud link.
         """
         assert self.hypervolt_actuator is not None
         ev_ma = self.hypervolt_actuator.commanded_ma
@@ -1668,35 +1684,37 @@ class VoltageControlRuntime:
             return decision  # no confirmed Hypervolt state yet; do not guess
         if decision.allowance_trim:
             return decision
+        delta_w = decision.desired_limit_w - self.import_actuator.commanded_w
+        if delta_w == 0:
+            return decision
         priority = self.configuration.ev_priority
+        battery_share_w = battery_charge_w
         if sample.battery_status != "Charging":
             # Priority settles a contest between two loads charging from the
             # grid. With the battery idle or discharging there is no contest:
-            # battery priority used to hand every reduction to the car anyway,
-            # trimming it for nothing. Only an emergency may still cut the car,
-            # because it is then the one load whose current moves the voltage,
-            # and a restore goes back to the car first for the same reason.
+            # an ordinary reduction lowers the ceiling alone and the inverter
+            # covers it from the battery. Only an emergency may still cut the
+            # car, because it is then the one load whose current moves the
+            # voltage, and a restore goes back to the car first for the same
+            # reason.
             if decision.action == ControlAction.REDUCING:
                 return decision
             priority = "battery"
-        battery_w = self.import_actuator.commanded_w
-        delta_w = decision.desired_limit_w - battery_w
-        if delta_w == 0:
-            return decision
+            battery_share_w = 0
         voltage_v = sample.raw_voltage_v
         ev_w = round(ev_ma / 1000 * voltage_v)
-        new_battery_w, new_ev_w = allocate_import_step(
+        _, new_ev_w = allocate_import_step(
             delta_w,
-            battery_w=battery_w,
-            battery_min_w=self.configuration.minimum_import_w,
-            battery_max_w=self.configuration.maximum_import_w,
+            battery_w=battery_share_w,
+            battery_min_w=0,
+            battery_max_w=max(battery_share_w, self.configuration.maximum_import_w),
             ev_w=ev_w,
             ev_min_w=round(self.hypervolt_actuator.minimum_ma / 1000 * voltage_v),
             ev_max_w=round(self.hypervolt_actuator.maximum_ma / 1000 * voltage_v),
             priority=priority,
         )
         if new_ev_w == ev_w:
-            return replace(decision, desired_limit_w=new_battery_w)
+            return decision
         new_ev_ma = round(new_ev_w / voltage_v * 1000)
         try:
             self.hypervolt_actuator.command_ma(
@@ -1706,7 +1724,6 @@ class VoltageControlRuntime:
             return decision
         return replace(
             decision,
-            desired_limit_w=new_battery_w,
             reason=f"{decision.reason}; EV current adjusted towards {new_ev_w / 1_000:.2f} kW",
         )
 

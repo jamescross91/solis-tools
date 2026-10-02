@@ -364,14 +364,16 @@ import limit. A Hypervolt charger has no local protocol, so this talks to
 Hypervolt's cloud API rather than the inverter; the full protocol and design
 notes are in [docs/hypervolt-integration.md](docs/hypervolt-integration.md).
 
-`--ev-priority` decides which side gets backed off first when voltage needs
-protecting, and which side is restored first once it no longer does:
+The Solis import limit caps the whole site's grid import, car included, so
+every reduction or restore the controller decides moves that limit in full.
+`--ev-priority` decides whether the car's current moves with it:
 
-- `battery` (default) — the car absorbs cuts first; the home battery keeps
-  charging at full rate until the car alone cannot give back enough.
-- `ev` — the home battery absorbs cuts first; the car keeps charging at full
-  rate until the battery alone cannot give back enough.
-- `balanced` — a cut or restore is split 50/50 between the two, with any
+- `battery` (default) — a cut lowers the limit and the car's current together,
+  so the home battery keeps charging at full rate; restores raise both.
+- `ev` — a cut lowers the limit and the inverter throttles the battery; the
+  car keeps charging at full rate until the battery alone cannot give back
+  enough.
+- `balanced` — the car's current moves by half of each change, with any
   amount one side cannot take spilling over to the other.
 
 Priority only matters while the home battery is charging from the grid too.
@@ -382,10 +384,8 @@ allowance never touches the car, and a car trimmed earlier is stepped back to
 its maximum once the battery stops grid charging and the voltage is clear.
 The menu-bar app shows the rate the car is drawing in its EV charger card.
 
-Whichever side is cut or restored, it is a step on top of the existing
-Solis-only decision, not a replacement for it: raw-voltage emergency
-protection, the deadband and the import ceiling all work exactly as before,
-just divided between two actuators instead of one.
+Raw-voltage emergency protection, the deadband and the import ceiling all
+work exactly as they do without Hypervolt.
 
 Hypervolt's own charger enforces tighter voltage protection than most
 household loads need: its PEN-fault protection stops charging when the supply

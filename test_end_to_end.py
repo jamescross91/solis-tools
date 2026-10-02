@@ -476,7 +476,10 @@ class HypervoltPriorityTests(unittest.TestCase):
             wanted=5,
         )
 
-    def test_battery_priority_cuts_the_ev_and_leaves_the_inverter_untouched(self):
+    def test_battery_priority_cuts_the_ev_and_the_site_ceiling_together(self):
+        """The Solis ceiling caps the whole site, car included. Cutting only
+        the car handed its import to the battery and left the voltage where
+        it was, so the ceiling has to fall by the same amount."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
@@ -490,11 +493,31 @@ class HypervoltPriorityTests(unittest.TestCase):
         last = samples[-1]["voltage_control"]
         self.assertTrue(last["ev_charging"])
         self.assertEqual(last["ev_priority"], "battery")
-        self.assertEqual(inverter_writes, [])
+        # The reduction, then the shutdown restore of the captured baseline.
+        self.assertEqual(inverter_writes, [(43488, 130), (43488, 140)])
         self.assertTrue(hypervolt_applied, "expected the EV current to be cut")
         self.assertLess(hypervolt_applied[-1]["max_current"], 32000)
         self.assertLess(last["hypervolt_actuator"]["commanded_current_a"], 32.0)
         self.assertIn("EV current adjusted", latest_events(samples)[0]["message"])
+
+    def test_an_emergency_under_battery_priority_also_lowers_the_ceiling(self):
+        """Seen live: the car took the whole 2 kW emergency cut and the 18.1 kW
+        ceiling stayed put, so the battery took the import back."""
+        import tempfile
+
+        bank = self._bank()
+        bank[33251] = 2140  # 214.0 V: under the 215 V floor
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("battery", inverter, hypervolt, directory)
+                inverter_writes = list(inverter.writes)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertEqual(samples[0]["voltage_control"]["state"], "Emergency low voltage")
+        self.assertEqual(inverter_writes[0], (43488, 120))
+        self.assertTrue(hypervolt_applied, "expected the EV current to be cut")
+        self.assertLess(hypervolt_applied[0]["max_current"], 32000)
 
     def test_ev_priority_cuts_the_inverter_and_leaves_the_ev_untouched(self):
         import tempfile

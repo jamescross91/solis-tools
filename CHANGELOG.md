@@ -3,10 +3,32 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.6.1
+
+This release adds the optional Hypervolt EV charger and Intelligent Octopus
+integrations. Both are off by default and need their own sign-in; dynamic
+control itself still needs the existing explicit opt-in, and export control
+still needs the endpoint's installation validation. Stop the running
+menu-bar app and poller before upgrading, and keep dynamic control off while
+testing an installation.
 
 ### Fixed
 
+- Ramp export back up after a high-voltage emergency instead of restoring the
+  full baseline in one write. Cutting the limit to zero stopped the export, the
+  controller read that as export having ended, and the actuator restored the
+  captured baseline (or the last manual limit), which put the voltage straight
+  back over the maximum every few seconds. Export now stays under control while
+  its limit is below the baseline and climbs in normal increase steps as the
+  voltage allows; the baseline is still restored when the monitor stops.
+- Lower the Solis import ceiling whenever EV priority cuts the car. The ceiling
+  (43488) caps the whole site's import, car included, but the arbitration
+  treated it as a battery-only limit: cutting the car left the ceiling alone,
+  the battery took the freed import back, and neither demand nor voltage
+  moved, so each reduction trimmed the car again. The ceiling now always moves
+  by the controller's full change and the car's current only decides whose
+  share moves. Seen live: an 18.1 kW ceiling held through two low-voltage
+  emergencies while the car was cut to 4.8 kW.
 - Battery priority no longer trims the car's charging current while the home
   battery is idle or discharging. Priority now only decides between two loads
   that are both charging from the grid; with the battery not grid charging a
