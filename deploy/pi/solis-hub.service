@@ -1,0 +1,27 @@
+[Unit]
+Description=Solis hub: supervises solis-poll and serves its stream to viewers
+Documentation=https://github.com/jamescross91/solis-tools/blob/main/docs/hub.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=solis
+# solis-poll resolves its state directory from XDG_STATE_HOME, so this puts the
+# journal, history database and credentials in /var/lib/solis-tools.
+Environment=XDG_STATE_HOME=/var/lib
+ExecStart=/opt/solis-tools/bin/solis-hub serve --config /etc/solis-tools/hub.json
+Restart=on-failure
+RestartSec=5
+# SIGTERM goes to the hub alone, which forwards it to the poller and waits for
+# the inverter's baseline to be restored. Only after TimeoutStopSec, which must
+# stay above the hub's 20 s restoration wait, does systemd kill what remains.
+KillMode=mixed
+TimeoutStopSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/solis-tools
+
+[Install]
+WantedBy=multi-user.target

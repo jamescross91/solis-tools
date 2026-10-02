@@ -1,0 +1,13 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- install.sh replaces @HUB_ID@ with the hub's identity. Avahi advertises it so
+     the Python code needs no mDNS of its own. -->
+<service-group>
+  <name replace-wildcards="yes">Solis hub on %h</name>
+  <service>
+    <type>_solis-hub._tcp</type>
+    <port>8765</port>
+    <txt-record>hub_id=@HUB_ID@</txt-record>
+    <txt-record>proto=1</txt-record>
+  </service>
+</service-group>

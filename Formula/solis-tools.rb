@@ -66,6 +66,7 @@ class SolisTools < Formula
     assert_match(/solis-poll #{version_pattern}/, shell_output("#{bin}/solis-poll --version"))
     assert_match "--host HOST", shell_output("#{bin}/solis-poll --help")
     assert_match "--credentials", shell_output("#{bin}/hypervolt-login --help")
+    assert_match(/solis-hub #{version_pattern}/, shell_output("#{bin}/solis-hub --version"))
     return unless OS.mac?
 
     assert_path_exists prefix/"SolisMenuBar.app/Contents/Info.plist"

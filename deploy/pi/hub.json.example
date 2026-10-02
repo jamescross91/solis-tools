@@ -1,0 +1,16 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8765,
+  "state_dir": null,
+  "token_file": null,
+  "poller_args": [
+    "--host", "192.168.1.57",
+    "--interval", "2",
+    "--idle-interval", "10",
+    "--pv"
+  ],
+  "history_native_minutes": 30,
+  "history_compact_hours": 24,
+  "max_clients": 32,
+  "ntfy": null
+}
