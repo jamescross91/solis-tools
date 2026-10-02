@@ -586,7 +586,7 @@ individual targets.
 
 ```sh
 make
-make swift   # macOS: swift test for the menu-bar package
+make swift   # macOS: swift test for SolisHubKit and the menu-bar package
 make app     # macOS: build the .app bundle
 ```
 
@@ -594,7 +594,11 @@ make app     # macOS: build the .app bundle
 recording and restoration, and chart generation against a fake client.
 `test_end_to_end.py` runs the real CLI as a subprocess against
 `fake_inverter.py`, covering the poll loop, reconnection, the corrupt-sample
-path and recording.
+path and recording. `test_solis_hub.py` covers the hub's framing,
+authentication, state cache, attention, history and alerts;
+`test_hub_end_to_end.py` runs the real hub and poller against the fake inverter
+and asserts a single Modbus session throughout; `test_deploy.py` keeps the Pi
+files and the hub docs consistent with the code.
 
 ### Running without an inverter
 
@@ -608,9 +612,13 @@ python3 fake_inverter.py --port 5020 --drop-after 10      # forces a reconnect
 python3 fake_inverter.py --port 5020 --max-read 20        # refuses block reads
 python3 fake_inverter.py --port 5020 --corrupt-after 8    # a bad register mid-run
 python3 fake_inverter.py --port 5020 --string-inverter    # the wrong register family
+python3 fake_inverter.py --port 5020 --grid-charging      # a state voltage control acts on
+make hub-demo                                             # solis-hub against a fake inverter
 ```
 
 Point the menu-bar app at `127.0.0.1` port `5020` to exercise it the same way.
+For Hub mode, `make hub-demo` prints a token; choose Hub mode with LAN URL
+`ws://127.0.0.1:8765` and that token.
 
 ## Documentation
 

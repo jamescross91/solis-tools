@@ -2,7 +2,8 @@
 
 What `solis-hub` serves to clients. The hub is a second consumer of the stream
 described in [stream-contract.md](stream-contract.md) and forwards its
-envelopes unchanged inside a small wrapper. This document covers the wrapper,
+envelopes unchanged inside a small wrapper (it parses each line only to cache
+it, and forwards the poller's original bytes). This document covers the wrapper,
 the HTTP API and how both change. Operating the hub is in [hub.md](hub.md).
 
 Produced by `solis_hub.py`; consumed by `SolisHubKit`.
@@ -38,7 +39,13 @@ is still required, so neither layer failing open is enough.
 | 429 | Ten failed attempts in a minute from this source address. `Retry-After: 60` |
 | 426 | Not a WebSocket upgrade, or `Sec-WebSocket-Version` is missing or not 13 |
 | 404 | Unknown path. No detail |
-| 503 | `max_clients` reached, or the hub is stopping |
+| 400 | Malformed request or WebSocket key, or a bad `since`, `resolution` or `kind` |
+| 405 | Anything but GET (`Allow: GET`) |
+| 431 | Request head over 16 KiB |
+| 503 | `max_clients` reached, the hub is stopping, or the history database could not be read |
+
+Authentication is checked before the path, so an unauthenticated request to any
+path other than `/v1/healthz` gets 401 (or 429), never 404 or 426.
 
 The source address for rate limiting is the TCP peer, except that
 `CF-Connecting-IP` is used when the peer is loopback (that is `cloudflared`).
@@ -78,7 +85,8 @@ null.
 
 The stream sends some fields only in the first sample of a run or when they
 change: `voltage_control.configuration`, `voltage_control.recent_events` and
-`voltage_control.octopus_schedule`. The hub keeps the latest value of each, and
+`voltage_control.octopus_schedule`. The hub keeps the latest value of each (and
+the latest `device`), and
 a snapshot is the latest envelope with those filled in, so a client joining
 late sees a complete picture. `sample` messages are not merged: they carry
 exactly what the poller sent, and a client keeps the last list it received just
@@ -136,7 +144,9 @@ stored per sample.
 per 30 s for `history_compact_hours`. Both are emptied by a hub restart, like
 the menu bar's own history. `kind=minutes` rows are the `voltage_minutes` table
 (`minute` is epoch seconds), `kind=events` rows are `voltage_events`. A missing
-database is an empty array. `since` is optional; an unparseable value is 400.
+database is an empty array. `since` is optional; an unparseable value is 400. Use `Z` or encode a `+` offset
+as `%2B`; a bare `+` that arrives as a space is read as a plus. Control history
+is capped at the newest 50,000 rows.
 
 ## Not in the protocol
 

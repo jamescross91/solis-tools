@@ -20,11 +20,13 @@ one lands. This page is the contract it builds against. The wire format is in
 
 ## Adding the package
 
-Add `SolisHubKit` as a Swift Package Manager dependency by Git URL and tag
-(`https://github.com/jamescross91/solis-tools`, product `SolisHubKit`; the
-package is in the `SolisHubKit/` subdirectory, so pin to a release tag once one
-includes it). It targets iOS 17 and macOS 13 and uses Foundation, Network and
-Security only.
+Add `SolisHubKit` as a Swift Package Manager dependency by Git URL and tag:
+`https://github.com/jamescross91/solis-tools`, product `SolisHubKit`. The
+repository's root `Package.swift` exists for this (SwiftPM only reads a root
+manifest) and builds the same sources as `SolisHubKit/Package.swift`, which the
+menu bar uses by path. Pin to a release tag that includes it. The package
+targets iOS 17 and macOS 13 and uses Apple system frameworks only (Foundation,
+Network and Security), with no third-party dependencies.
 
 For plain `ws://` on the home network the app's Info.plist needs
 `NSAppTransportSecurity` with `NSAllowsLocalNetworking` set to true, and
@@ -61,7 +63,8 @@ final class InverterFeed: ObservableObject {
     private var task: Task<Void, Never>?
 
     func connect(lan: String, remote: String) throws {
-        guard let auth = try HubCredentials().load() else { return }
+        // A stopped client is finished for good, so every foreground makes a new one.
+        guard client == nil, let auth = try HubCredentials().load() else { return }
         let settings = HubConnectionSettings(
             lanURL: HubURLInput.lan(lan),
             remoteURL: HubURLInput.remote(remote)
@@ -81,6 +84,7 @@ final class InverterFeed: ObservableObject {
     func disconnect() async {
         await client?.stop()        // call when the app moves to the background
         task?.cancel()
+        client = nil
     }
 }
 
@@ -97,19 +101,22 @@ struct LiveView: View {
                 Text(note).font(.footnote)
             }
         }
-        .task { try? feed.connect(lan: "solis-hub.local", remote: "https://energy.example.com") }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { Task { await feed.disconnect() } }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active {
+                try? feed.connect(lan: "solis-hub.local", remote: "https://energy.example.com")
+            } else {
+                Task { await feed.disconnect() }
+            }
         }
     }
 }
 ```
 
-The example omits the Bonjour resolver and reconnect-on-foreground for brevity;
-a real app starts `HubEndpointResolver`, feeds its `updates` into
-`HubEndpointSelector` and calls `updateEndpoints(_:)` on the client when the
-network path changes. Check the exact signatures in the package; the menu bar's
-`HubSource.swift` is the reference consumer.
+The example leaves out the Bonjour resolver for brevity; a real app starts
+`HubEndpointResolver`, feeds its `updates` into `HubEndpointSelector` and calls
+`updateEndpoints(_:)` on the client when the network path changes. The menu
+bar's `HubSource.swift` is the reference consumer. The example is not compiled
+by CI, so check the signatures against the package when you adopt it.
 
 ## Backfilling charts
 

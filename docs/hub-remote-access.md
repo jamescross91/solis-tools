@@ -13,6 +13,9 @@ it, and either failing open is not enough:
 1. Cloudflare Access refuses requests without a valid service token.
 2. The hub refuses requests without its own bearer token.
 
+Dashboard menu names change from time to time; look for the Access controls,
+Applications and Service credentials sections if a name below has moved.
+
 ## 1. Create the tunnel
 
 You need a domain whose DNS is on Cloudflare. In the Cloudflare dashboard open
@@ -21,9 +24,11 @@ Cloudflared. Name it (for example `solis-hub`). The dashboard shows the
 command to install `cloudflared` on the Pi and connect it with a token; run
 that command on the Pi. The tunnel should show as healthy.
 
-Prefer a locally managed tunnel? Copy `deploy/pi/cloudflared-config.yml.example`
+Prefer a locally managed tunnel? Run `cloudflared tunnel login`, then
+`cloudflared tunnel create solis-hub` and `cloudflared tunnel route dns solis-hub
+energy.example.com`. Copy `deploy/pi/cloudflared-config.yml.example`
 to `/etc/cloudflared/config.yml`, fill in the tunnel UUID and hostname, and run
-`cloudflared` as a service. Both routes lead to the same place: the hostname
+`sudo cloudflared service install`. Both routes lead to the same place: the hostname
 must route to `http://127.0.0.1:8765`.
 
 ## 2. Add the public hostname
@@ -38,26 +43,26 @@ https://energy.example.com/v1/healthz` prints `{"ok":true}`. After step 3 the
 same request is refused by Cloudflare unless it carries the service token
 headers, which is the point.
 
-## 3. Put Cloudflare Access in front
-
-Still in Zero Trust, open Access, then Applications, and add a self-hosted
-application for `energy.example.com`. Create a policy with the action
-"Service Auth" that includes the service token you create next. Do not add any
-policy that allows by email or "Everyone": nobody should reach the hostname
-without a token.
-
-## 4. Create a service token
+## 3. Create a service token
 
 In Access, then Service Auth, create a service token. Cloudflare shows the
 Client ID and Client Secret once. Copy both into the menu-bar app's hub
 settings (Cloudflare Access client ID and secret). They are stored in the
 Keychain and sent on every request as `CF-Access-Client-Id` and
-`CF-Access-Client-Secret`. Add the token to the policy from step 3. Service
+`CF-Access-Client-Secret`. Service
 tokens expire after a period you choose, so note the expiry and rotate it
 before then.
 
 Also enter the remote URL (`https://energy.example.com`) and the hub's bearer
 token (`solis-hub token show`).
+
+## 4. Put Cloudflare Access in front
+
+Still in Zero Trust, open Access, then Applications, and add a self-hosted
+application for `energy.example.com`. Create a policy with the action
+"Service Auth" that includes the service token you just created. Do not add any
+policy that allows by email or "Everyone": nobody should reach the hostname
+without a token.
 
 ## How the clients choose
 

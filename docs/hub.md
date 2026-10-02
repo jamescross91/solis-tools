@@ -13,7 +13,8 @@ You gain three things:
   [hub-remote-access.md](hub-remote-access.md).
 
 Without a Pi nothing changes. The menu-bar app's default is Direct mode, which
-runs `solis-poll` itself exactly as before.
+runs `solis-poll` itself exactly as before. The hub runs on Linux and macOS
+(POSIX only; it uses signal handlers Windows does not have).
 
 ```text
    inverter / logger
@@ -67,7 +68,7 @@ at `/etc/solis-tools/hub.json`. Unknown keys are an error, not ignored.
   "listen_port": 8765,
   "state_dir": null,
   "token_file": null,
-  "poller_args": ["--host", "192.168.1.57", "--interval", "2", "--idle-interval", "10", "--pv"],
+  "poller_args": ["--host", "192.168.1.57", "--interval", "2", "--idle-interval", "10", "--meter-voltage", "--pv"],
   "history_native_minutes": 30,
   "history_compact_hours": 24,
   "max_clients": 32,
@@ -77,13 +78,13 @@ at `/etc/solis-tools/hub.json`. Unknown keys are an error, not ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens. Change `listen_port` in the Avahi file as well |
-| `state_dir` | platform state directory | Where the token, hub ID and the poller's journal and history live. `null` resolves like `solis-poll` does |
+| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens (port 0 to 65535). Change `listen_port` in the Avahi file and the Cloudflare route as well |
+| `state_dir` | platform state directory | Where the token and hub ID live, and where `/v1/history/control` looks for `voltage-history.sqlite3`. `null` resolves like `solis-poll` does. The hub does not pass it to the poller, which keeps its own state directory (`$XDG_STATE_HOME/solis-tools`; the unit sets these to the same place). If you set `state_dir` elsewhere, also pass `--control-journal` and `--voltage-history-db` in `poller_args`. On a Pi leave it `null`: `install.sh` and the unit assume `/var/lib/solis-tools`. Relative `token_file` paths resolve against it |
 | `token_file` | `hub-token` in the state directory | Bearer token file. Must not be readable by group or others |
 | `poller_args` | required | Passed to `solis-poll` verbatim. Control flags go here |
-| `history_native_minutes` | `30` | Native-resolution in-memory history |
-| `history_compact_hours` | `24` | One sample per 30 s kept for this long |
-| `max_clients` | `32` | WebSocket connection cap |
+| `history_native_minutes` | `30` | Native-resolution in-memory history (1 to 1440) |
+| `history_compact_hours` | `24` | One sample per 30 s kept for this long (1 to 336) |
+| `max_clients` | `32` | WebSocket connection cap (1 to 1024) |
 | `ntfy` | `null` | Push notifications, below |
 
 `poller_args` rules: the hub adds `--stream-json` itself and refuses arguments
@@ -92,7 +93,11 @@ refuses `--csv` or `--jsonl` paths outside the state directory. Put the control
 flags from the README ("Dynamic Grid Voltage Control") here, for example
 `--dynamic-voltage-control`. Include `--idle-interval` so the poller slows
 down while no viewer has the popover open; the hub tells it `attention off`
-whenever no client is looking.
+whenever no client is looking. Include `--meter-voltage` (the menu bar always
+passes it) or the supply voltage readout and charts are empty. Hypervolt and
+Octopus are enabled by `--hypervolt-enable`, `--octopus-enable` and
+`--ev-priority` in `poller_args`; running `hypervolt-login` or `octopus-login`
+only stores the credentials.
 
 `solis-hub check --config PATH` validates the file, the token permissions and
 that `solis-poll` can be found, then exits.
@@ -102,8 +107,13 @@ that `solis-poll` can be found, then exits.
 Off unless `ntfy` is set:
 
 ```json
-"ntfy": {"url": "https://ntfy.sh", "topic": "<long random string>", "token_file": null, "min_interval_s": 300}
+"ntfy": {"url": "https://ntfy.sh", "topic": "k3x9q2m7v4r8w1z5", "token_file": null, "min_interval_s": 300}
 ```
+
+`topic` is 1 to 64 letters, digits, `_` or `-`; generate a long random one. Use an
+`https://` URL (with `http://` an access token would travel in clear text).
+`token_file` is an optional file holding an ntfy access token, sent as a bearer
+token and read once at start. `min_interval_s` limits each event type.
 
 | Event | Trigger | Priority |
 | --- | --- | --- |
@@ -174,13 +184,18 @@ make hub-demo
 starts `fake_inverter.py`, writes a throwaway hub config with dynamic voltage
 control enabled against a fake that is importing at 230 V, and prints the token.
 In the menu bar choose Hub mode, LAN URL `ws://127.0.0.1:8765` and that token.
-Nothing touches your real state directory.
+Nothing touches your real state directory. Press Ctrl-C once: the fake inverter
+and the hub both receive it, so the poller may log a failed restoration
+because the fake went away first. That is an artefact of the demo, not of the
+hub.
 
 ### Manual check of `install.sh`
 
 The installer cannot run in CI, so before a release run it twice on a fresh
-Raspberry Pi OS Lite image. The second run must change nothing and print no
-token. Then confirm `systemctl is-active solis-hub`, `avahi-browse -rt
+Raspberry Pi OS Lite image. The second run must print no token, leave
+`hub.json` and the token untouched, and restart the service. (Re-running before
+you have edited `poller_args` starts the hub against the placeholder address
+192.168.1.57, where it simply backs off.) Then confirm `systemctl is-active solis-hub`, `avahi-browse -rt
 _solis-hub._tcp` from another machine, and `systemctl stop solis-hub` returning
 within a few seconds, with the poller's `voltage control shutdown` lines in the
 journal, when control is on.
@@ -191,8 +206,8 @@ The menu-bar app now declares `_solis-hub._tcp` in its Info.plist so it can find
 a hub by Bonjour. macOS may ask once for local network access the first time the
 upgraded app starts. In Hub mode the token and any Cloudflare Access credentials
 are kept in the Keychain; after a Homebrew upgrade the ad-hoc-signed app can
-trigger a Keychain "Always Allow" prompt again. Direct-only use never creates or
-reads Keychain items.
+trigger a Keychain "Always Allow" prompt again. In Direct mode nothing reads the
+Keychain at launch.
 
 ## Tokens
 
@@ -219,16 +234,23 @@ Control state is scoped to the logger endpoint, so the order matters.
 1. On the Mac, disable control and choose Save and connect, then quit the
    menu-bar app normally. Confirm the baseline was restored and the journal is
    clean (no pending restoration message).
-2. Copy the export-control validation record, if one exists, to the Pi's state
-   directory. It is evidence about the logger endpoint, not the Mac, so it stays
-   valid only if the Pi's `poller_args` use the identical host spelling, port
-   and unit. Otherwise revalidate on the Pi.
-3. Do not copy the control journal. A clean shutdown makes it unnecessary, and
+2. Write the control flags the Mac app was using (thresholds, margins, steps,
+   `--dynamic-import-control`, the EV and Octopus flags) into `poller_args` on
+   the Pi. The Mac's control settings are not read by the hub, and Hub mode
+   shows them read-only, so this step is what keeps control behaving the same.
+3. Copy the export-control validation record, if one exists, to the Pi's state
+   directory. It is `export-control-validation-<24 hex>.json` in the Mac's
+   `~/Library/Application Support/SolisTools`; put it in `/var/lib/solis-tools`
+   with `sudo install -m 0600 -o solis -g solis FILE /var/lib/solis-tools/`. It
+   is evidence about the logger endpoint, not the Mac, so it stays valid only if
+   the Pi's `poller_args` use the identical host spelling, port and unit.
+   Otherwise revalidate on the Pi.
+4. Do not copy the control journal. A clean shutdown makes it unnecessary, and
    an unclean one must be recovered on the Mac first, following the README
    precautions.
-4. Run `hypervolt-login` and `octopus-login` on the Pi if you use those
+5. Run `hypervolt-login` and `octopus-login` on the Pi if you use those
    features.
-5. Start `solis-hub`, confirm `/v1/status` shows the poller `running`, then
+6. Start `solis-hub`, confirm `/v1/status` shows the poller `running`, then
    switch the menu bar to Hub mode.
 
 Reverse migration is the same steps the other way. The hub-detected guard stops
@@ -243,8 +265,11 @@ the poller and keeps draining its output, so connected viewers see the
 restoration. It waits up to 20 s. If the poller has not exited it reports
 `restoration_pending` (and sends a notification if ntfy is set) and leaves the
 poller running rather than killing it: a hard kill is exactly how a reduced
-limit gets left behind. A second SIGTERM or SIGINT makes the hub exit without
-waiting further. Recover from an unclean stop on the Pi the way the README
+limit gets left behind. A second SIGTERM or SIGINT, at any point,
+makes the hub exit without waiting further. Under systemd, `KillMode=mixed`
+still sends SIGKILL to what remains when `TimeoutStopSec=30` ends, so "leaves it
+running" holds for the hub's own behaviour and outside systemd; the 30 s is why
+the unit allows 10 s above the hub's wait. Recover from an unclean stop on the Pi the way the README
 describes for an unclean shutdown on a Mac.
 
 ## Troubleshooting

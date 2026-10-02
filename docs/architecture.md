@@ -1,6 +1,7 @@
 # Architecture
 
-Two programs, one repository, one interface between them.
+Two programs, one repository, one interface between them. An optional third,
+the hub, is a second consumer of that interface (see below).
 
 ```
              Modbus TCP: FC04 telemetry; typed FC03/FC06 control
@@ -37,6 +38,7 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 | Presentation | `render`, `sparkline`, `bar`, `fit`, `Palette` |
 | Interfaces | `parse_args`, `print_once`, `stream_payload`, `main` |
 | Voltage control | Typed actuators, baseline ownership, SQLite minute history and event log |
+| Hub | `solis_hub.py`: supervises the poller and serves its stream to many clients; see [The hub](#the-hub-optional) |
 | Hypervolt | `hypervolt_client.py` — cloud auth and WebSocket transport for the EV charger, independent of Modbus |
 | Octopus | `octopus_client.py`, which reads Intelligent Octopus planned charges on a background thread |
 
@@ -192,9 +194,10 @@ The control section of a sample carries its configuration once per run and its
 event log only when the log changes; `MonitorStore.receive` carries the last
 event list forward so views never see the gap.
 
-`MonitorStore` owns the child process: it locates the binary, streams
-newline-delimited JSON, retries with backoff, and translates stream state into
-`.connecting` / `.connected` / `.degraded` / `.failed`. See
+In Direct mode `PollerProcessSource` owns the child process: it locates the
+binary, streams newline-delimited JSON and retries with backoff. `MonitorStore`
+translates stream state from either source into `.connecting` / `.connected` /
+`.degraded` / `.failed`. See
 [stream-contract.md](stream-contract.md) for the payload and how to change it.
 
 ## The hub (optional)
@@ -238,8 +241,8 @@ from one to the other.
 
 ### SolisHubKit
 
-`SolisHubKit/` is a Swift package (macOS 13, iOS 17; Foundation and Network
-only) shared by the menu bar and the iOS app. It holds the stream contract
+`SolisHubKit/` is a Swift package (macOS 13, iOS 17; Apple system frameworks
+only: Foundation, Network and Security, no third-party dependencies) shared by the menu bar and the iOS app. It holds the stream contract
 types and `StreamDecoder` (moved out of the menu bar's `Models.swift`, with their contract
 tests), the hub message types, `HubClient`, the merged state, endpoint
 resolution (Bonjour then LAN then remote), the history client and Keychain
@@ -248,7 +251,7 @@ storage. See [hub-ios-integration.md](hub-ios-integration.md).
 ### Two menu-bar sources
 
 `MonitorStore` reads from a `TelemetrySource`. `PollerProcessSource` is the
-child-process code described below, moved rather than rewritten, and is the
+child-process code described above, moved rather than rewritten, and is the
 default (Direct mode). `HubSource` wraps the `SolisHubKit` client. Both feed the
 same receive path, so every view is unchanged. A `ConnectionPolicy` decides
 whether a local poller may start: never in Hub mode, and in Direct mode not
@@ -267,7 +270,7 @@ while a hub is advertised until the user has decided.
 | `HubSettings.swift` | Hub connection settings, Keychain-backed secrets and "Test connection" |
 | `DashboardView.swift` | Popover: metric cards, chart, alarms, settings |
 | `SolisMenuBarApp.swift` | `MenuBarExtra` scene and the compact menu-bar label |
-| `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `MonitorStore` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
+| `ExecutableLocator.swift` | Finds a Homebrew-installed command line tool beside the app; shared by `PollerProcessSource` (`solis-poll`) and `HypervoltLoginRunner` (`hypervolt-login`) |
 | `HypervoltLoginRunner.swift` | Drives `hypervolt-login` as a one-shot subprocess for the dashboard's own sign-in form — see docs/hypervolt-integration.md |
 | `OctopusLoginRunner.swift` | Drives `octopus-login` the same way for the Octopus sign-in form; see docs/octopus-integration.md |
 

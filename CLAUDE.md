@@ -20,7 +20,8 @@ Two deliverables from one repository:
   authenticated WebSocket (docs/hub.md). `SolisHubKit/` is the Swift package the
   menu bar and the iOS app share to talk to it.
 - `SolisMenuBar/` — a SwiftUI `MenuBarExtra` app that spawns
-  `solis-poll --stream-json` as a subprocess and renders its stdout.
+  `solis-poll --stream-json` as a subprocess and renders its stdout (Direct
+  mode, the default), or connects to a `solis-hub` instead (Hub mode).
 
 `Formula/solis-tools.rb` packages both; this repository is its own Homebrew tap.
 
@@ -29,7 +30,8 @@ Two deliverables from one repository:
 ```sh
 make          # everything CI runs: lint, format, types, version, tests
 make demo     # the real dashboard against a fake inverter, no hardware
-make swift    # macOS only
+make swift    # macOS only: SolisHubKit and the menu bar
+make hub-demo # solis-hub against a fake inverter, for Hub mode
 ```
 
 `make help` lists the rest. CI runs exactly these checks, so a green `make` is
@@ -44,6 +46,7 @@ inject the faults that matter:
 python3 fake_inverter.py --port 5020 --corrupt-after 8   # bad battery register
 python3 fake_inverter.py --port 5020 --drop-after 10     # forces a reconnect
 python3 fake_inverter.py --port 5020 --string-inverter   # wrong register family
+python3 fake_inverter.py --port 5020 --grid-charging     # a state voltage control acts on
 ```
 
 Point either the CLI or the menu-bar app at `127.0.0.1:5020`. Anything you can
@@ -152,8 +155,12 @@ the checksums; follow `docs/releasing.md`. Do not create a separate formula PR.
 snake_case; Swift decodes with `.convertFromSnakeCase`. Adding a field is safe.
 Renaming or removing one breaks the app, and `schema_version` must be bumped on
 both sides — the app refuses a version it does not know. Every field is pinned
-in `SolisMenuBar/Tests/SolisMenuBarTests/StreamContractTests.swift`; make new
-optional fields `Optional` in Swift so an older poller still decodes.
+in `SolisHubKit/Tests/SolisHubKitTests/StreamContractTests.swift` (the stream
+models live in `SolisHubKit/Sources/SolisHubKit/StreamModels.swift`, shared by
+the menu bar and the iOS app); make new optional fields `Optional` in Swift so
+an older poller still decodes. A numeric `voltage_control` field that should
+also chart in Hub mode needs adding to `HISTORY_CONTROL_FIELDS` in
+`solis_hub.py` and to the history types in SolisHubKit.
 
 **A bad sample is not a bad register map.** `checked()` raises
 `ImplausibleReadingError`, which is fatal only before the first successful poll.

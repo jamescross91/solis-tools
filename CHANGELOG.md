@@ -45,6 +45,10 @@ versioning](https://semver.org/spec/v2.0.0.html).
   the token and optional Cloudflare Access credentials, kept in the Keychain.
 - `SolisHubKit`, a Swift package shared by the menu bar and the iOS app, with
   the stream models, the hub client, endpoint resolution and Keychain storage.
+- The menu-bar app's Info.plist now declares `_solis-hub._tcp` for Bonjour
+  discovery, so macOS may ask once for local network access after upgrading.
+  The stream models moved from the app into `SolisHubKit` with unchanged
+  behaviour, and the Homebrew formula installs `solis-hub`.
 - `fake_inverter.py --grid-charging` starts in a state the voltage controller
   acts on.
 - A test that the poller restores the inverter's baseline on SIGTERM, which is
