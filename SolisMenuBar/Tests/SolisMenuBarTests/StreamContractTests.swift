@@ -185,6 +185,80 @@ final class HistoryBufferTests: XCTestCase {
         XCTAssertEqual(buffer.points.last?.date, start.addingTimeInterval(2_000))
     }
 
+    // MARK: Merging hub history
+
+    private let base = Date(timeIntervalSince1970: 1_000)
+
+    private func point(_ offset: TimeInterval, _ sample: InverterReading) -> HistoryPoint {
+        HistoryPoint(date: base.addingTimeInterval(offset), reading: sample)
+    }
+
+    private func offsets(_ points: [HistoryPoint]) -> [TimeInterval] {
+        points.map { $0.date.timeIntervalSince(base) }
+    }
+
+    /// The hub's backfill overlaps the samples already received live, and a
+    /// point shared by both must appear once.
+    func testBackfillDeduplicatesByTimestamp() throws {
+        let sample = try reading()
+        var control = ControlHistoryBuffer()
+        control.append(point(120, sample))
+        control.append(point(150, sample))
+        control.merge(backfill: [point(60, sample), point(120, sample), point(90, sample), point(90, sample)])
+        XCTAssertEqual(offsets(control.points), [60, 90, 120, 150])
+
+        var long = HistoryBuffer()
+        long.append(point(120, sample))
+        long.append(point(180, sample))
+        long.merge(backfill: [point(60, sample), point(120, sample), point(0, sample)])
+        XCTAssertEqual(offsets(long.points), [0, 60, 120, 180])
+    }
+
+    func testControlMergeOrdersBackfillBeforeLivePoints() throws {
+        let sample = try reading()
+        var buffer = ControlHistoryBuffer()
+        buffer.append(point(300, sample))
+        buffer.append(point(310, sample))
+        buffer.merge(backfill: [point(200, sample), point(100, sample), point(250, sample)])
+        XCTAssertEqual(offsets(buffer.points), [100, 200, 250, 300, 310])
+
+        buffer.merge(backfill: [])
+        XCTAssertEqual(offsets(buffer.points), [100, 200, 250, 300, 310])
+    }
+
+    /// Retention is measured back from the newest point, so a merge cannot
+    /// resurrect history older than the window the live samples have reached.
+    func testControlMergeKeepsOnlyTheRetentionWindow() throws {
+        let sample = try reading()
+        var buffer = ControlHistoryBuffer()
+        buffer.append(point(3_000, sample))
+        buffer.merge(backfill: [point(0, sample), point(1_000, sample), point(1_300, sample), point(1_700, sample)])
+        XCTAssertEqual(offsets(buffer.points), [1_300, 1_700, 3_000])
+    }
+
+    func testHistoryMergeOrdersDedupesAndRetainsLikeTheControlBuffer() throws {
+        let sample = try reading()
+        let window = HistoryBuffer.retentionInterval
+        var buffer = HistoryBuffer()
+        buffer.append(point(window + 3_600, sample))
+        buffer.merge(
+            backfill: [
+                point(3_700, sample), point(0, sample), point(60, sample), point(3_700, sample),
+            ]
+        )
+        // 0 and 60 fall outside the window measured from the newest point.
+        XCTAssertEqual(offsets(buffer.points), [3_700, window + 3_600])
+    }
+
+    func testHistoryMergeThinsBackfillToTheDisplayInterval() throws {
+        let sample = try reading()
+        var buffer = HistoryBuffer()
+        buffer.append(point(500, sample))
+        buffer.merge(backfill: [point(0, sample), point(10, sample), point(40, sample)])
+        // 10 is within thirty seconds of 0, as a live sample would have been.
+        XCTAssertEqual(offsets(buffer.points), [0, 40, 500])
+    }
+
     func testHistoryPointProjectsOnlyChartValues() throws {
         let sample = try reading()
         let point = HistoryPoint(date: Date(timeIntervalSince1970: 1_000), reading: sample)

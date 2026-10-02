@@ -72,6 +72,10 @@ final class PollerProcessSource: TelemetrySource {
     private var errorBuffer = Data()
     private var retryTask: Task<Void, Never>?
     private var shouldRun = false
+    /// A launch the hub-detected guard refused. Only a held launch may be
+    /// resumed by a hub decision; resuming any other would skip the crash
+    /// backoff.
+    private var heldForHub = false
     private var retryAttempt = 0
     private var terminationRequested = false
     private var streamProcessor: StreamProcessor?
@@ -96,7 +100,7 @@ final class PollerProcessSource: TelemetrySource {
     /// The person has decided about a detected hub. Launches only if nothing
     /// is running already and a launch was being held back.
     func resumeAfterHubDecision() {
-        guard shouldRun, process == nil else { return }
+        guard shouldRun, heldForHub, process == nil else { return }
         retryTask?.cancel()
         retryTask = nil
         launch()
@@ -132,6 +136,7 @@ final class PollerProcessSource: TelemetrySource {
 
     private func clearStoppedProcess() {
         shouldRun = false
+        heldForHub = false
         retryTask?.cancel()
         retryTask = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
@@ -182,11 +187,13 @@ final class PollerProcessSource: TelemetrySource {
     private func launch() {
         guard shouldRun else { return }
         guard canLaunch() else {
+            heldForHub = true
             emit(.status(.degraded(
                 "A solis-hub is on this network. Choose how to continue before this Mac starts its own poller."
             )))
             return
         }
+        heldForHub = false
         guard let path = locatePoller() else {
             emit(.status(.failed(
                 "solis-poll was not found. Install or upgrade solis-tools with Homebrew."

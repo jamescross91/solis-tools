@@ -121,13 +121,22 @@ struct DashboardView: View {
         .onDisappear {
             monitor.setDashboardVisible(false)
         }
+        // "Switch to Hub" from a banner changes the mode while the settings
+        // form may be open on the other one.
+        .onChange(of: activeMode) { newMode in
+            pendingMode = newMode
+        }
     }
 
     /// The mode the app is actually running in, as opposed to the one chosen
     /// in the settings form.
-    private var isHubMode: Bool {
+    private var activeMode: ConnectionMode {
         let mode: ConnectionMode = monitor.policy.mode
-        return mode == .hub
+        return mode
+    }
+
+    private var isHubMode: Bool {
+        activeMode == .hub
     }
 
     private var needsSetup: Bool {
@@ -175,7 +184,14 @@ struct DashboardView: View {
     @ViewBuilder
     private var hubDetectedBanners: some View {
         let mode: ConnectionMode = monitor.policy.mode
+        let warning: String? = monitor.discoveryWarning
         if mode == .direct {
+            if let warning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(monitor.policy.blockingHubs) { hub in
                 VStack(alignment: .leading, spacing: 6) {
                     Label("A solis-hub (\(hub.name)) is on this network", systemImage: "server.rack")
@@ -869,8 +885,14 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
             }
             .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
-            hypervoltSignIn
-                .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
+            if isHubMode {
+                Text("While a hub is the controller, sign in to Hypervolt on the hub with hypervolt-login.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                hypervoltSignIn
+                    .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
+            }
             Text(
                 "Whichever side is not protected is trimmed first to hold voltage, then "
                     + "restored first once headroom returns."
@@ -888,8 +910,14 @@ struct DashboardView: View {
                     .textFieldStyle(.roundedBorder)
             }
             .disabled(!dynamicVoltageEnabled || !octopusEnabled)
-            octopusSignIn
-                .disabled(!dynamicVoltageEnabled || !octopusEnabled)
+            if isHubMode {
+                Text("While a hub is the controller, sign in to Octopus on the hub with octopus-login.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                octopusSignIn
+                    .disabled(!dynamicVoltageEnabled || !octopusEnabled)
+            }
             Text(
                 "From five minutes before each planned charge until it ends, voltage is held inside "
                     + "Hypervolt's 207–253 V trip limits; the normal limits return afterwards."
@@ -1123,7 +1151,9 @@ struct DashboardView: View {
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
-            if let path = monitor.executablePath {
+            // The path is left over from the last Direct run; in Hub mode no
+            // local poller exists to name.
+            if !isHubMode, let path = monitor.executablePath {
                 Text(URL(fileURLWithPath: path).lastPathComponent)
                     .font(.caption2)
                     .foregroundStyle(.secondary)

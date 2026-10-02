@@ -153,8 +153,9 @@ public struct HubConnectionSettings: Sendable, Equatable {
 }
 
 /// The order endpoints are tried in. Pure, so the rules are testable without
-/// a network: the LAN first (a Bonjour result, then the typed LAN address),
-/// then the remote URL, and nothing at all while the network is down.
+/// a network: the LAN first (the chosen hub's Bonjour result, then the typed
+/// LAN address), then the remote URL, and nothing at all while the network is
+/// down.
 public enum HubEndpointSelector {
     public static func candidates(
         settings: HubConnectionSettings,
@@ -169,12 +170,18 @@ public enum HubEndpointSelector {
             }
         }
 
-        let eligible = discovered
-            .filter { settings.preferredHubID == nil || $0.hubID == settings.preferredHubID }
-            .sorted { $0.name < $1.name }
-        for hub in eligible {
-            if let url = hub.url {
-                add(HubEndpoint(kind: .lan, baseURL: url))
+        // Discovered hubs are used only once the person has chosen one. The
+        // bearer token goes to a LAN address in clear text, and any host on
+        // the network can advertise the service, so a lone discovered hub is
+        // offered in the UI but never connected to unprompted.
+        if let preferred = settings.preferredHubID {
+            let eligible = discovered
+                .filter { $0.hubID == preferred }
+                .sorted { $0.name < $1.name }
+            for hub in eligible {
+                if let url = hub.url {
+                    add(HubEndpoint(kind: .lan, baseURL: url))
+                }
             }
         }
         if let lan = settings.lanURL {

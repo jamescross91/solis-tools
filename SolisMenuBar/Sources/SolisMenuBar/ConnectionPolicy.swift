@@ -99,9 +99,12 @@ struct ConnectionPolicy: Equatable, Sendable {
     /// confirm the hub service is stopped; otherwise two controllers would
     /// compete for the logger. Returns whether the switch happened.
     ///
-    /// Confirming also ignores the hubs currently advertised: Avahi keeps
-    /// advertising a stopped hub's static service file, so without that the
-    /// guard would hold Direct back forever.
+    /// Confirming also ignores the hubs this policy currently sees advertised:
+    /// Avahi keeps advertising a stopped hub's static service file, so without
+    /// that the guard would hold Direct back forever. Presence only runs in
+    /// Direct mode, so after Hub mode that list is normally empty and the
+    /// caller must ignore the hub it was connected to itself, as
+    /// MonitorStore.switchToDirect does.
     @discardableResult
     mutating func switchToDirect(hubServiceConfirmedStopped: Bool) -> Bool {
         guard hubServiceConfirmedStopped else { return false }

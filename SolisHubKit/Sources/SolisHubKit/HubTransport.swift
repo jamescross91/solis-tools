@@ -26,6 +26,21 @@ public protocol HubTransport: Sendable {
     func open(_ endpoint: HubEndpoint, headers: [String: String]) async throws -> any HubSocket
 }
 
+/// Refuses every redirect. URLSession would otherwise follow one and carry the
+/// bearer token and Cloudflare headers to whatever host it names, so a hub
+/// that answers with a redirect is reported as a failure instead.
+final class RefuseRedirectsDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 public final class URLSessionHubTransport: HubTransport {
     private let session: URLSession
 
@@ -34,8 +49,15 @@ public final class URLSessionHubTransport: HubTransport {
         // HubClient owns reconnection and its own timeouts; a session that
         // quietly waits for connectivity would hide an unreachable hub.
         configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 15
-        session = URLSession(configuration: configuration)
+        configuration.timeoutIntervalForRequest = 60
+        session = URLSession(
+            configuration: configuration, delegate: RefuseRedirectsDelegate(), delegateQueue: nil
+        )
+    }
+
+    deinit {
+        // The session retains its delegate until it is invalidated.
+        session.finishTasksAndInvalidate()
     }
 
     public func open(_ endpoint: HubEndpoint, headers: [String: String]) async throws -> any HubSocket {

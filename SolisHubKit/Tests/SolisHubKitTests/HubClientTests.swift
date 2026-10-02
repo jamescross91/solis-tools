@@ -202,6 +202,9 @@ final class HubClientTests: XCTestCase {
             endpoints: [lan],
             auth: auth,
             transport: transport,
+            // A connection that drops at once would not normally count as
+            // stable; zero makes the handshake alone enough to reset.
+            configuration: HubClientConfiguration(stableAfter: 0),
             sleep: { try await recorder.record($0) },
             jitter: { 0 }
         )
@@ -255,19 +258,224 @@ final class HubClientTests: XCTestCase {
         XCTAssertEqual(connected, [remote])
     }
 
-    func testBearerAndCloudflareHeadersAreSentOnEveryAttempt() async throws {
+    /// The LAN is plain http and does not pass through Cloudflare, so only the
+    /// remote attempt carries the Access pair; the bearer token goes to both.
+    func testCloudflareHeadersGoToRemoteOnly() async throws {
         let socket = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
-        let transport = ScriptedTransport([.socket(socket)])
-        let client = HubClient(endpoints: [lan], auth: auth, transport: transport)
+        let transport = ScriptedTransport([.fail(.timedOut), .socket(socket)])
+        let client = HubClient(
+            endpoints: [lan, remote],
+            auth: auth,
+            transport: transport,
+            sleep: { _ in try await Task.sleep(nanoseconds: 1_000_000_000) },
+            jitter: { 0 }
+        )
         let log = EventLog(client)
         await client.start()
         let seen = await log.wait(for: isHello)
         await client.stop()
         XCTAssertTrue(seen)
-        let headers = try XCTUnwrap(transport.headers.first)
-        XCTAssertEqual(headers["Authorization"], "Bearer token")
-        XCTAssertEqual(headers["CF-Access-Client-Id"], "id")
-        XCTAssertEqual(headers["CF-Access-Client-Secret"], "secret")
+
+        XCTAssertEqual(transport.attempts, [lan, remote])
+        let lanHeaders = try XCTUnwrap(transport.headers.first)
+        XCTAssertEqual(lanHeaders["Authorization"], "Bearer token")
+        XCTAssertNil(lanHeaders["CF-Access-Client-Id"])
+        XCTAssertNil(lanHeaders["CF-Access-Client-Secret"])
+        let remoteHeaders = try XCTUnwrap(transport.headers.last)
+        XCTAssertEqual(remoteHeaders["Authorization"], "Bearer token")
+        XCTAssertEqual(remoteHeaders["CF-Access-Client-Id"], "id")
+        XCTAssertEqual(remoteHeaders["CF-Access-Client-Secret"], "secret")
+    }
+
+    /// A handshake that is followed by an instant drop is not a healthy
+    /// connection, so the schedule keeps climbing instead of retrying every
+    /// second for ever.
+    func testInstantlyClosingConnectionDoesNotResetBackoff() async throws {
+        let expectation = expectation(description: "four backoff pauses")
+        let recorder = SleepRecorder(target: 4, expectation: expectation)
+        let sockets = (0..<6).map { _ in FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: true) }
+        let transport = ScriptedTransport(sockets.map { ScriptedTransport.Step.socket($0) })
+        let client = HubClient(
+            endpoints: [lan],
+            auth: auth,
+            transport: transport,
+            sleep: { try await recorder.record($0) },
+            jitter: { 0 }
+        )
+        await client.start()
+        await fulfillment(of: [expectation], timeout: 5)
+        await client.stop()
+        XCTAssertEqual(Array(recorder.recorded.prefix(4)), [1, 2, 4, 8])
+    }
+
+    func testUpdateEndpointsWakesABackoffPauseImmediately() async throws {
+        let socket = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let client = HubClient(
+            endpoints: [],
+            auth: auth,
+            transport: ScriptedTransport([.socket(socket)]),
+            // Far longer than the test: only a wake-up can end this pause.
+            sleep: { _ in try await Task.sleep(nanoseconds: 60_000_000_000) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        await client.start()
+        let paused = await log.wait { event in
+            if case .disconnected(.noEndpoint) = event { return true }
+            return false
+        }
+        XCTAssertTrue(paused)
+
+        let started = Date()
+        await client.updateEndpoints([lan])
+        let connected = await log.wait(timeout: 4, for: isHello)
+        await client.stop()
+        XCTAssertTrue(connected)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+    }
+
+    func testNetworkPathChangedReconnectsAndResetsBackoff() async throws {
+        let expectation = expectation(description: "three backoff pauses")
+        let recorder = SleepRecorder(target: 3, expectation: expectation)
+        let first = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let second = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let transport = ScriptedTransport([
+            .fail(.connectionFailed("down")),
+            .fail(.connectionFailed("down")),
+            .socket(first),
+            .socket(second),
+        ])
+        let client = HubClient(
+            endpoints: [lan],
+            auth: auth,
+            transport: transport,
+            sleep: { try await recorder.record($0) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        await client.start()
+        let connected = await log.wait(for: isHello)
+        XCTAssertTrue(connected)
+
+        await client.networkPathChanged()
+        await fulfillment(of: [expectation], timeout: 5)
+        for _ in 0..<500 where log.events.filter(isHello).count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await client.stop()
+
+        // Two failures climb 1, 2. The path change drops the connection and
+        // starts the schedule over, so the next pause is 1, not 4.
+        XCTAssertEqual(Array(recorder.recorded.prefix(3)), [1, 2, 1])
+        XCTAssertTrue(first.isClosed)
+        XCTAssertEqual(log.events.filter(isHello).count, 2)
+        XCTAssertTrue(
+            log.events.contains { event in
+                if case .disconnected(.endpointChanged) = event { return true }
+                return false
+            }
+        )
+    }
+
+    func testStartAfterStopDoesNothing() async throws {
+        // A second socket is scripted so a start that wrongly took effect
+        // would connect to it.
+        let first = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let second = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let transport = ScriptedTransport([.socket(first), .socket(second)])
+        let client = HubClient(endpoints: [lan], auth: auth, transport: transport)
+        let log = EventLog(client)
+        await client.start()
+        let seen = await log.wait(for: isHello)
+        XCTAssertTrue(seen)
+        await client.stop()
+        XCTAssertEqual(transport.attempts.count, 1)
+
+        // A stopped client is finished for good: this must not start a loop
+        // that nothing could ever stop.
+        await client.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(transport.attempts.count, 1)
+    }
+
+    // MARK: Liveness and timeouts
+
+    func testLanConnectTimeoutFallsThroughToTheRemote() async throws {
+        let silentLan = FakeSocket(frames: [], endsAfterFrames: false)
+        let remoteSocket = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let transport = ScriptedTransport([.socket(silentLan), .socket(remoteSocket)])
+        let client = HubClient(
+            endpoints: [lan, remote],
+            auth: auth,
+            transport: transport,
+            configuration: HubClientConfiguration(lanConnectTimeout: 0.05),
+            sleep: { _ in try await Task.sleep(nanoseconds: 1_000_000_000) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        await client.start()
+        let seen = await log.wait(for: isHello)
+        await client.stop()
+
+        XCTAssertTrue(seen)
+        XCTAssertEqual(transport.attempts, [lan, remote])
+        XCTAssertTrue(silentLan.isClosed)
+        let connected = log.events.compactMap { event -> HubEndpoint? in
+            if case let .connected(endpoint) = event { return endpoint }
+            return nil
+        }
+        XCTAssertEqual(connected, [remote])
+    }
+
+    private let fastLiveness = HubClientConfiguration(pingInterval: 0.05, livenessTimeout: 0.5)
+
+    func testSilentConnectionTimesOut() async throws {
+        let socket = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let client = HubClient(
+            endpoints: [lan],
+            auth: auth,
+            transport: ScriptedTransport([.socket(socket)]),
+            configuration: fastLiveness,
+            sleep: { _ in try await Task.sleep(nanoseconds: 1_000_000_000) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        await client.start()
+        let timedOut = await log.wait { event in
+            if case .disconnected(.timedOut) = event { return true }
+            return false
+        }
+        await client.stop()
+
+        XCTAssertTrue(timedOut)
+        XCTAssertTrue(socket.isClosed)
+        XCTAssertTrue(socket.sent.contains { $0.contains("ping") })
+    }
+
+    func testPongKeepsItAlive() async throws {
+        let socket = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let client = HubClient(
+            endpoints: [lan],
+            auth: auth,
+            transport: ScriptedTransport([.socket(socket)]),
+            configuration: fastLiveness,
+            sleep: { _ in try await Task.sleep(nanoseconds: 1_000_000_000) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        await client.start()
+        let connected = await log.wait(for: isHello)
+        XCTAssertTrue(connected)
+
+        // Three times the liveness timeout, with traffic throughout.
+        for _ in 0..<30 {
+            socket.push("{\"type\":\"pong\",\"nonce\":\"1\"}")
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let dropped = log.events.contains(where: isDisconnect)
+        await client.stop()
+
+        XCTAssertFalse(dropped)
     }
 
     // MARK: Events
@@ -397,6 +605,32 @@ final class HubClientTests: XCTestCase {
                 "{\"type\":\"attention\",\"on\":true}",
             ]
         )
+    }
+
+    func testAttentionResentAfterReconnect() async throws {
+        // The first connection ends straight after its hello.
+        let first = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: true)
+        let second = FakeSocket(frames: [Fixtures.hello()], endsAfterFrames: false)
+        let client = HubClient(
+            endpoints: [lan],
+            auth: auth,
+            transport: ScriptedTransport([.socket(first), .socket(second)]),
+            sleep: { _ in try await Task.sleep(nanoseconds: 1_000_000) },
+            jitter: { 0 }
+        )
+        let log = EventLog(client)
+        client.setAttention(true)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await client.start()
+        let attention = "{\"type\":\"attention\",\"on\":true}"
+        for _ in 0..<300 where !second.sent.contains(attention) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await client.stop()
+
+        XCTAssertEqual(first.sent.filter { $0 == attention }.count, 1)
+        XCTAssertEqual(second.sent.filter { $0 == attention }.count, 1)
+        XCTAssertEqual(log.events.filter(isHello).count, 2)
     }
 
     // MARK: Moving between endpoints

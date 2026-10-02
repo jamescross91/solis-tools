@@ -56,7 +56,8 @@ final class HubEndpointTests: XCTestCase {
     func testTheLanIsTriedBeforeTheRemoteURL() throws {
         let settings = HubConnectionSettings(
             lanURL: try url("http://192.168.1.20:8765"),
-            remoteURL: try url("https://energy.example.com")
+            remoteURL: try url("https://energy.example.com"),
+            preferredHubID: "hub-1"
         )
         let found = try discovered("solis-hub", id: "hub-1", address: "http://192.168.1.21:8765")
         let candidates = HubEndpointSelector.candidates(settings: settings, discovered: [found])
@@ -82,11 +83,39 @@ final class HubEndpointTests: XCTestCase {
     }
 
     func testAnUnresolvedServiceIsSkippedAndDuplicatesCollapse() throws {
-        let settings = HubConnectionSettings(lanURL: try url("http://10.0.0.5:8765"))
-        let unresolved = try discovered("a", id: "a", address: nil)
-        let same = try discovered("b", id: "b", address: "http://10.0.0.5:8765")
+        let settings = HubConnectionSettings(
+            lanURL: try url("http://10.0.0.5:8765"), preferredHubID: "mine"
+        )
+        let unresolved = try discovered("a", id: "mine", address: nil)
+        let same = try discovered("b", id: "mine", address: "http://10.0.0.5:8765")
         let candidates = HubEndpointSelector.candidates(settings: settings, discovered: [unresolved, same])
         XCTAssertEqual(candidates.count, 1)
+    }
+
+    /// The token goes to a LAN hub in clear text, and any host can advertise
+    /// the service, so a discovered hub is never used until it is chosen, not
+    /// even when it is the only one.
+    func testDiscoveredHubsAreIgnoredUntilOneIsChosen() throws {
+        let lone = try discovered("solis-hub", id: "hub-1", address: "http://10.0.0.5:8765")
+        let remote = try url("https://energy.example.com")
+
+        let nothingChosen = HubConnectionSettings(remoteURL: remote)
+        XCTAssertEqual(
+            HubEndpointSelector.candidates(settings: nothingChosen, discovered: [lone]).map(\.kind),
+            [.remote]
+        )
+        XCTAssertTrue(
+            HubEndpointSelector.candidates(settings: HubConnectionSettings(), discovered: [lone]).isEmpty
+        )
+
+        let chosen = HubConnectionSettings(remoteURL: remote, preferredHubID: "hub-1")
+        let candidates = HubEndpointSelector.candidates(settings: chosen, discovered: [lone])
+        XCTAssertEqual(candidates.map(\.kind), [.lan, .remote])
+        XCTAssertEqual(candidates[0].baseURL.host, "10.0.0.5")
+
+        // A choice that matches nothing on the network adds nothing.
+        let elsewhere = HubConnectionSettings(preferredHubID: "hub-2")
+        XCTAssertTrue(HubEndpointSelector.candidates(settings: elsewhere, discovered: [lone]).isEmpty)
     }
 
     // MARK: Moving a live connection
@@ -117,32 +146,99 @@ final class HubEndpointTests: XCTestCase {
         XCTAssertEqual(backoff.delay(attempt: 1, jitter: 0), 2)
         XCTAssertEqual(backoff.delay(attempt: 4, jitter: 0), 16)
         XCTAssertEqual(backoff.delay(attempt: 5, jitter: 0), 30)
-        XCTAssertEqual(backoff.delay(attempt: 50, jitter: 1), 30)
+        XCTAssertEqual(backoff.delay(attempt: 50, jitter: 0), 30)
     }
 
-    func testJitterOnlyAddsAndNeverExceedsTheCap() {
+    func testJitterOnlyShortensTheDelayAndNeverLeavesOneToThirty() {
         let backoff = HubBackoff()
-        XCTAssertEqual(backoff.delay(attempt: 0, jitter: 1), 1.25, accuracy: 0.0001)
-        XCTAssertEqual(backoff.delay(attempt: 3, jitter: 0.5), 9, accuracy: 0.0001)
+        // The first delay has no room below it: one second is the floor.
+        XCTAssertEqual(backoff.delay(attempt: 0, jitter: 1), 1, accuracy: 0.0001)
+        XCTAssertEqual(backoff.delay(attempt: 3, jitter: 0.5), 7, accuracy: 0.0001)
+        XCTAssertEqual(backoff.delay(attempt: 3, jitter: 1), 6, accuracy: 0.0001)
         for attempt in 0..<10 {
             for jitter in stride(from: 0.0, through: 1.0, by: 0.25) {
                 let delay = backoff.delay(attempt: attempt, jitter: jitter)
                 XCTAssertGreaterThanOrEqual(delay, 1)
                 XCTAssertLessThanOrEqual(delay, 30)
+                XCTAssertLessThanOrEqual(delay, backoff.delay(attempt: attempt, jitter: 0))
             }
         }
+    }
+
+    /// Jitter added on top of the cap was clamped away, so every client came
+    /// back at exactly thirty seconds.
+    func testJitterStillSpreadsAtTheCap() {
+        let backoff = HubBackoff()
+        XCTAssertEqual(backoff.delay(attempt: 10, jitter: 0), 30, accuracy: 0.0001)
+        XCTAssertEqual(backoff.delay(attempt: 10, jitter: 0.5), 26.25, accuracy: 0.0001)
+        XCTAssertEqual(backoff.delay(attempt: 10, jitter: 1), 22.5, accuracy: 0.0001)
+        let delays = Set([0.0, 0.25, 0.5, 0.75, 1.0].map { backoff.delay(attempt: 20, jitter: $0) })
+        XCTAssertEqual(delays.count, 5)
+    }
+
+    func testJitterNeverDropsBelowOneSecondOrAboveThirty() {
+        let backoff = HubBackoff()
+        for attempt in [-3, 0, 1, 2, 5, 16, 17, 1_000] {
+            // Out-of-range jitter is clamped rather than trusted.
+            for jitter in [-5.0, 0.0, 0.3, 1.0, 7.0] {
+                let delay = backoff.delay(attempt: attempt, jitter: jitter)
+                XCTAssertGreaterThanOrEqual(delay, 1, "attempt \(attempt), jitter \(jitter)")
+                XCTAssertLessThanOrEqual(delay, 30, "attempt \(attempt), jitter \(jitter)")
+            }
+        }
+    }
+
+    // MARK: Network path
+
+    func testThePathRevisionIgnoresTheFirstSnapshotAndRepeats() {
+        var tracker = HubPathRevisionTracker()
+        let home = HubPathRevisionTracker.signature(interfaces: ["wifi/en0"], gateways: ["192.168.1.1"])
+        XCTAssertFalse(tracker.observe(home))
+        XCTAssertEqual(tracker.revision, 0)
+        XCTAssertFalse(tracker.observe(home))
+        XCTAssertEqual(tracker.revision, 0)
+    }
+
+    func testThePathRevisionMovesWhenInterfacesOrGatewaysChange() {
+        var tracker = HubPathRevisionTracker()
+        let home = HubPathRevisionTracker.signature(interfaces: ["wifi/en0"], gateways: ["192.168.1.1"])
+        // The same Wi-Fi interface, but a different network behind it.
+        let cafe = HubPathRevisionTracker.signature(interfaces: ["wifi/en0"], gateways: ["10.20.0.1"])
+        let docked = HubPathRevisionTracker.signature(
+            interfaces: ["wifi/en0", "wiredEthernet/en5"], gateways: ["192.168.1.1"]
+        )
+        tracker.observe(home)
+        XCTAssertTrue(tracker.observe(cafe))
+        XCTAssertEqual(tracker.revision, 1)
+        XCTAssertTrue(tracker.observe(docked))
+        XCTAssertEqual(tracker.revision, 2)
+        XCTAssertFalse(tracker.observe(docked))
+        // Order within a snapshot is not a change.
+        let reordered = HubPathRevisionTracker.signature(
+            interfaces: ["wiredEthernet/en5", "wifi/en0"], gateways: ["192.168.1.1"]
+        )
+        XCTAssertFalse(tracker.observe(reordered))
+        XCTAssertEqual(tracker.revision, 2)
     }
 
     // MARK: Credentials
 
     func testHeadersNeverIncludeHalfACloudflarePair() {
-        XCTAssertEqual(HubAuth(token: "t").headers(), ["Authorization": "Bearer t"])
+        XCTAssertEqual(HubAuth(token: "t").headers(for: .remote), ["Authorization": "Bearer t"])
         XCTAssertEqual(
-            HubAuth(token: "t", cloudflareClientID: "id", cloudflareClientSecret: nil).headers().count, 1
+            HubAuth(token: "t", cloudflareClientID: "id", cloudflareClientSecret: nil)
+                .headers(for: .remote).count,
+            1
         )
-        let both = HubAuth(token: "t", cloudflareClientID: "id", cloudflareClientSecret: "secret").headers()
+        let both = HubAuth(token: "t", cloudflareClientID: "id", cloudflareClientSecret: "secret")
+            .headers(for: .remote)
         XCTAssertEqual(both["CF-Access-Client-Id"], "id")
         XCTAssertEqual(both["CF-Access-Client-Secret"], "secret")
+    }
+
+    func testTheCloudflarePairNeverCrossesPlainHttpToTheLan() {
+        let auth = HubAuth(token: "t", cloudflareClientID: "id", cloudflareClientSecret: "secret")
+        XCTAssertEqual(auth.headers(for: .lan), ["Authorization": "Bearer t"])
     }
 
     func testPrintingAuthRevealsNothing() {

@@ -99,6 +99,39 @@ final class ConnectionPolicyTests: XCTestCase {
         XCTAssertEqual(restored.mode, .hub)
         XCTAssertEqual(restored.ignoredHubIDs, ["hub-1"])
     }
+
+    /// A value from a newer build, or a corrupted preference, must land on
+    /// the mode that behaves exactly as the app always has.
+    func testUnknownStoredModeFallsBackToDirect() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-policy-\(UUID().uuidString)"))
+        defaults.set("satellite", forKey: ConnectionMode.defaultsKey)
+        XCTAssertEqual(ConnectionPolicy.stored(defaults).mode, .direct)
+        defaults.set("", forKey: ConnectionMode.defaultsKey)
+        XCTAssertEqual(ConnectionPolicy.stored(defaults).mode, .direct)
+    }
+
+    func testIgnoreSurvivesRoundTripToHubAndBack() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-policy-\(UUID().uuidString)"))
+        var policy = ConnectionPolicy.stored(defaults)
+        policy.ignore(hubID: "hub-1")
+        policy.persist(defaults)
+
+        policy.chooseHub()
+        policy.persist(defaults)
+        var inHubMode = ConnectionPolicy.stored(defaults)
+        XCTAssertEqual(inHubMode.mode, .hub)
+        XCTAssertEqual(inHubMode.ignoredHubIDs, ["hub-1"])
+
+        XCTAssertTrue(inHubMode.switchToDirect(hubServiceConfirmedStopped: true))
+        inHubMode.persist(defaults)
+        let backInDirect = ConnectionPolicy.stored(defaults)
+        XCTAssertEqual(backInDirect.mode, .direct)
+        XCTAssertEqual(backInDirect.ignoredHubIDs, ["hub-1"])
+
+        var advertised = backInDirect
+        advertised.updateDetectedHubs([hub])
+        XCTAssertTrue(advertised.localPollerMayStart)
+    }
 }
 
 @MainActor
@@ -159,20 +192,47 @@ private final class StubPresence: HubPresenceWatching, @unchecked Sendable {
     let updates: AsyncStream<HubNetworkState>
     private let continuation: AsyncStream<HubNetworkState>.Continuation
     private let hubs: [DiscoveredHub]
+    private let problem: String?
 
-    init(hubs: [DiscoveredHub]) {
+    init(hubs: [DiscoveredHub], problem: String? = nil) {
         self.hubs = hubs
+        self.problem = problem
         var captured: AsyncStream<HubNetworkState>.Continuation?
         updates = AsyncStream<HubNetworkState> { captured = $0 }
         continuation = captured!
     }
 
     func start() {
+        continuation.yield(
+            HubNetworkState(
+                discovered: hubs, pathSatisfied: true, scanCompleted: problem == nil,
+                discoveryProblem: problem
+            )
+        )
+    }
+
+    /// A later network state, as Bonjour reports when a hub comes or goes.
+    func update(_ hubs: [DiscoveredHub]) {
         continuation.yield(HubNetworkState(discovered: hubs, pathSatisfied: true, scanCompleted: true))
     }
 
     func stop() {
         continuation.finish()
+    }
+}
+
+/// Remembers each presence watcher the store asked for, so a test can change
+/// what the network reports after the store has started watching it.
+@MainActor
+private final class PresenceLog {
+    private(set) var created: [StubPresence] = []
+
+    var latest: StubPresence? { created.last }
+
+    func make(hubs: [DiscoveredHub], problem: String?) -> StubPresence {
+        let presence = StubPresence(hubs: hubs, problem: problem)
+        created.append(presence)
+        return presence
     }
 }
 
@@ -190,25 +250,72 @@ final class MonitorStoreModeTests: XCTestCase {
         let store: MonitorStore
         let defaults: UserDefaults
         let log: SourceLog
+        let presences: PresenceLog
     }
 
+    /// `defaults` lets a second store be built over the same preferences, as a
+    /// relaunch would.
     private func makeFixture(
         mode: ConnectionMode,
         advertising: [DiscoveredHub] = [],
-        hubConfigured: Bool = true
+        hubConfigured: Bool = true,
+        preferredHubID: String? = nil,
+        discoveryProblem: String? = nil,
+        defaults existing: UserDefaults? = nil
     ) throws -> Fixture {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-store-\(UUID().uuidString)"))
+        let defaults: UserDefaults
+        if let existing {
+            defaults = existing
+        } else {
+            defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-store-\(UUID().uuidString)"))
+        }
         defaults.set("192.168.1.57", forKey: "host")
         defaults.set(mode.rawValue, forKey: ConnectionMode.defaultsKey)
-        let settings: HubSourceSettings? = hubConfigured ? hubSettings : nil
+        var configured = hubSettings
+        configured.connection.preferredHubID = preferredHubID
+        let settings: HubSourceSettings? = hubConfigured ? configured : nil
         let log = SourceLog()
+        let presences = PresenceLog()
         let store = MonitorStore(
             defaults: defaults,
             factory: log.factory,
-            makePresence: { StubPresence(hubs: advertising) },
+            makePresence: { presences.make(hubs: advertising, problem: discoveryProblem) },
             loadHubSettings: { settings }
         )
-        return Fixture(store: store, defaults: defaults, log: log)
+        return Fixture(store: store, defaults: defaults, log: log, presences: presences)
+    }
+
+    private func envelope(timestamp: String, successfulPolls: Int = 1) throws -> StreamEnvelope {
+        try StreamDecoder.decode(
+            Data(
+                """
+                {
+                  "schema_version": 2,
+                  "timestamp": "\(timestamp)",
+                  "device": {
+                    "model_code": 20, "dsp_version": 1, "hmi_version": 1,
+                    "protocol_version": 1, "type_definition": null,
+                    "profile_validated": false
+                  },
+                  "reading": {
+                    "grid_voltage_v": 250.0, "inverter_temperature_c": 30.0,
+                    "inverter_status_code": 3, "inverter_status": "Generating",
+                    "battery_soc_percent": 93, "house_load_kw": 1.58,
+                    "battery_kw": 1.72, "battery_flow_kw": 1.72,
+                    "battery_status": "Discharging", "grid_kw": -0.5,
+                    "grid_status": "Importing", "pv_kw": null,
+                    "pv_today_kwh": null, "alarms": []
+                  },
+                  "health": {
+                    "last_sample_age_s": 0.0, "latency_ms": 1.0,
+                    "successful_polls": \(successfulPolls), "total_failures": 0,
+                    "consecutive_failures": 0, "reconnects": 0
+                  },
+                  "error": null
+                }
+                """.utf8
+            )
+        )
     }
 
     private func settle() async throws {
@@ -347,5 +454,235 @@ final class MonitorStoreModeTests: XCTestCase {
         XCTAssertEqual(hub.stopCount, 1)
         XCTAssertEqual(fixture.store.policy.mode, .direct)
         XCTAssertEqual(fixture.log.locals.count, 1)
+    }
+
+    // MARK: Stopping and switching
+
+    /// With a hub holding the launch there is no source to emit .stopped, so
+    /// the store has to report it itself or the dashboard stays "degraded".
+    func testStopFromHeldDirectStateReportsStopped() async throws {
+        let fixture = try makeFixture(mode: .direct, advertising: [advertised])
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.store.state, .degraded)
+        XCTAssertNotNil(fixture.store.statusDetail)
+        XCTAssertEqual(fixture.log.locals.count, 0)
+
+        fixture.store.stop()
+        await fixture.store.waitUntilIdle()
+
+        XCTAssertEqual(fixture.store.state, .stopped)
+        XCTAssertNil(fixture.store.statusDetail)
+        XCTAssertFalse(fixture.store.isRunning)
+        XCTAssertEqual(fixture.log.locals.count, 0)
+    }
+
+    /// Presence only runs in Direct mode, so after Hub mode the policy has
+    /// seen no advertisements: the hub being left must be ignored by id, or
+    /// the guard would hold the local poller back at once.
+    func testSwitchToDirectIgnoresTheHubItWasConnectedTo() async throws {
+        let fixture = try makeFixture(mode: .hub, advertising: [advertised])
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        let hub = try XCTUnwrap(fixture.log.hubs.first)
+        hub.emit(.hubLink(HubLinkInfo(isConnected: true, hubID: "hub-1")))
+        try await settle()
+
+        XCTAssertTrue(fixture.store.switchToDirect(hubServiceConfirmedStopped: true))
+        await fixture.store.waitUntilIdle()
+        try await settle()
+
+        XCTAssertEqual(fixture.store.policy.mode, .direct)
+        XCTAssertTrue(fixture.store.policy.ignoredHubIDs.contains("hub-1"))
+        XCTAssertEqual(fixture.defaults.stringArray(forKey: ConnectionPolicy.ignoredHubsKey), ["hub-1"])
+        XCTAssertEqual(fixture.log.locals.count, 1)
+        XCTAssertNotEqual(fixture.store.state, .degraded)
+    }
+
+    func testSwitchToDirectFallsBackToTheChosenHubWhenNoLinkWasSeen() async throws {
+        let fixture = try makeFixture(mode: .hub, advertising: [advertised], preferredHubID: "hub-1")
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+
+        XCTAssertTrue(fixture.store.switchToDirect(hubServiceConfirmedStopped: true))
+        await fixture.store.waitUntilIdle()
+        try await settle()
+
+        XCTAssertTrue(fixture.store.policy.ignoredHubIDs.contains("hub-1"))
+        XCTAssertEqual(fixture.log.locals.count, 1)
+    }
+
+    /// Whichever of the two calls the lifecycle queue meets first, no local
+    /// poller may be left running once Hub mode has been chosen.
+    func testStartThenSwitchToHubQuicklyNeverLeavesALocalPoller() async throws {
+        let fixture = try makeFixture(mode: .direct)
+        let configuration = try XCTUnwrap(MonitorConfiguration.stored(fixture.defaults))
+
+        fixture.store.start(configuration: configuration)
+        // Long enough for the start to be waiting on the first Bonjour scan.
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertTrue(fixture.store.switchToHub())
+        await fixture.store.waitUntilIdle()
+        try await settle()
+
+        XCTAssertEqual(fixture.store.policy.mode, .hub)
+        XCTAssertEqual(fixture.log.hubs.count, 1)
+        XCTAssertTrue(fixture.log.locals.allSatisfy { $0.stopCount >= 1 })
+    }
+
+    /// A schema this build cannot read will not fix itself, but it is still
+    /// the hub's problem: the answer is never to run the poller here.
+    func testHubSourceUnsupportedSchemaNeverFallsBackToDirect() async throws {
+        let fixture = try makeFixture(mode: .hub)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        let hub = try XCTUnwrap(fixture.log.hubs.first)
+
+        hub.emit(.unsupportedSchema(3))
+        try await settle()
+        await fixture.store.waitUntilIdle()
+
+        XCTAssertEqual(fixture.store.policy.mode, .hub)
+        XCTAssertGreaterThanOrEqual(hub.stopCount, 1)
+        XCTAssertEqual(fixture.log.locals.count, 0)
+
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.log.locals.count, 0)
+        XCTAssertEqual(fixture.store.policy.mode, .hub)
+    }
+
+    // MARK: Hub discovery in Direct mode
+
+    func testHubDisappearingFreesTheHeldLaunch() async throws {
+        let fixture = try makeFixture(mode: .direct, advertising: [advertised])
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.log.locals.count, 0)
+
+        let presence = try XCTUnwrap(fixture.presences.latest)
+        presence.update([])
+        try await settle()
+
+        XCTAssertEqual(fixture.log.locals.count, 1)
+        XCTAssertEqual(fixture.log.locals.first?.startCount, 1)
+        XCTAssertTrue(fixture.store.policy.localPollerMayStart)
+    }
+
+    /// A hub that appears after the poller launched only raises the banner:
+    /// stopping the running controller on an advertisement could leave the
+    /// inverter unregulated, and a second poller must never be started.
+    func testDetectedHubWhileLocalPollerRunningNeitherKillsNorDuplicates() async throws {
+        let fixture = try makeFixture(mode: .direct)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        let local = try XCTUnwrap(fixture.log.locals.first)
+
+        let presence = try XCTUnwrap(fixture.presences.latest)
+        presence.update([advertised])
+        try await settle()
+
+        XCTAssertEqual(fixture.log.locals.count, 1)
+        XCTAssertEqual(local.startCount, 1)
+        XCTAssertEqual(local.stopCount, 0)
+        XCTAssertEqual(fixture.store.policy.blockingHubs.map(\.id), ["hub-1"])
+    }
+
+    func testIgnoredHubSurvivesANewStore() async throws {
+        let first = try makeFixture(mode: .direct, advertising: [advertised])
+        first.store.startIfConfigured()
+        await first.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(first.log.locals.count, 0)
+        first.store.ignoreHub(id: "hub-1")
+        try await settle()
+        XCTAssertEqual(first.log.locals.count, 1)
+
+        // A relaunch over the same preferences, with the hub still advertised.
+        let second = try makeFixture(mode: .direct, advertising: [advertised], defaults: first.defaults)
+        XCTAssertEqual(second.store.policy.ignoredHubIDs, ["hub-1"])
+        second.store.startIfConfigured()
+        await second.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(second.log.locals.count, 1)
+        XCTAssertNotEqual(second.store.state, .degraded)
+    }
+
+    /// With Local Network access refused no hub can ever be seen, so the guard
+    /// fails open; the person is told, and the launch is not held for it.
+    func testABlockedBrowserWarnsAndDoesNotDelayTheLaunch() async throws {
+        let fixture = try makeFixture(
+            mode: .direct, discoveryProblem: "Hub discovery is not running."
+        )
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+
+        XCTAssertEqual(fixture.store.discoveryWarning, "Hub discovery is not running.")
+        XCTAssertEqual(fixture.log.locals.count, 1)
+
+        XCTAssertTrue(fixture.store.switchToHub())
+        await fixture.store.waitUntilIdle()
+        XCTAssertNil(fixture.store.discoveryWarning)
+    }
+
+    // MARK: Freshness
+
+    func testLastEnvelopeAtUsesTheEnvelopeTimestampInHubMode() async throws {
+        let fixture = try makeFixture(mode: .hub)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        let hub = try XCTUnwrap(fixture.log.hubs.first)
+
+        // A snapshot replayed after a reconnect is old data, whenever it arrives.
+        let stamp = Date().addingTimeInterval(-3_600).formatted(.iso8601)
+        hub.emit(.envelope(try envelope(timestamp: stamp)))
+        try await settle()
+        let expected = try XCTUnwrap(StreamDecoder.date(from: stamp))
+        XCTAssertEqual(fixture.store.lastEnvelopeAt, expected)
+
+        // A hub clock ahead of this Mac is clamped rather than shown as the future.
+        hub.emit(.envelope(try envelope(timestamp: "2999-01-01T00:00:00+00:00", successfulPolls: 2)))
+        try await settle()
+        let clamped = try XCTUnwrap(fixture.store.lastEnvelopeAt)
+        XCTAssertLessThanOrEqual(clamped, Date())
+        XCTAssertGreaterThan(clamped, expected)
+    }
+
+    func testLastEnvelopeAtIsTheArrivalTimeInDirectMode() async throws {
+        let fixture = try makeFixture(mode: .direct)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        let local = try XCTUnwrap(fixture.log.locals.first)
+
+        let before = Date()
+        local.emit(.envelope(try envelope(timestamp: "2026-08-19T16:30:00+01:00")))
+        try await settle()
+        let arrived = try XCTUnwrap(fixture.store.lastEnvelopeAt)
+        XCTAssertGreaterThanOrEqual(arrived, before)
+    }
+
+    /// A hub that is down but still being retried counts as running, so
+    /// reopening the popover does not tear its source down and rebuild it.
+    func testAnUnreachableHubSourceCountsAsRunning() async throws {
+        let fixture = try makeFixture(mode: .hub)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        let hub = try XCTUnwrap(fixture.log.hubs.first)
+
+        hub.emit(.status(.failed("Hub unreachable (timed out)")))
+        try await settle()
+        XCTAssertTrue(fixture.store.isRunning)
+
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        try await settle()
+        XCTAssertEqual(fixture.log.hubs.count, 1)
+        XCTAssertEqual(hub.stopCount, 0)
     }
 }

@@ -59,6 +59,10 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var statusDetail: String?
     @Published private(set) var policy: ConnectionPolicy
     @Published private(set) var hubLink: HubLinkInfo?
+    /// Set while this Mac cannot look for a solis-hub (Local Network access
+    /// denied, say). The hub-detected guard then cannot see a hub, so it fails
+    /// open, and the person is told rather than left to assume it is working.
+    @Published private(set) var discoveryWarning: String?
 
     let menuPresentation = MenuBarPresentation()
 
@@ -93,7 +97,9 @@ final class MonitorStore: ObservableObject {
     private var lastUrgentSignature: String?
 
     private static let closedMenuRefreshInterval: TimeInterval = 5
-    private static let initialScanTimeout: TimeInterval = 1.0
+    /// Long enough for a slow first Bonjour answer: a hub missed here lets the
+    /// local poller start beside it.
+    private static let initialScanTimeout: TimeInterval = 3.0
 
     init(
         defaults: UserDefaults = .standard,
@@ -114,7 +120,10 @@ final class MonitorStore: ObservableObject {
 
     var isRunning: Bool {
         switch state {
-        case .stopped, .failed: false
+        case .stopped: false
+        // A hub that is unreachable is still being retried by its source, so
+        // it counts as running; otherwise every popover open would restart it.
+        case .failed: policy.mode == .hub && source != nil
         default: true
         }
     }
@@ -225,8 +234,14 @@ final class MonitorStore: ObservableObject {
         lifecycleTask = Task {
             await previous?.value
             wantsLocalRun = false
-            if await stopSource(), clearReading {
-                clearReadings()
+            if await stopSource() {
+                // With no source (Direct mode held back by a hub) nothing
+                // emits .stopped, so the state would never leave "degraded".
+                statusDetail = nil
+                setState(.stopped)
+                if clearReading {
+                    clearReadings()
+                }
             }
         }
     }
@@ -295,7 +310,13 @@ final class MonitorStore: ObservableObject {
             await previous?.value
             guard revision == lifecycleRevision, await stopSource() else { return }
             guard revision == lifecycleRevision else { return }
+            // Presence only runs in Direct mode, so the policy has seen no
+            // advertisements and cannot ignore the hub being left itself.
+            let leftHubID = hubLink?.hubID ?? loadHubSettings()?.connection.preferredHubID
             policy.switchToDirect(hubServiceConfirmedStopped: true)
+            if let leftHubID {
+                policy.ignore(hubID: leftHubID)
+            }
             policy.persist(defaults)
             hubLink = nil
             shutdownMessage = nil
@@ -405,6 +426,7 @@ final class MonitorStore: ObservableObject {
     }
 
     private func stopPresence() {
+        discoveryWarning = nil
         presence?.stop()
         presenceTask?.cancel()
         presence = nil
@@ -413,12 +435,19 @@ final class MonitorStore: ObservableObject {
     }
 
     private func presenceChanged(_ network: HubNetworkState) {
+        // A browser that cannot run will never report, so waiting on it would
+        // only delay the launch; the warning below says what that costs.
         scanCompleted = network.scanCompleted || !network.discovered.isEmpty
+            || network.discoveryProblem != nil
+        discoveryWarning = network.discoveryProblem
         policy.updateDetectedHubs(
             network.discovered.map { DetectedHub(id: $0.id, name: $0.name) }
         )
         // A hub that has gone away, or a decision just made, may free a held
-        // launch; this does nothing when nothing is held.
+        // launch; this does nothing when nothing is held. A hub that appears
+        // after the local poller launched only raises the banner: stopping a
+        // running controller on the strength of an advertisement could leave
+        // the inverter unregulated, so the person decides.
         resumeAfterHubDecision()
     }
 
@@ -502,7 +531,14 @@ final class MonitorStore: ObservableObject {
     private func receive(_ received: StreamEnvelope) {
         let envelope = merger.merge(received)
         latestReceived = envelope
-        lastEnvelopeAt = Date()
+        let now = Date()
+        // A hub replays its latest sample on every reconnect, so arrival time
+        // would call old data fresh. Clamped in case the hub's clock is ahead.
+        if policy.mode == .hub, let stamped = StreamDecoder.date(from: envelope.timestamp) {
+            lastEnvelopeAt = min(stamped, now)
+        } else {
+            lastEnvelopeAt = now
+        }
         setState(envelope.error == nil && statusDetail == nil ? .connected : .degraded)
 
         if envelope.health.successfulPolls != lastSuccessfulPolls {

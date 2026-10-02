@@ -68,19 +68,25 @@ public struct HubClientConfiguration: Sendable, Equatable {
     /// protocol layer itself, but a phone's radio can stall without the
     /// socket noticing, so liveness is also checked at the application level.
     public var livenessTimeout: TimeInterval
+    /// How long a connection must stay up before the backoff schedule starts
+    /// again from the beginning. A handshake alone proves nothing: a hub that
+    /// accepts and immediately drops would otherwise be retried every second.
+    public var stableAfter: TimeInterval
 
     public init(
         backoff: HubBackoff = HubBackoff(),
         lanConnectTimeout: TimeInterval = 2,
         remoteConnectTimeout: TimeInterval = 10,
         pingInterval: TimeInterval = 15,
-        livenessTimeout: TimeInterval = 40
+        livenessTimeout: TimeInterval = 40,
+        stableAfter: TimeInterval = 10
     ) {
         self.backoff = backoff
         self.lanConnectTimeout = lanConnectTimeout
         self.remoteConnectTimeout = remoteConnectTimeout
         self.pingInterval = pingInterval
         self.livenessTimeout = livenessTimeout
+        self.stableAfter = stableAfter
     }
 
     func connectTimeout(for kind: HubEndpointKind) -> TimeInterval {
@@ -130,6 +136,7 @@ public actor HubClient {
     private var endpointGeneration = 0
     private var attention = false
     private var runTask: Task<Void, Never>?
+    private var isStopped = false
     private var pauseTask: Task<Void, Never>?
     private var socket: (any HubSocket)?
     private var connectedEndpoint: HubEndpoint?
@@ -164,7 +171,9 @@ public actor HubClient {
     }
 
     public func start() {
-        guard runTask == nil else { return }
+        // Without this a start after a stop would run a loop whose event
+        // stream has already finished, and nothing could ever stop it.
+        guard !isStopped, runTask == nil else { return }
         runTask = Task { await self.run() }
     }
 
@@ -172,6 +181,8 @@ public actor HubClient {
     /// has finished, so nothing is still connected afterwards. A stopped client
     /// is finished for good: make a new one to connect again.
     public func stop() async {
+        // First, so a start() that lands while this awaits is refused.
+        isStopped = true
         let task = runTask
         runTask = nil
         task?.cancel()
@@ -200,6 +211,20 @@ public actor HubClient {
         }
     }
 
+    /// The device's network changed (Wi-Fi swapped, an interface came or went)
+    /// without any address list changing. The current connection is dropped
+    /// and the backoff starts over, so the LAN is tried first again from
+    /// wherever the Mac now is.
+    public func networkPathChanged() {
+        guard runTask != nil else { return }
+        backoffResetRequested = true
+        if connectedEndpoint != nil {
+            endpointChangeRequested = true
+        }
+        socket?.close()
+        pauseTask?.cancel()
+    }
+
     /// Tell the hub whether anyone is looking, so the poller can slow down
     /// while nobody is. Callable from any context, and calls are applied in
     /// order. Sent again after every reconnect.
@@ -214,6 +239,9 @@ public actor HubClient {
     private struct Outcome {
         var reason: HubDisconnectReason
         var completedHandshake: Bool
+        /// How long the connection stayed up after its hello; zero when it
+        /// never got that far.
+        var connectedFor: TimeInterval = 0
     }
 
     private func run() async {
@@ -225,7 +253,9 @@ public actor HubClient {
                 lastReported = outcome.reason
                 continuation.yield(.disconnected(outcome.reason))
             }
-            if outcome.completedHandshake || backoffResetRequested {
+            let wasStable = outcome.completedHandshake
+                && outcome.connectedFor >= configuration.stableAfter
+            if wasStable || backoffResetRequested {
                 attempt = 0
                 backoffResetRequested = false
             }
@@ -276,7 +306,7 @@ public actor HubClient {
     private func attempt(_ endpoint: HubEndpoint) async -> Outcome {
         let opened: any HubSocket
         do {
-            opened = try await transport.open(endpoint, headers: auth.headers())
+            opened = try await transport.open(endpoint, headers: auth.headers(for: endpoint.kind))
         } catch {
             return Outcome(reason: Self.reason(for: error), completedHandshake: false)
         }
@@ -323,7 +353,8 @@ public actor HubClient {
         }
 
         connectedEndpoint = endpoint
-        lastInbound = Date()
+        let connectedAt = Date()
+        lastInbound = connectedAt
         lastServerError = nil
         lastReported = nil
         endpointChangeRequested = false
@@ -340,7 +371,11 @@ public actor HubClient {
         } else if let error = lastServerError {
             reason = .serverError(code: error.code, message: error.message)
         }
-        return Outcome(reason: reason, completedHandshake: true)
+        return Outcome(
+            reason: reason,
+            completedHandshake: true,
+            connectedFor: Date().timeIntervalSince(connectedAt)
+        )
     }
 
     /// Reads until the socket ends, while checking that it is still alive.

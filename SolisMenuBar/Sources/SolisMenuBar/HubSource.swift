@@ -45,6 +45,7 @@ final class HubSource: TelemetrySource {
         let updates = resolver.updates
         let connection = settings.connection
         resolverTask = Task {
+            var pathRevision = 0
             for await network in updates {
                 let candidates = HubEndpointSelector.candidates(
                     settings: connection,
@@ -52,6 +53,12 @@ final class HubSource: TelemetrySource {
                     pathSatisfied: network.pathSatisfied
                 )
                 await client.updateEndpoints(candidates)
+                // Leaving or reaching home can change nothing in the candidate
+                // list, so the client is told directly to start over.
+                if network.pathRevision != pathRevision {
+                    pathRevision = network.pathRevision
+                    await client.networkPathChanged()
+                }
             }
         }
         resolver.start()

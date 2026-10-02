@@ -3,7 +3,8 @@ import Security
 
 /// Everything a request to the hub must carry. The bearer token is the hub's
 /// own check; the Cloudflare pair is for Cloudflare Access in front of the
-/// tunnel and is sent only when both halves are present.
+/// tunnel and is sent only when both halves are present, and only to remote
+/// endpoints.
 public struct HubAuth: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
     public var token: String
     public var cloudflareClientID: String?
@@ -15,8 +16,12 @@ public struct HubAuth: Sendable, Equatable, CustomStringConvertible, CustomDebug
         self.cloudflareClientSecret = cloudflareClientSecret
     }
 
-    public func headers() -> [String: String] {
+    public func headers(for kind: HubEndpointKind) -> [String: String] {
         var result = ["Authorization": "Bearer \(token)"]
+        // The protocol spec says "every request"; this deliberately narrows it.
+        // The LAN path does not go through Cloudflare, and the secret should
+        // not cross plain http.
+        guard kind == .remote else { return result }
         if let id = cloudflareClientID, let secret = cloudflareClientSecret,
            !id.isEmpty, !secret.isEmpty {
             result["CF-Access-Client-Id"] = id

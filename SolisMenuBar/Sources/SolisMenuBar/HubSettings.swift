@@ -47,6 +47,7 @@ final class HubSettingsModel: ObservableObject {
     @Published var cloudflareSecret: String
     @Published var preferredHubID: String
     @Published private(set) var discovered: [DiscoveredHub] = []
+    @Published private(set) var discoveryProblem: String?
     @Published private(set) var testState: TestState = .idle
     @Published private(set) var saveError: String?
 
@@ -96,6 +97,7 @@ final class HubSettingsModel: ObservableObject {
         discoveryTask = Task { [weak self] in
             for await network in updates {
                 self?.discovered = network.discovered
+                self?.discoveryProblem = network.discoveryProblem
             }
         }
         resolver.start()
@@ -250,10 +252,19 @@ struct HubSettingsSection: View {
     private var discoveredHubs: some View {
         let hubs = model.discovered
         let chosen: String = model.preferredHubID
+        let problem: String? = model.discoveryProblem
+        // A lone hub is offered plainly, but still needs the person's click.
+        let useLabel: String = hubs.count == 1 ? "Use this hub" : "Use"
         if hubs.isEmpty {
-            Text("No hub found on this network yet.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let problem {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text("No hub found on this network yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Hubs on this network")
@@ -270,10 +281,17 @@ struct HubSettingsSection: View {
                                 .foregroundStyle(.green)
                             Button("Clear") { model.clearChoice() }
                         } else {
-                            Button("Use") { model.choose(hub) }
+                            Button(useLabel) { model.choose(hub) }
                         }
                     }
                     .font(.caption)
+                }
+                if chosen.isEmpty {
+                    // A hub on the network is never connected to until chosen:
+                    // the token would go to it in clear text.
+                    Text("A hub found here is not used until you choose it.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

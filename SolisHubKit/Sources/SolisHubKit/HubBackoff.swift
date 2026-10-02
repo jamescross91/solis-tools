@@ -1,7 +1,7 @@
 import Foundation
 
 /// Reconnect delays: one second doubling to thirty, with up to a quarter
-/// extra so a hub that restarts does not see every client return in step.
+/// taken off so a hub that restarts does not see every client return in step.
 /// The jitter source is passed in so the schedule is testable.
 public struct HubBackoff: Sendable, Equatable {
     public var initial: TimeInterval
@@ -18,8 +18,12 @@ public struct HubBackoff: Sendable, Equatable {
     public func delay(attempt: Int, jitter: Double) -> TimeInterval {
         // Clamped so a long outage cannot overflow the exponent.
         let exponent = Double(min(max(attempt, 0), 16))
-        let base = min(maximum, initial * pow(2, exponent))
+        let upper = min(maximum, initial * pow(2, exponent))
+        // Jitter goes down from the ceiling rather than up past it: added on
+        // top, it would be clamped away at the cap and every client would
+        // retry at exactly thirty seconds.
+        let lower = max(initial, upper * (1 - jitterFraction))
         let spread = min(max(jitter, 0), 1)
-        return min(maximum, base * (1 + jitterFraction * spread))
+        return upper - (upper - min(lower, upper)) * spread
     }
 }

@@ -26,14 +26,25 @@ public protocol HubHTTPTransport: Sendable {
     func fetch(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
-public struct URLSessionHTTPTransport: HubHTTPTransport {
+/// A class rather than a struct so the session it owns can be invalidated
+/// when the last reference goes; each history client builds one.
+public final class URLSessionHTTPTransport: HubHTTPTransport {
     private let session: URLSession
 
     public init() {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        session = URLSession(configuration: configuration)
+        // Each request carries its own deadline; this is only a backstop.
+        configuration.timeoutIntervalForRequest = 60
+        session = URLSession(
+            configuration: configuration, delegate: RefuseRedirectsDelegate(), delegateQueue: nil
+        )
+    }
+
+    deinit {
+        // The session retains its delegate until it is invalidated.
+        session.finishTasksAndInvalidate()
     }
 
     public func fetch(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -59,7 +70,7 @@ struct HubRESTCore: Sendable {
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        for (name, value) in auth.headers() {
+        for (name, value) in auth.headers(for: endpoint.kind) {
             request.setValue(value, forHTTPHeaderField: name)
         }
         let (data, response) = try await transport.fetch(request)

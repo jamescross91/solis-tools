@@ -94,6 +94,20 @@ final class HubHistoryClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "CF-Access-Client-Secret"), "secret")
     }
 
+    /// The LAN path does not pass through Cloudflare, so its plain-http
+    /// requests carry the bearer token and nothing else.
+    func testLanRequestsCarryNoCloudflareHeaders() async throws {
+        let lan = HubEndpoint(kind: .lan, baseURL: URL(string: "http://10.0.0.5:8765")!)
+        let transport = RecordingHTTPTransport(body: "[]")
+        let client = HubHistoryClient(endpoint: lan, auth: auth, transport: transport)
+        _ = try await client.samples(since: nil, resolution: .native)
+
+        let request = try XCTUnwrap(transport.recorded.first)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+        XCTAssertNil(request.value(forHTTPHeaderField: "CF-Access-Client-Id"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "CF-Access-Client-Secret"))
+    }
+
     func testControlMinutesDecodeEveryColumn() async throws {
         let body = """
             [{"minute": 1790000040, "voltage_min": 214.0, "voltage_max": 216.0, "voltage_sum": 3000.0,
