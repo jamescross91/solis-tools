@@ -278,12 +278,11 @@ stop/start requests, drains pipes until exit and refuses replacement on timeout.
 ## Release boundary
 
 `scripts/release.py` prepares a reproducible source archive and formula in one
-release PR. The Release candidate workflow builds a universal macOS app and
-stores its source digest and binary checksum; preparation attaches that metadata
-to the same PR. Formula and metadata are excluded from the source archive to
-avoid checksum recursion. CI verifies candidate Homebrew installs before merge.
-Successful main CI triggers publication of the approved bytes, followed by
-public-URL Homebrew tests. Only publication has write permissions; there is no
+release PR. The formula is excluded from the source archive to avoid checksum
+recursion, and Homebrew compiles the menu-bar app from that archive, so there is
+no binary to build, attach or verify. CI verifies the candidate Homebrew install
+before merge when the version or formula changes. Successful main CI triggers
+publication of the source archive, followed by public-URL Homebrew tests. Only publication has write permissions; there is no
 bot commit to protected main. Draft creation uses GitHub's returned release
 object directly because its lookup endpoints are briefly eventually consistent.
 See [releasing.md](releasing.md).

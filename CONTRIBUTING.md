@@ -78,7 +78,6 @@ Releases are prepared by a maintainer following
 [docs/releasing.md](docs/releasing.md). `solis_poll.VERSION` is the only place a
 version is written; everything else is derived by `scripts/version.py` and
 checked in CI. A release uses one PR containing the feature (if applicable),
-version, changelog, formula and verified prebuilt-package metadata. Use
-`scripts/release.py prepare` and attach the candidate workflow's artifact to
-that same PR. Do not open follow-up version or formula PRs. Ordinary non-release
+version, changelog and formula. Use `scripts/release.py prepare X.Y.Z`; there
+is no second step. Do not open follow-up version or formula PRs. Ordinary non-release
 changes should not alter release versions or checksums.

@@ -18,36 +18,20 @@ class SolisTools < Formula
     sha256 "4c5f715128bfeba59f4c9fb3542b0c32a8afd4b90081111e39c12f7af0c89aae"
   end
 
-  # BEGIN PREBUILT MACOS
-  resource "solis-menubar" do
-    on_macos do
-      url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.0/solis-menubar-0.6.0-macos-universal.tar.gz"
-      sha256 "fb07d7c58e836b8fd9838116e4f63a1739a4e9ded86e00e082e55a5171f00997"
-    end
-  end
-  # END PREBUILT MACOS
-
   def install
-    prebuilt = resources.any? { |item| item.name == "solis-menubar" }
-    virtualenv_install_with_resources without: (prebuilt ? ["solis-menubar"] : nil)
+    virtualenv_install_with_resources
     return unless OS.mac?
 
     app = prefix/"SolisMenuBar.app"
-    if !build.head? && prebuilt
-      resource("solis-menubar").stage { prefix.install "SolisMenuBar.app" }
-      system "codesign", "--verify", "--strict", app
-    else
-      # HEAD and historical source-only releases remain developer builds.
-      system "swift", "build", "--disable-sandbox", "--configuration", "release",
-             "--package-path", "SolisMenuBar"
-      swift_bin = Utils.safe_popen_read(
-        "swift", "build", "--disable-sandbox", "--configuration", "release",
-        "--package-path", "SolisMenuBar", "--show-bin-path"
-      ).strip
-      (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
-      (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
-      system "codesign", "--force", "--sign", "-", app
-    end
+    system "swift", "build", "--disable-sandbox", "--configuration", "release",
+           "--package-path", "SolisMenuBar"
+    swift_bin = Utils.safe_popen_read(
+      "swift", "build", "--disable-sandbox", "--configuration", "release",
+      "--package-path", "SolisMenuBar", "--show-bin-path"
+    ).strip
+    (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
+    (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
+    system "codesign", "--force", "--sign", "-", app
     (bin/"solis-menubar").write <<~SH
       #!/bin/bash
       if [[ "$1" == "--version" ]]; then
