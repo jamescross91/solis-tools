@@ -20,9 +20,7 @@ final class RecordingHTTPTransport: HubHTTPTransport, @unchecked Sendable {
     }
 
     func fetch(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        lock.lock()
-        requests.append(request)
-        lock.unlock()
+        lock.withLock { requests.append(request) }
         let response = HTTPURLResponse(
             url: request.url ?? URL(fileURLWithPath: "/"), statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: nil

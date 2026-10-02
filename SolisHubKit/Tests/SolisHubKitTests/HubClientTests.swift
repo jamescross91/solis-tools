@@ -35,9 +35,7 @@ final class FakeSocket: HubSocket, @unchecked Sendable {
     }
 
     func send(_ text: String) async throws {
-        lock.lock()
-        sentFrames.append(text)
-        lock.unlock()
+        lock.withLock { sentFrames.append(text) }
     }
 
     func receive() async throws -> String {
@@ -91,12 +89,11 @@ final class ScriptedTransport: HubTransport, @unchecked Sendable {
     }
 
     func open(_ endpoint: HubEndpoint, headers: [String: String]) async throws -> any HubSocket {
-        let step: Step
-        lock.lock()
-        opened.append(endpoint)
-        openedHeaders.append(headers)
-        step = steps.isEmpty ? .fail(.connectionFailed("script exhausted")) : steps.removeFirst()
-        lock.unlock()
+        let step: Step = lock.withLock {
+            opened.append(endpoint)
+            openedHeaders.append(headers)
+            return steps.isEmpty ? .fail(.connectionFailed("script exhausted")) : steps.removeFirst()
+        }
         switch step {
         case let .fail(error): throw error
         case let .socket(socket): return socket
@@ -122,10 +119,10 @@ final class SleepRecorder: @unchecked Sendable {
     }
 
     func record(_ delay: TimeInterval) async throws {
-        lock.lock()
-        delays.append(delay)
-        let count = delays.count
-        lock.unlock()
+        let count: Int = lock.withLock {
+            delays.append(delay)
+            return delays.count
+        }
         if count == target {
             reached.fulfill()
         }
