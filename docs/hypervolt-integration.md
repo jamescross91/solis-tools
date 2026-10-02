@@ -97,24 +97,34 @@ API being up.
 
 ## Priority arbitration
 
-Import regulation already knows how to reduce or restore a single lever: the
-Solis import limit. Adding a second, independent lever (car current) needs a
-policy for which one moves first. That policy is `--ev-priority`, one of:
+The Solis import register (43488) caps the whole site's grid import, the car
+included: the inverter charges the battery with whatever the house and the car
+leave under it. Grid import tracks that ceiling while the car charges on top,
+which is how it was confirmed on a live installation. So the ceiling is the
+combined allowance and the only lever that changes total site demand. The
+car's current decides how that allowance is shared.
+
+The controller's change to the ceiling is therefore always applied in full.
+`--ev-priority` only decides whether the car's share moves with it, one of:
 
 | Priority | Behaviour |
 | --- | --- |
-| `battery` (default) | The car is the flexible resource. It absorbs cuts first and is restored first; the battery only moves once the car is already at its floor or ceiling. |
-| `ev` | The battery is the flexible resource, symmetrically. |
-| `balanced` | The change is split 50/50, with any amount one side cannot absorb spilling over to the other. |
+| `battery` (default) | The car is the flexible share. A cut lowers the ceiling and the car's current together, so the battery keeps charging at the same rate; a restore raises both. |
+| `ev` | The battery is the flexible share. A cut lowers the ceiling and the inverter throttles the battery; the car is only cut once the battery's measured charging power is used up. |
+| `balanced` | The change to the car's share is half of the ceiling change, with any amount one side cannot absorb spilling over to the other. |
 
-This is implemented as `voltage_control.allocate_import_step`, a pure
-function taking the wattage change the existing controller already decided
-on (`delta_w`, positive for a reduction, negative for a restore) plus each
-side's current value and its min/max bounds, and returning
-`(new_battery_w, new_ev_w)`. It is deliberately symmetric — the same
-function handles both cuts and restores for both priorities — because a
-scheme that cuts the EV first but restores the battery first would leave the
-car starved of current it should have gotten back.
+An earlier version treated the ceiling as a battery-only limit next to the car.
+Cutting the car then left the ceiling alone, the battery took the freed import
+back, and neither demand nor voltage moved. Each reduction cut the car again
+until it sat at its minimum under an unused ceiling.
+
+`voltage_control.allocate_import_step` is the pure function that splits a
+ceiling change (`delta_w`, negative to cut, positive to restore) between the
+battery's share, its measured charging power, and the car's, within each
+side's bounds. It is symmetric: one function handles cuts and restores for
+every priority, because a scheme that cuts the EV first but restores the
+battery first would leave the car starved of current it should have gotten
+back.
 
 Priority only settles a contest between two loads charging from the grid.
 While the battery is idle or discharging there is nothing to protect, so:
@@ -139,9 +149,10 @@ grid charging, telemetry is fresh, the previous change has settled and the
 filtered voltage is clear of the import target, and logs each step.
 
 `VoltageControlRuntime._allocate_ev_priority` is the only place amps and
-watts meet: it reads the controller's decision in watts, calls
-`allocate_import_step`, converts the returned EV wattage back to milliamps
-using the live meter voltage, and commands that. The reallocation only runs
+watts meet: it reads the controller's decision in watts, takes the car's new
+share from `allocate_import_step`, converts it to milliamps using the live
+meter voltage, and commands that. The ceiling change in the decision is left
+as it was, so a failed Hypervolt command still lowers the ceiling. The reallocation only runs
 when the car is confirmed charging, `--hypervolt-enable` is set, and the
 controller's decision this cycle was an import mode reduction, restore or
 emergency action — a holding decision is left alone.
