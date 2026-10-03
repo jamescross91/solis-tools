@@ -81,7 +81,7 @@ def archive(root: Path, release_version: str, ref: str | None = None) -> bytes:
             for name, (data, mode, link) in sorted(entries.items()):
                 # A formula containing this archive's checksum cannot be in the
                 # archive. All other tracked sources, tests and docs are retained.
-                if name.startswith("Formula/") or name == ".release-assets.json":
+                if name.startswith("Formula/"):
                     continue
                 member = tarfile.TarInfo(f"solis-tools-{release_version}/{name}")
                 member.mode = 0o755 if mode & 0o111 else 0o644
@@ -129,74 +129,7 @@ def check(root: Path, ref: str = "HEAD") -> tuple[Path, str]:
     changelog = git(root, "show", f"{ref}:CHANGELOG.md").decode()
     if f"\n## {version(root, ref)}\n" not in changelog:
         raise ValueError("release changelog section is missing")
-    metadata = json.loads(git(root, "show", f"{ref}:.release-assets.json"))
-    validate_binary(metadata, version(root, ref), checksum)
-    if binary_formula(formula, metadata) != formula:
-        raise ValueError("prebuilt macOS resource differs from release metadata")
     return path, checksum
-
-
-def validate_binary(metadata: dict, release_version: str, checksum: str) -> None:
-    if metadata.get("source_sha256") != checksum or metadata.get("version") != release_version:
-        raise ValueError("prebuilt app does not match these sources; rebuild the candidate")
-    if metadata.get("name") != f"solis-menubar-{release_version}-macos-universal.tar.gz":
-        raise ValueError("invalid prebuilt archive name")
-    if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("sha256", "")):
-        raise ValueError("invalid prebuilt checksum")
-
-
-def binary_formula(formula: str, metadata: dict) -> str:
-    block = (
-        "  # BEGIN PREBUILT MACOS\n"
-        '  resource "solis-menubar" do\n'
-        "    on_macos do\n"
-        f'      url "https://github.com/{REPOSITORY}/releases/download/v{metadata["version"]}/{metadata["name"]}"\n'
-        f'      sha256 "{metadata["sha256"]}"\n'
-        "    end\n"
-        "  end\n"
-        "  # END PREBUILT MACOS"
-    )
-    formula = source_only_formula(formula)
-    # Resource-scoped platform blocks leave no empty resource on Linux and
-    # follow Homebrew's required nesting for one-resource platform conditions.
-    return formula.replace("  def install\n", block + "\n\n  def install\n", 1)
-
-
-def source_only_formula(formula: str) -> str:
-    pattern = r"  # BEGIN PREBUILT MACOS.*?  # END PREBUILT MACOS"
-    return re.sub(pattern + r"\n\n?", "", formula, flags=re.DOTALL)
-
-
-def download_binary(
-    root: Path, run_id: str, checksum: str, release_version: str
-) -> tuple[Path, dict]:
-    if not run_id.isdigit():
-        raise ValueError("binary run must be numeric")
-    run = json.loads(gh("api", f"repos/{REPOSITORY}/actions/runs/{run_id}"))
-    if run["conclusion"] != "success" or run["path"] != ".github/workflows/release-candidate.yml":
-        raise ValueError("binary run must be a successful Release candidate workflow")
-    with tempfile.TemporaryDirectory() as directory:
-        gh(
-            "run",
-            "download",
-            run_id,
-            "--repo",
-            REPOSITORY,
-            "--name",
-            "macos-release-candidate",
-            "--dir",
-            directory,
-        )
-        metadata = json.loads((Path(directory) / "metadata.json").read_text())
-        validate_binary(metadata, release_version, checksum)
-        data = (Path(directory) / metadata["name"]).read_bytes()
-        if hashlib.sha256(data).hexdigest() != metadata["sha256"]:
-            raise ValueError("prebuilt checksum mismatch")
-    metadata["run_id"] = run_id
-    target = root / "build/release" / metadata["name"]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-    return target, metadata
 
 
 def gh(*args: str) -> str:
@@ -204,9 +137,9 @@ def gh(*args: str) -> str:
 
 
 def synchronise_version(root: Path, requested: str) -> None:
-    # Attaching a candidate repeats preparation at the same version. The
-    # version helper deliberately rejects --set in that case, but --write
-    # still repairs derived copies without incrementing the bundle build.
+    # Repeating preparation at the same version is allowed: the version helper
+    # rejects --set then, but --write repairs derived copies without
+    # incrementing the bundle build.
     arguments = ["--write"] if version(root) == requested else ["--set", requested]
     subprocess.run([sys.executable, str(root / "scripts/version.py"), *arguments], check=True)
 
@@ -265,12 +198,6 @@ def publish(root: Path, ref: str) -> None:
     )
     path, checksum = check(root, commit)
     release_version = version(root, commit)
-    metadata = json.loads(git(root, "show", f"{commit}:.release-assets.json"))
-    binary_path, downloaded_metadata = download_binary(
-        root, metadata["run_id"], checksum, release_version
-    )
-    if downloaded_metadata != metadata:
-        raise ValueError("binary provenance differs from approved metadata")
     tag = f"v{release_version}"
     endpoint = f"repos/{REPOSITORY}"
     existing_tag = api_optional(f"{endpoint}/git/ref/tags/{tag}")
@@ -281,7 +208,7 @@ def publish(root: Path, ref: str) -> None:
     release = release_for_tag(endpoint, tag)
     if release is None:
         release = create_draft_release(endpoint, tag, release_version, checksum)
-    for asset_path, expected in ((path, checksum), (binary_path, metadata["sha256"])):
+    for asset_path, expected in ((path, checksum),):
         asset = next((item for item in release["assets"] if item["name"] == asset_path.name), None)
         if asset is None:
             if not release["draft"]:
@@ -328,7 +255,6 @@ def main() -> None:
         "command", choices=["prepare", "check", "build", "candidate", "publish", "changed"]
     )
     parser.add_argument("value", nargs="?")
-    parser.add_argument("--binary-run", help="successful Release candidate run ID")
     args = parser.parse_args()
     if args.command == "prepare":
         if args.value is None or not re.fullmatch(r"\d+\.\d+\.\d+", args.value):
@@ -338,15 +264,7 @@ def main() -> None:
             raise ValueError("add the release changelog section before preparation")
         path, checksum = build(ROOT)
         formula = ROOT / "Formula/solis-tools.rb"
-        formula.write_text(
-            update_formula(source_only_formula(formula.read_text()), url(args.value), checksum)
-        )
-        if args.binary_run:
-            _, metadata = download_binary(ROOT, args.binary_run, checksum, args.value)
-            (ROOT / ".release-assets.json").write_text(json.dumps(metadata, indent=2) + "\n")
-            formula.write_text(binary_formula(formula.read_text(), metadata))
-        else:
-            (ROOT / ".release-assets.json").unlink(missing_ok=True)
+        formula.write_text(update_formula(formula.read_text(), url(args.value), checksum))
         print(
             f"Prepared {path}: {checksum}; commit all version, changelog and formula changes together"
         )
@@ -368,25 +286,7 @@ def main() -> None:
         path, checksum = build(ROOT, args.value or "HEAD")
         if args.command == "candidate":
             formula = ROOT / "Formula/solis-tools.rb"
-            text = update_formula(formula.read_text(), path.as_uri(), checksum)
-            metadata_path = ROOT / ".release-assets.json"
-            candidate_metadata = (
-                json.loads(metadata_path.read_text()) if metadata_path.exists() else None
-            )
-            if candidate_metadata and candidate_metadata.get("source_sha256") == checksum:
-                metadata = candidate_metadata
-                binary_path, downloaded = download_binary(
-                    ROOT, metadata["run_id"], checksum, version(ROOT)
-                )
-                if downloaded != metadata:
-                    raise ValueError("candidate binary differs from approved metadata")
-                text = binary_formula(text, metadata).replace(
-                    f"https://github.com/{REPOSITORY}/releases/download/v{metadata['version']}/{metadata['name']}",
-                    binary_path.as_uri(),
-                )
-            else:
-                text = source_only_formula(text)
-            formula.write_text(text)
+            formula.write_text(update_formula(formula.read_text(), path.as_uri(), checksum))
         print(path)
 
 

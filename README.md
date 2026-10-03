@@ -103,11 +103,8 @@ connection changes, alarms, emergencies and control activity appear
 immediately. Opening the dashboard publishes the latest sample and resumes its
 full live refresh.
 
-Releases prepared with the prebuilt-package workflow install a checksum-verified
-universal macOS app archive (Apple Silicon and Intel), without compiling Swift
-on your Mac. Python and PyModbus are still installed separately by Homebrew.
-Historical source-only releases, including 0.5.0, and `--HEAD` still build the
-app locally. Linux installations install the terminal monitor only. The app is
+Homebrew compiles the app on your Mac, so it needs Xcode or the Command Line
+Tools. Linux installations install the terminal monitor only. The app is
 ad-hoc signed, not Apple-notarised.
 
 Homebrew installs Python and PyModbus in an isolated environment. Upgrade or remove it with:

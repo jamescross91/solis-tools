@@ -124,7 +124,7 @@ does, over widening the header.
 **The version lives in one place.** `solis_poll.VERSION`. Everything else is
 derived — `scripts/version.py --set X.Y.Z` bumps them, `--check` gates it in CI.
 Never hand-edit a version anywhere else. Releases use one PR: feature, version,
-changelog, formula and prebuilt metadata. `scripts/release.py prepare` computes
+changelog and formula. `scripts/release.py prepare` computes
 the checksums; follow `docs/releasing.md`. Do not create a separate formula PR.
 
 **The Python/Swift boundary is a versioned contract.** `stream_payload` emits

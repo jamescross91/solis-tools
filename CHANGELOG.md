@@ -3,6 +3,14 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Homebrew builds the macOS menu-bar app from source again instead of
+  downloading a prebuilt universal binary, which removes the two-push release
+  flow. The formula needs Xcode or the Command Line Tools on macOS.
+
 ## 0.6.1
 
 This release adds the optional Hypervolt EV charger and Intelligent Octopus
