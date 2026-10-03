@@ -176,7 +176,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9
+        uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478
       - name: Register repository as a tap
         # Homebrew 6 verifies third-party tap contents while registering a tap.
         # Allow that one bootstrap operation, then trust only this formula before
@@ -214,7 +214,7 @@ jobs:
         with:
           python-version: '3.14'
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9
+        uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478
       - name: Register repository as a tap
         env:
           GH_TOKEN: ${{ github.token }}
