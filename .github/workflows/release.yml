@@ -79,7 +79,7 @@ jobs:
         with:
           ref: ${{ needs.publish.outputs.commit }}
           persist-credentials: false
-      - uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9
+      - uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478
       - name: Register release formula
         run: |
           HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew tap jamescross91/solis-tools "$GITHUB_WORKSPACE"
