@@ -403,6 +403,7 @@ final class MonitorStore: ObservableObject {
                 "--voltage-deadband", String(configuration.voltageDeadband),
                 "--maximum-import-kw", String(configuration.maximumImportKw),
                 "--import-headroom-kw", String(configuration.importHeadroomKw),
+                "--export-headroom-kw", String(configuration.exportHeadroomKw),
                 "--maximum-export-kw", String(configuration.maximumExportKw),
                 "--site-export-permission-kw", String(configuration.siteExportPermissionKw),
                 "--increase-step-w", String(configuration.increaseStepW),

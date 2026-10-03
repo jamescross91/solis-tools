@@ -472,6 +472,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.minimumVoltage, 215)
         XCTAssertEqual(configuration.maximumVoltage, 258)
         XCTAssertEqual(configuration.importHeadroomKw, 2)
+        XCTAssertEqual(configuration.exportHeadroomKw, 1)
         XCTAssertEqual(configuration.minimumWriteInterval, 5)
         XCTAssertFalse(configuration.hypervoltEnabled)
         XCTAssertEqual(configuration.evPriority, "battery")
@@ -492,6 +493,7 @@ final class StoredConfigurationTests: XCTestCase {
                     "inverterMaxKw": 0.0,
                     "gridMaxKw": -5.0,
                     "importHeadroomKw": -1.0,
+                    "exportHeadroomKw": -2.0,
                     "pvEnabled": true,
                 ])
             )
@@ -504,6 +506,7 @@ final class StoredConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.inverterMaxKw, 0.1)
         XCTAssertEqual(configuration.gridMaxKw, 0.1)
         XCTAssertEqual(configuration.importHeadroomKw, 0)
+        XCTAssertEqual(configuration.exportHeadroomKw, 0)
         XCTAssertTrue(configuration.pvEnabled)
     }
 }
