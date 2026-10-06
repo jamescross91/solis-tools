@@ -2770,7 +2770,21 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="maximum unused import allowance above measured grid demand (default: 2)",
     )
-    parser.add_argument("--maximum-export-kw", type=float, default=10.0)
+    parser.add_argument(
+        "--maximum-export-kw",
+        type=float,
+        default=10.0,
+        help="the inverter's rated export power: the most the export limit is ever raised to",
+    )
+    parser.add_argument(
+        "--export-headroom-kw",
+        type=float,
+        default=1.0,
+        help=(
+            "most the export limit is held above what is actually being exported, so a "
+            "sudden drop in house load cannot jump export past it (default: 1)"
+        ),
+    )
     parser.add_argument("--site-export-permission-kw", type=float, default=10.0)
     parser.add_argument("--increase-step-w", type=int, default=200)
     parser.add_argument("--reduction-step-w", type=int, default=500)
@@ -2962,6 +2976,7 @@ def dynamic_configuration(
         maximum_import_w=round(args.maximum_import_kw * 1_000),
         import_headroom_w=round(args.import_headroom_kw * 1_000),
         maximum_export_w=round(args.maximum_export_kw * 1_000),
+        export_headroom_w=round(args.export_headroom_kw * 1_000),
         site_export_permission_w=round(args.site_export_permission_kw * 1_000),
         increase_step_w=args.increase_step_w,
         reduction_step_w=args.reduction_step_w,

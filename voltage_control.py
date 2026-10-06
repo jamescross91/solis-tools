@@ -66,6 +66,11 @@ class DynamicVoltageConfiguration:
     deadband_v: float = 0.75
     maximum_import_w: int = 14_000
     maximum_export_w: int = 10_000
+    # Export is only ever allowed this far above what is actually being
+    # exported, so a sudden drop in house load can lift export by at most this
+    # much before the limit binds, instead of jumping to a limit the house had
+    # been hiding.
+    export_headroom_w: int = 1_000
     site_export_permission_w: int = 10_000
     minimum_import_w: int = 1_000
     import_headroom_w: int = 2_000
@@ -141,6 +146,7 @@ class DynamicVoltageConfiguration:
         powers = (
             self.maximum_import_w,
             self.maximum_export_w,
+            self.export_headroom_w,
             self.site_export_permission_w,
             self.minimum_import_w,
             self.import_headroom_w,
@@ -462,6 +468,11 @@ class DynamicVoltageController:
 
     import_ceiling_hysteresis_w = 500
     import_demand_reduction_delay_s = 30.0
+    export_ceiling_hysteresis_w = 500
+    export_demand_reduction_delay_s = 30.0
+    # How long export stays under control after a voltage-driven cut with
+    # nothing exporting, before the captured baseline may be restored.
+    export_cut_hold_s = 600.0
 
     def __init__(self, configuration: DynamicVoltageConfiguration):
         configuration.validate()
@@ -491,6 +502,9 @@ class DynamicVoltageController:
         self.import_manual_bias_w = 0
         self.import_lower_ceiling_candidate_w: int | None = None
         self.import_lower_ceiling_since: float | None = None
+        self.export_cut_at: float | None = None
+        self.export_ceiling_ready = False
+        self.export_lower_since: float | None = None
         # The band the last evaluated sample was held to, for the stream.
         self.voltage_bounds_v = (configuration.minimum_voltage_v, configuration.maximum_voltage_v)
 
@@ -501,6 +515,11 @@ class DynamicVoltageController:
         self.import_manual_bias_w = 0
         self.import_lower_ceiling_candidate_w = None
         self.import_lower_ceiling_since = None
+
+    def _reset_export_tracking(self) -> None:
+        self.export_cut_at = None
+        self.export_ceiling_ready = False
+        self.export_lower_since = None
 
     def ev_limits_apply(self, sample: GridTelemetrySample) -> bool:
         """Whether the charger's tighter band governs this sample: the car is
@@ -657,11 +676,14 @@ class DynamicVoltageController:
         configuration = self.configuration
         if not configuration.enabled:
             return self.decision
-        if export_baseline_w is None:
+        if export_baseline_w is None or self.export_cut_at is None:
             self.detector.export_curtailed = False
         else:
             release_w = min(export_baseline_w, configuration.effective_maximum_export_w)
-            self.detector.export_curtailed = current_export_w < release_w
+            self.detector.export_curtailed = (
+                current_export_w < release_w
+                and sample.monotonic_s - self.export_cut_at < self.export_cut_hold_s
+            )
         if sample.age_s > configuration.stale_age_s:
             return self.communication_unavailable()
 
@@ -704,6 +726,8 @@ class DynamicVoltageController:
             candidate = self.detector.candidate
             if candidate != "import":
                 self._reset_import_demand_tracking()
+            if candidate != "export":
+                self._reset_export_tracking()
             state = (
                 VoltageControlState.GRID_CHARGING
                 if candidate == "import"
@@ -737,6 +761,7 @@ class DynamicVoltageController:
             return self.decision
 
         if mode == "import":
+            self._reset_export_tracking()
             decision = self._evaluate_import(sample, filtered, current_import_w)
         else:
             self._reset_import_demand_tracking()
@@ -876,8 +901,15 @@ class DynamicVoltageController:
         c = self.configuration
         _, maximum_voltage_v = self._voltage_bounds(sample)
         export_target_v = maximum_voltage_v - c.safety_margin_v
+        # What is really being exported, not what the limit would allow. The
+        # house absorbs part of the generation, so the limit is routinely far
+        # above the export and cutting it by a step then changes nothing.
+        measured_export_w = max(0, round(sample.grid_kw * 1_000))
+        ceiling_w = min(c.effective_maximum_export_w, measured_export_w + c.export_headroom_w)
         if sample.raw_voltage_v >= maximum_voltage_v:
-            desired = max(0, current_w - c.emergency_reduction_w)
+            self.export_cut_at = sample.monotonic_s
+            self.export_lower_since = None
+            desired = max(0, min(current_w, measured_export_w) - c.emergency_reduction_w)
             return ControlDecision(
                 VoltageControlState.EMERGENCY_HIGH_VOLTAGE,
                 ControlAction.EMERGENCY,
@@ -894,10 +926,37 @@ class DynamicVoltageController:
                 if sample.raw_voltage_v >= maximum_voltage_v - c.deadband_v
                 else c.reduction_step_w
             )
-            desired = max(0, current_w - reduction)
+            self.export_cut_at = sample.monotonic_s
+            self.export_lower_since = None
+            desired = max(0, min(current_w, ceiling_w) - reduction)
             return self._normal_decision(
                 "export", desired, sample, filtered, ControlAction.REDUCING
             )
+        # An allowance well above what is being exported is a jump waiting for
+        # the house load to drop: bring it down to the real export plus the
+        # headroom. The first evaluation after activation does it at once; later
+        # falls must persist, so passing house load does not make the limit
+        # chase every dip.
+        excess_w = current_w - ceiling_w
+        if excess_w > 0:
+            if not self.export_ceiling_ready:
+                self.export_ceiling_ready = True
+                self.export_lower_since = None
+                return self._trim_export(ceiling_w, sample, filtered)
+            if excess_w >= self.export_ceiling_hysteresis_w:
+                if self.export_lower_since is None:
+                    self.export_lower_since = sample.monotonic_s
+                elif (
+                    sample.monotonic_s - self.export_lower_since
+                    >= self.export_demand_reduction_delay_s
+                ):
+                    self.export_lower_since = None
+                    return self._trim_export(ceiling_w, sample, filtered)
+            else:
+                self.export_lower_since = None
+        else:
+            self.export_ceiling_ready = True
+            self.export_lower_since = None
         if filtered < export_target_v - c.deadband_v:
             if sample.age_s > c.fresh_age_s:
                 return self._hold(
@@ -915,6 +974,17 @@ class DynamicVoltageController:
                     filtered,
                     "waiting for the previous change to settle",
                 )
+            if excess_w > 0:
+                # Raising a limit the export is not touching changes nothing
+                # now and only widens the jump a load drop would cause.
+                return self._hold(
+                    "export",
+                    current_w,
+                    sample,
+                    filtered,
+                    f"export limit is not binding ({measured_export_w / 1_000:.1f} kW "
+                    "exported); not raising it",
+                )
             headroom = (export_target_v - c.deadband_v) - filtered
             desired = min(
                 c.effective_maximum_export_w,
@@ -929,6 +999,21 @@ class DynamicVoltageController:
             )
         return self._hold(
             "export", current_w, sample, filtered, "voltage is inside the export deadband"
+        )
+
+    def _trim_export(
+        self, ceiling_w: int, sample: GridTelemetrySample, filtered: float
+    ) -> ControlDecision:
+        c = self.configuration
+        return ControlDecision(
+            VoltageControlState.EXPORT_REGULATING,
+            ControlAction.REDUCING,
+            "export",
+            ceiling_w,
+            sample.raw_voltage_v,
+            filtered,
+            f"trimming unused export allowance to {c.export_headroom_w / 1_000:g} kW "
+            "above measured export",
         )
 
     @staticmethod

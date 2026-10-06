@@ -27,6 +27,7 @@ struct DashboardView: View {
     @AppStorage("voltageDeadband") private var voltageDeadband = 0.75
     @AppStorage("maximumImportKw") private var maximumImportKw = 14.0
     @AppStorage("importHeadroomKw") private var importHeadroomKw = 2.0
+    @AppStorage("exportHeadroomKw") private var exportHeadroomKw = 1.0
     @AppStorage("maximumExportKw") private var maximumExportKw = 10.0
     @AppStorage("siteExportPermissionKw") private var siteExportPermissionKw = 10.0
     @AppStorage("increaseStepW") private var increaseStepW = 200
@@ -559,7 +560,8 @@ struct DashboardView: View {
                 numericSetting("Maximum voltage", value: $maximumVoltage, unit: "V")
                 numericSetting("Maximum import", value: $maximumImportKw, unit: "kW")
                 numericSetting("Import demand headroom", value: $importHeadroomKw, unit: "kW")
-                numericSetting("Maximum export", value: $maximumExportKw, unit: "kW")
+                numericSetting("Maximum export (inverter rating)", value: $maximumExportKw, unit: "kW")
+                numericSetting("Export headroom above real export", value: $exportHeadroomKw, unit: "kW")
                 numericSetting("Site export permission", value: $siteExportPermissionKw, unit: "kW")
             }
             .disabled(!dynamicVoltageEnabled)

@@ -245,6 +245,24 @@ the ceiling falls, preventing brief load dips from causing a large trim followed
 by a slow climb. Voltage-triggered safety reductions remain immediate. The
 estimate resets after the import condition ends.
 
+Export regulation does not assume the export limit is what is being exported.
+The house absorbs part of the generation, so a limit of 8 kW may sit over only
+3 kW of real export; when the house load then drops, export jumps to the limit,
+the voltage follows it up, and the inverter can trip. The export limit is
+therefore held at most `--export-headroom-kw` (default 1 kW) above the measured
+export, capped at `--maximum-export-kw`, which is the inverter's rated output.
+A limit well above real export is brought down at once when export regulation
+starts and, later, only after the excess has lasted 30 seconds, so passing load
+does not make it chase every dip. A limit the export is not touching is never
+raised, however much voltage room there is. Reductions and emergencies are cut
+from what is actually exported, so an emergency takes export down immediately
+instead of stepping an unused limit down first. After a voltage-driven cut the
+limit stays under control for up to 10 minutes even with nothing exporting, so
+the captured baseline is not written straight back while the cause persists.
+Raise the headroom to give export more room to recover after a load drop, at
+the cost of a larger possible jump; export below the 0.5 kW activation
+threshold is not regulated.
+
 The controller checks the active typed limit for changes made in the Solis app.
 A manual import or export adjustment is adopted as both the current value and
 the new restoration baseline, with a fresh settle period; optimisation then
@@ -301,7 +319,8 @@ changed by capturing its baseline.
 | `--voltage-deadband` | 0.75 V | Holding band around working targets |
 | `--maximum-import-kw` | 14 kW | Normal import ceiling |
 | `--import-headroom-kw` | 2 kW | Unused import allowance above estimated external demand; rises promptly and sustained falls reduce the session ceiling |
-| `--maximum-export-kw` | 10 kW | Requested dynamic export ceiling |
+| `--maximum-export-kw` | 10 kW | The inverter's rated export power: the most the export limit is ever raised to |
+| `--export-headroom-kw` | 1 kW | Most the export limit is held above real export, limiting the jump when house load drops |
 | `--site-export-permission-kw` | 10 kW | Site permission; effective export ceiling is the lower of this and the dynamic ceiling |
 | `--increase-step-w` / `--reduction-step-w` | 200 / 500 W | Normal adjustment steps |
 | `--near-limit-reduction-w` / `--emergency-reduction-w` | 1,000 / 2,000 W | Faster safety reductions |
