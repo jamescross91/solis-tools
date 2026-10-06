@@ -3,7 +3,17 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.6.2
+
+Export regulation now holds the export limit close to what is actually being
+exported, so a restart climbs back from a lower limit and recovers more slowly
+than before; raise `--export-headroom-kw` (or the menu-bar setting) to trade
+some of that margin back. Export control still needs the endpoint's installation
+validation and stays off until you enable it. Stop the running menu-bar app and
+poller before upgrading, and keep dynamic control off while testing an
+installation. Homebrew now builds the menu-bar app on your Mac, so Xcode or the
+Command Line Tools must be installed. The GitHub Actions used by CI and releases
+were also updated; this does not change the installed tools.
 
 ### Fixed
 

@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.1/solis-tools-0.6.1.tar.gz"
-  sha256 "619cd472eba93ec5100f17555db745dcfadbb72f58c8f2aeafbf886567786314"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.2/solis-tools-0.6.2.tar.gz"
+  sha256 "3b1481253cdba848e3dd7fdfd664d7ff80e215773df2ebd0bbd60f1eb07dc8e1"
   license "GPL-3.0-only"
 
   # `brew install --HEAD solis-tools` builds the current main branch, so a change
