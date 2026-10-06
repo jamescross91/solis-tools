@@ -334,9 +334,67 @@ class StreamContractTests(unittest.TestCase):
                 restored = inverter.bank[43074]
 
         self.assertTrue(samples[-1]["voltage_control"]["export_write_validated"])
-        self.assertIn((43074, 30), writes)
+        self.assertIn((43074, 20), writes)
         self.assertEqual(writes[-1], (43074, 50))
         self.assertEqual(restored, 50)
+
+    def test_an_export_limit_the_house_is_hiding_is_trimmed_to_real_export(self):
+        """An 8 kW limit with only 3 kW exported is a jump waiting for the
+        house load to drop; it is brought down to the export plus headroom."""
+        import tempfile
+
+        bank = hybrid_bank()
+        bank[33251] = 2450  # 245.0 V: plenty of voltage room
+        bank[33263] = 0
+        bank[33264] = 3_000  # exporting 3 kW
+        bank[43074] = 80  # 8 kW limit
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter:
+                validation = Path(directory) / "export-validation.json"
+                validation.write_text(
+                    json.dumps(
+                        {
+                            "device_identity": f"127.0.0.1:{inverter.port}/1",
+                            "validated_at": "2026-09-07T12:00:00+01:00",
+                            "baseline_raw": 80,
+                            "test_raw": 30,
+                            "restored_raw": 80,
+                            "observed_before_kw": 4.638,
+                            "observed_limited_kw": 2.938,
+                            "schema_version": 1,
+                            "register_address": 43074,
+                            "watts_per_raw_unit": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                samples = stream_samples(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--interval",
+                    "0.05",
+                    "--dynamic-voltage-control",
+                    "--dynamic-export-control",
+                    "--control-activation-delay",
+                    "0.1",
+                    "--export-headroom-kw",
+                    "1.5",
+                    "--export-control-validation",
+                    str(validation),
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                    wanted=6,
+                )
+                writes = list(inverter.writes)
+
+        self.assertEqual(writes[0], (43074, 45))  # 3 kW exported + 1.5 kW headroom
+        self.assertEqual(writes[-1], (43074, 80))  # shutdown restores the captured limit
+        # The configuration goes out with the first sample only.
+        self.assertEqual(samples[0]["voltage_control"]["configuration"]["export_headroom_w"], 1_500)
 
     def test_dynamic_export_fails_closed_without_validation(self):
         import tempfile
@@ -644,7 +702,9 @@ class OctopusChargeWindowTests(unittest.TestCase):
         self.assertEqual(schedule["charge_window_active"], True)
         self.assertEqual(schedule["active_window"]["kind"], "SMART")
         self.assertEqual(samples[0]["voltage_control"]["state"], "Emergency high voltage")
-        self.assertEqual(writes[0], (43074, 30))
+        # 4 kW is being exported, so the emergency cuts from that, not from the
+        # 5 kW limit.
+        self.assertEqual(writes[0], (43074, 20))
         # Shutdown restores the pre-session export limit.
         self.assertEqual(writes[-1], (43074, 50))
         self.assertTrue(

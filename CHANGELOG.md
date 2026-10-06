@@ -5,6 +5,23 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Stop the export limit running far above real export. The house absorbs part
+  of the generation, so the limit was raised whenever voltage had room even
+  though export never reached it; a sudden drop in house load then sent export
+  straight to that limit, over the voltage limit, and the inverter tripped. The
+  limit is now held at most `--export-headroom-kw` (default 1 kW, also a menu-bar
+  setting) above measured export and capped at `--maximum-export-kw`, the
+  inverter's rating. It is brought down at once when export regulation starts
+  and after 30 seconds of sustained excess thereafter, and is never raised while
+  the export is not pressing on it. Reductions and emergencies are now cut from
+  real export, so an emergency takes export down immediately instead of stepping
+  an unused limit down over several cycles, and after a voltage-driven cut the
+  limit stays under control for up to 10 minutes rather than snapping back to the
+  captured baseline. Export regulation remains blocked until the installation is
+  validated.
+
 ### Changed
 
 - Homebrew builds the macOS menu-bar app from source again instead of

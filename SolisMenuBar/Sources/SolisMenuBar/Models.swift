@@ -459,6 +459,7 @@ struct MonitorConfiguration: Equatable, Sendable {
     var voltageDeadband: Double
     var maximumImportKw: Double
     var importHeadroomKw: Double
+    var exportHeadroomKw: Double
     var maximumExportKw: Double
     var siteExportPermissionKw: Double
     var increaseStepW: Int
@@ -528,6 +529,9 @@ struct MonitorConfiguration: Equatable, Sendable {
             maximumImportKw: max(1, defaults.object(forKey: "maximumImportKw") as? Double ?? 14),
             importHeadroomKw: max(
                 0, defaults.object(forKey: "importHeadroomKw") as? Double ?? 2
+            ),
+            exportHeadroomKw: max(
+                0, defaults.object(forKey: "exportHeadroomKw") as? Double ?? 1
             ),
             maximumExportKw: max(0, defaults.object(forKey: "maximumExportKw") as? Double ?? 10),
             siteExportPermissionKw: max(0, defaults.object(forKey: "siteExportPermissionKw") as? Double ?? 10),
