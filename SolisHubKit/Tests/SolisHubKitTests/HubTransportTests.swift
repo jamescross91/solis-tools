@@ -10,6 +10,9 @@ private final class UpgradeServer: @unchecked Sendable {
     private let listener: Int32
 
     init() throws {
+        // The client closes mid-handshake on purpose, so a write can hit a
+        // closed socket; without this it kills the whole test process.
+        signal(SIGPIPE, SIG_IGN)
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
