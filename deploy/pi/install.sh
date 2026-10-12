@@ -2,10 +2,13 @@
 # Install or upgrade the Solis hub on a Raspberry Pi (Raspberry Pi OS Lite 64-bit,
 # Bookworm or later). Run from a checkout, as root:
 #
-#   sudo deploy/pi/install.sh [--python PATH] [--check-python]
+#   sudo deploy/pi/install.sh [--python PATH] [--check-python] [--no-remote]
 #
 # Safe to re-run: every step checks before it changes anything, so running it
 # again is how you upgrade. See docs/hub.md.
+#
+# Unless --no-remote is given, it finishes by publishing the hub with Tailscale
+# Funnel (remote-access.sh), so the apps reach it away from home.
 #
 # The hub needs Python 3.10 or newer (pymodbus 3.10 does not install on older
 # versions). The interpreter is chosen and checked first, before anything on the
@@ -20,6 +23,7 @@ here="$(cd "$here" && pwd)"
 MIN_PYTHON="3.10"
 requested_python="${SOLIS_PYTHON:-}"
 check_only=0
+remote=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --python)
@@ -31,10 +35,15 @@ while [[ $# -gt 0 ]]; do
       check_only=1
       shift
       ;;
+    --no-remote)
+      remote=0
+      shift
+      ;;
     -h | --help)
-      echo "usage: sudo $0 [--python PATH] [--check-python]"
+      echo "usage: sudo $0 [--python PATH] [--check-python] [--no-remote]"
       echo "  --python PATH    build the virtualenv with this Python (3.10 or newer)"
       echo "  --check-python   report which Python would be used and change nothing"
+      echo "  --no-remote      skip publishing the hub with Tailscale Funnel"
       exit 0
       ;;
     *)
@@ -195,4 +204,14 @@ if [[ $fresh_config -eq 1 ]]; then
 else
   systemctl restart solis-hub.service
   echo "solis-hub restarted. Check it with: systemctl status solis-hub"
+fi
+
+# Last, so a problem reaching Tailscale can never leave the hub half installed:
+# it already works on the LAN, and this step can simply be run again.
+if [[ $remote -eq 1 ]]; then
+  if ! SOLIS_JSON_PYTHON="$prefix/bin/python" "$here/remote-access.sh" "$listen_port"; then
+    echo
+    echo "Remote access is not set up; the hub works on this network as before."
+    echo "Run sudo $here/remote-access.sh to try again, or install with --no-remote to skip it."
+  fi
 fi
