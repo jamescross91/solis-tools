@@ -76,6 +76,9 @@ public final class URLSessionHubTransport: HubTransport {
 
 final class URLSessionHubSocket: HubSocket, @unchecked Sendable {
     private let task: URLSessionWebSocketTask
+    private let lock = NSLock()
+    private var isClosed = false
+    private var pending: [UUID: CheckedContinuation<String, Error>] = [:]
 
     init(task: URLSessionWebSocketTask) {
         self.task = task
@@ -86,27 +89,61 @@ final class URLSessionHubSocket: HubSocket, @unchecked Sendable {
     }
 
     func receive() async throws -> String {
-        do {
-            switch try await task.receive() {
-            case let .string(text):
-                return text
-            case let .data(data):
-                guard let text = String(data: data, encoding: .utf8) else {
-                    throw HubTransportError.unexpectedFrame
-                }
-                return text
-            @unknown default:
-                throw HubTransportError.unexpectedFrame
+        let id = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if isClosed {
+                lock.unlock()
+                continuation.resume(throwing: HubTransportError.connectionFailed("closed"))
+                return
             }
-        } catch let error as HubTransportError {
-            throw error
-        } catch {
-            throw describe(error)
+            pending[id] = continuation
+            lock.unlock()
+            task.receive { [self] result in
+                finish(id, result)
+            }
         }
     }
 
+    /// Whichever of the callback and `close()` gets here first resumes the
+    /// caller; the other finds the entry gone.
+    private func finish(_ id: UUID, _ result: Result<URLSessionWebSocketTask.Message, Error>) {
+        lock.lock()
+        let continuation = pending.removeValue(forKey: id)
+        lock.unlock()
+        guard let continuation else { return }
+        switch result {
+        case let .success(.string(text)):
+            continuation.resume(returning: text)
+        case let .success(.data(data)):
+            if let text = String(data: data, encoding: .utf8) {
+                continuation.resume(returning: text)
+            } else {
+                continuation.resume(throwing: HubTransportError.unexpectedFrame)
+            }
+        case .success:
+            continuation.resume(throwing: HubTransportError.unexpectedFrame)
+        case let .failure(error):
+            continuation.resume(throwing: describe(error))
+        }
+    }
+
+    /// Cancelling a task whose upgrade has not finished does not always make
+    /// its pending receive call back, and a receive that never returns wedges
+    /// the client for good: the address list changing mid-handshake, which
+    /// Bonjour resolving the chosen hub does on every launch, hung it with no
+    /// error and no retry. So the pending receives are failed here, not left to
+    /// URLSession.
     func close() {
+        lock.lock()
+        isClosed = true
+        let waiting = pending
+        pending.removeAll()
+        lock.unlock()
         task.cancel(with: .normalClosure, reason: nil)
+        for continuation in waiting.values {
+            continuation.resume(throwing: HubTransportError.connectionFailed("closed"))
+        }
     }
 
     /// URLSession reports a refused upgrade as a generic bad-response error;

@@ -3,6 +3,21 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.1
+
+Fixes the menu-bar app never connecting in Hub mode. Stop the running menu-bar
+app before upgrading; the hub and poller are unchanged, so nothing on the
+Raspberry Pi needs to be touched, and control keeps running there throughout.
+
+### Fixed
+
+- The hub client could hang with no error and no retry. Choosing a hub found by
+  Bonjour makes the address list change a few milliseconds into the first
+  connection attempt; the attempt was abandoned, and its pending read never
+  returned, so the app sat on "No hub address to try; the network may be
+  offline" and the hub saw one connection open and close. Closing a hub socket
+  now always fails anything waiting on it.
+
 ## 0.7.0
 
 Adds the optional `solis-hub` and a Hub connection mode for the menu-bar app; Direct mode is unchanged by default. After upgrading, macOS may ask once for local network access (Bonjour discovery). Stop the running menu-bar app and poller before upgrading, and keep dynamic control off while testing an installation. Only one controller should run: before enabling the hub on a Raspberry Pi, turn control off on the Mac (see `docs/hub.md`).
