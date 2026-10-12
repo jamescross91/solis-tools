@@ -230,9 +230,14 @@ port. Without it nothing changes.
 
 The hub uses the standard library only. Its WebSocket server is hand-rolled,
 like the client in `hypervolt_client.py`, so PyModbus stays the only runtime
-dependency. It never speaks Modbus and has no write path: the only thing it
-passes to the poller is the two attention strings. Wire format and versioning
-are in [hub-protocol.md](hub-protocol.md); operation in [hub.md](hub.md).
+dependency. It never speaks Modbus and the only thing it writes to the poller
+is the two attention strings. Clients can change the controller settings and
+sign in to Hypervolt and Octopus over its HTTP API; the hub saves settings to
+`control-settings.json` in its state directory, checks them with
+`solis_poll.check_arguments`, and restarts the poller with them (the old poller
+restores the baseline and exits before the new one starts). Wire format and
+versioning are in [hub-protocol.md](hub-protocol.md); operation in
+[hub.md](hub.md).
 
 **The single-controller rule.** At any moment exactly one `solis-poll` holds
 the Modbus session and runs voltage control, either the Mac's (Direct mode) or

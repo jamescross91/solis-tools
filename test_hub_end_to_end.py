@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 
 from fake_inverter import FakeInverter, hybrid_bank
-from solis_hub import write_token
+from solis_hub import check_poller_args, settings_from_namespace, write_token
 from test_solis_hub import WsClient
 
 HUB = str(Path(__file__).with_name("solis_hub.py"))
@@ -356,6 +356,60 @@ class HubShutdownTests(HubEndToEndCase):
             self.assertEqual(inverter.writes[-1], (43488, 100))
             self.assertEqual(inverter.maximum_active_connections, 1)
             self.assertEqual(inverter.active_connections, 0)
+
+    async def put_json(self, hub: HubProcess, path: str, body: dict) -> tuple[int, dict]:
+        reader, writer = await asyncio.open_connection("127.0.0.1", hub.port)
+        data = json.dumps(body).encode()
+        writer.write(
+            (
+                f"PUT {path} HTTP/1.1\r\nHost: localhost\r\n"
+                f"Authorization: Bearer {hub.token}\r\nContent-Length: {len(data)}\r\n\r\n"
+            ).encode()
+            + data
+        )
+        await writer.drain()
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), TIMEOUT)
+        length = next(
+            int(line.split(":", 1)[1])
+            for line in head.decode().split("\r\n")
+            if line.lower().startswith("content-length:")
+        )
+        payload = await asyncio.wait_for(reader.readexactly(length), TIMEOUT)
+        writer.close()
+        return int(head.split()[1]), json.loads(payload)
+
+    async def test_turning_control_off_from_an_app_restores_the_baseline_first(self):
+        with self.control_inverter() as inverter:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            hub = HubProcess(inverter.port, *self.control_arguments(Path(directory.name)))
+            self.addCleanup(hub.cleanup)
+            hub.start()
+            await self.wait_ready(hub)
+            client = await self.connect(hub)
+            await client.send_json({"type": "attention", "on": True})
+            deadline = time.monotonic() + TIMEOUT
+            while (43488, 40) not in inverter.writes and time.monotonic() < deadline:
+                await self.collect(client, "sample", 1)
+            self.assertIn((43488, 40), inverter.writes, hub.log())
+
+            settings = settings_from_namespace(check_poller_args(["--host", "127.0.0.1"]))
+            status, body = await self.put_json(
+                hub, "/v1/settings", {**settings, "dynamic_voltage_enabled": False}
+            )
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body["restarted"])
+            deadline = time.monotonic() + TIMEOUT
+            while time.monotonic() < deadline:
+                message = await client.receive_json(timeout=TIMEOUT)
+                if message["type"] == "sample" and message["envelope"]["voltage_control"] is None:
+                    break
+            else:
+                self.fail("the restarted poller never streamed without control\n" + hub.log())
+            self.assertEqual(inverter.bank[43488], 100, hub.log())
+            self.assertEqual(inverter.writes[-1], (43488, 100))
+            self.assertEqual(inverter.maximum_active_connections, 1)
+            self.assertNotIn(hub.token, hub.log())
 
     async def test_stopping_during_an_inverter_outage_reports_restoration_pending(self):
         """The poller exits promptly when it cannot restore, so exit proves nothing."""

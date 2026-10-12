@@ -5,6 +5,28 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- The menu bar can configure a hub. In Hub mode its settings show the controller
+  settings the hub is running, as an editable form with the same fields as
+  Direct mode, and sign the hub in to Hypervolt and Octopus. The hub gains
+  `GET`/`PUT /v1/settings` and `POST /v1/credentials/hypervolt` and `/octopus`,
+  behind the existing token, and `SolisHubKit` gains `HubAdminClient` for the
+  iOS app. The hub checks every change with `solis-poll`'s own validation,
+  refuses export regulation without the installation-validation record, saves
+  settings to `control-settings.json` in its state directory (where they take
+  over from the control flags in `hub.json`), and applies them by restarting the
+  poller, which restores the inverter's limits before the new one starts.
+  Passwords and API keys reach `hypervolt-login` and `octopus-login` on the hub
+  on stdin and are never returned or logged.
+
+### Changed
+
+- The hub token now also authorises changing control settings, so treat it as
+  an administrator credential. Over the LAN address the token and any sign-in
+  travel as plain HTTP; use the Cloudflare Tunnel's HTTPS address on a network
+  you do not trust.
+
 ### Fixed
 
 - `deploy/pi/install.sh` no longer fails half way on a Raspberry Pi whose Python is

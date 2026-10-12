@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -329,6 +329,12 @@ def checked(value: float, low: float, high: float, name: str) -> float:
     return value
 
 
+def control_identity(host: str, port: int, slave: int) -> str:
+    """The endpoint the controller's journal and export validation belong to.
+    solis-hub derives it too, to report whether export control is validated."""
+    return f"{host.strip().lower()}:{port}/{slave}"
+
+
 class SolisClient:
     """Persistent native Modbus TCP client and Solis ESINV register decoder."""
 
@@ -336,7 +342,7 @@ class SolisClient:
         ModbusTcpClient, self.modbus_exception = load_modbus_client()
         self.client = ModbusTcpClient(host=host, port=port, timeout=timeout)
         self.slave = slave
-        self.control_identity = f"{host.strip().lower()}:{port}/{slave}"
+        self.control_identity = control_identity(host, port, slave)
         self.narrow_spans: set[RegisterSpans] = set()
         self.block_failures: dict[RegisterSpans, int] = {}
         self.meter_register_available: bool | None = None
@@ -2703,8 +2709,19 @@ def is_valid_host(value: str) -> bool:
     return all(HOSTNAME_LABEL.match(label) for label in candidate.split("."))
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+class PollerArgumentError(ValueError):
+    """A command line solis-poll would refuse, reported instead of exiting."""
+
+
+class _CheckingParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise PollerArgumentError(message)
+
+
+def build_parser(
+    parser_class: type[argparse.ArgumentParser] = argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    parser = parser_class(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--host", required=True, help="inverter data-logger IP address (required)")
     parser.add_argument("--port", type=int, default=502, help="Modbus TCP port (default: 502)")
@@ -2908,7 +2925,25 @@ def parse_args() -> argparse.Namespace:
         help="continue even when the register map cannot be confirmed (values may be wrong)",
     )
     parser.add_argument("--no-colour", action="store_true", help="disable ANSI colours")
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    return _validated(parser, parser.parse_args(argv))
+
+
+def check_arguments(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse and validate exactly as solis-poll would, raising instead of exiting.
+
+    solis-hub checks settings from the network with this before it restarts the
+    poller, so the rules for what the poller accepts live in one place.
+    """
+    parser = build_parser(_CheckingParser)
+    return _validated(parser, parser.parse_args(list(argv)))
+
+
+def _validated(parser: argparse.ArgumentParser, args: argparse.Namespace) -> argparse.Namespace:
     if not is_valid_host(args.host):
         parser.error("--host must be an IP address or hostname for the inverter data logger")
     if not 1 <= args.port <= 65535:
