@@ -372,7 +372,7 @@ The PR description lists what was built, how each acceptance criterion was verif
 | Cloudflare Tunnel plus Access, no VPN | Outbound-only from the Pi, no open ports, nothing to toggle on the phone |
 | Hand-rolled WebSocket server | Keeps PyModbus as the only runtime dependency, following the Hypervolt client precedent |
 | No automatic Hub to Direct fallback | Replaces the earlier idea of falling back to read-only direct monitoring: the logger supports one session, so any direct fallback risks a second session and competing controllers |
-| Control settings live in the hub config file | Avoids a remote path that can change safety settings; revisit with explicit design |
+| Control settings live in the hub config file | Avoids a remote path that can change safety settings; revisit with explicit design. Revisited: clients may now set the controller settings and sign in to services through `/v1/settings` and `/v1/credentials/*`, checked by the poller's own rules and applied by a poller restart (see hub.md, "Changing settings from an app") |
 | Predbat Cloud writes need no new arbitration | The controller already adopts external limit changes as the new baseline |
 
 **Deferred**

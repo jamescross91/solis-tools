@@ -486,9 +486,10 @@ make hub-demo                # try Hub mode against a fake inverter, no hardware
 In the menu bar, Connection defaults to Direct, which behaves exactly as it
 always has. Hub mode never starts a local poller, there is no automatic
 fallback from Hub to Direct, and a Direct-mode app that finds a hub on the
-network waits for you to decide. The hub exposes no write path and no control
-settings; those stay in its config file. See [docs/hub.md](docs/hub.md) for
-setup and the migration runbook.
+network waits for you to decide. In Hub mode the menu bar edits the hub's
+control settings and signs the hub in to Hypervolt and Octopus; the hub checks
+each change with the poller's own rules and applies it by restarting its
+poller. See [docs/hub.md](docs/hub.md) for setup and the migration runbook.
 
 ## Recording and restored history
 

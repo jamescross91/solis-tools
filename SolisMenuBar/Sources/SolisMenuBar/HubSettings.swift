@@ -145,20 +145,32 @@ final class HubSettingsModel: ObservableObject {
         )
     }
 
-    /// Asks the hub's /v1/status over the same LAN-then-remote order a live
-    /// connection uses, so the answer says which of the two would be used.
-    func testConnection() {
+    /// The hub the form describes as it stands, saved or not, so its settings
+    /// can be read before the connection is saved.
+    var adminTarget: HubAdminTarget? {
         let auth = currentAuth()
-        guard !auth.token.isEmpty else {
-            testState = .failed("Enter the hub token first.")
-            return
-        }
+        guard !auth.token.isEmpty else { return nil }
         let settings = HubConnectionSettings(
             lanURL: HubURLInput.lan(lanText),
             remoteURL: HubURLInput.remote(remoteText),
             preferredHubID: preferredHubID.isEmpty ? nil : preferredHubID
         )
-        let candidates = HubEndpointSelector.candidates(settings: settings, discovered: discovered)
+        guard !settings.isEmpty else { return nil }
+        return HubAdminTarget(connection: settings, auth: auth, discovered: discovered)
+    }
+
+    /// The addresses to try, LAN first, and the token.
+    var target: (candidates: [HubEndpoint], auth: HubAuth)? {
+        adminTarget.map { ($0.candidates, $0.auth) }
+    }
+
+    /// Asks the hub's /v1/status over the same LAN-then-remote order a live
+    /// connection uses, so the answer says which of the two would be used.
+    func testConnection() {
+        guard let (candidates, auth) = target else {
+            testState = .failed("Enter the hub token first.")
+            return
+        }
         testState = .running
         Task {
             do {
@@ -313,69 +325,5 @@ struct HubSettingsSection: View {
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-}
-
-/// The controller settings as the hub's poller is actually running them.
-/// Read-only on purpose: control settings live in the hub's config file, so
-/// that no client can change the safety envelope remotely.
-struct HubControlSummary: View {
-    let configuration: VoltageControlConfiguration?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Dynamic voltage control (set on the hub)")
-                .font(.headline)
-            if let configuration {
-                VStack(alignment: .leading, spacing: 3) {
-                    row("Control", enabled: configuration.enabled)
-                    row("Import regulation", enabled: configuration.importEnabled)
-                    row("Export regulation", enabled: configuration.exportEnabled)
-                    row("Voltage limits", range: configuration.minimumVoltageV, configuration.maximumVoltageV, unit: "V")
-                    row("Safety margin", value: configuration.safetyMarginV, unit: "V")
-                    row("Maximum import", watts: configuration.maximumImportW)
-                    row("Maximum export", watts: configuration.maximumExportW)
-                    row("Site export permission", watts: configuration.siteExportPermissionW)
-                    row("Hypervolt priority", enabled: configuration.hypervoltEnabled)
-                    row("Intelligent Octopus", enabled: configuration.octopusEnabled)
-                }
-                .font(.caption)
-            } else {
-                Text("The hub has not sent its settings yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text(
-                "To change these, edit the poller arguments in the hub's configuration file and "
-                    + "restart solis-hub. Changes cannot be made from this app."
-            )
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    private func line(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).monospacedDigit()
-        }
-    }
-
-    private func row(_ title: String, enabled: Bool?) -> some View {
-        line(title, enabled.map { $0 ? "On" : "Off" } ?? "Unknown")
-    }
-
-    private func row(_ title: String, value: Double?, unit: String) -> some View {
-        line(title, value.map { String(format: "%.2f %@", $0, unit) } ?? "Unknown")
-    }
-
-    private func row(_ title: String, watts: Double?) -> some View {
-        line(title, watts.map { String(format: "%.1f kW", $0 / 1_000) } ?? "Unknown")
-    }
-
-    private func row(_ title: String, range low: Double?, _ high: Double?, unit: String) -> some View {
-        guard let low, let high else { return line(title, "Unknown") }
-        return line(title, String(format: "%.0f to %.0f %@", low, high, unit))
     }
 }

@@ -133,6 +133,10 @@ poller beyond those two fixed strings.
 | `GET /v1/status` | `hub_version`, `hub_protocol_version`, `hub_id`, `poller`, `clients`, `envelope_age_s` (null before the first sample) |
 | `GET /v1/history/samples?since=ISO&resolution=native\|compact` | Array of stored history entries after `since`; gzip when the client accepts it |
 | `GET /v1/history/control?since=ISO&kind=minutes\|events` | Rows from the poller's `voltage-history.sqlite3`, opened read-only, as objects keyed by column name |
+| `GET /v1/settings` | The settings state, below |
+| `PUT /v1/settings` | Replaces the controller settings with the body; answers with the settings state and `restarted` |
+| `POST /v1/credentials/hypervolt` | Signs the hub in to Hypervolt with `{"email", "password"}`; answers with the settings state, `message` and `restarted` |
+| `POST /v1/credentials/octopus` | Signs the hub in to Octopus with `{"api_key", "account"?, "device"?}`; answers likewise |
 
 A history entry holds `timestamp`, `reading` (without `alarms`), `cadence` and a
 `voltage_control` object with only: `state`, `action`, `mode`,
@@ -151,9 +155,62 @@ database is an empty array. `since` is optional; an unparseable value is 400. Us
 as `%2B`; a bare `+` that arrives as a space is read as a plus. Control history
 is capped at the newest 50,000 rows.
 
+### Settings and sign-in
+
+These change what the poller runs, so they take the same token as everything
+else, and only one is applied at a time (a second gets 409). Bodies are JSON with
+a `Content-Length` of at most 16 KiB; a chunked body gets 411. A refused request
+answers 400 (or 409, 411, 413, 500) with `{"error": "..."}`, a short reason fit to
+show to a person.
+
+The settings state is:
+
+```json
+{
+  "settings": {
+    "dynamic_voltage_enabled": true, "dynamic_import_enabled": true,
+    "dynamic_export_enabled": false, "minimum_voltage": 212.0,
+    "maximum_voltage": 259.0, "voltage_safety_margin": 1.5,
+    "voltage_deadband": 1.0, "maximum_import_kw": 23.0,
+    "import_headroom_kw": 1.5, "export_headroom_kw": 1.0,
+    "maximum_export_kw": 10.0, "site_export_permission_kw": 10.0,
+    "increase_step_w": 500, "reduction_step_w": 500,
+    "near_limit_reduction_w": 1000, "emergency_reduction_w": 3000,
+    "control_settle_time": 10.0, "control_activation_delay": 10.0,
+    "control_deactivation_delay": 10.0, "import_activation_kw": 1.0,
+    "export_activation_kw": 0.5, "minimum_write_interval": 60.0,
+    "hypervolt_enabled": true, "ev_priority": "ev", "octopus_enabled": true
+  },
+  "source": "app",
+  "export_control_validated": true,
+  "hypervolt": {"signed_in": true, "charger_id": "HV-123"},
+  "octopus": {"signed_in": true, "account_number": "A-1234ABCD", "device_id": "..."}
+}
+```
+
+`settings` is what the poller runs: from `control-settings.json` when `source`
+is `"app"`, otherwise read from `hub.json`'s `poller_args`. A `PUT` body is a
+complete `settings` object: every key is required and unknown keys are refused,
+so a client written against an older list cannot leave a newer setting unset.
+Values are checked by `solis-poll`'s own validation; export regulation also needs
+the installation-validation record when control is on. With
+`dynamic_voltage_enabled` false, export regulation, Hypervolt and Octopus are
+left out of the poller's arguments (`solis-poll` refuses them without control)
+but kept as saved, so turning control off always works and turning it back on
+restores them. `restarted` is true when the change differs
+from what was running and the poller is being restarted with it.
+
+`hypervolt` and `octopus` never carry a password, key or token. Secrets in a
+sign-in body must not contain control characters, and are passed to the login
+command on stdin only.
+
+Adding a field to the settings is a protocol change in both directions: a
+client sends every key, so a hub refuses a document from a client that lacks the
+new one. Bump `hub_protocol_version`, or give the hub a default for the missing
+key, when that happens.
+
 ## Not in the protocol
 
-Control settings, enabling or disabling control, and any write to the inverter,
-Hypervolt or Octopus. Settings live in the hub's config file by design, so
-there is no remote path that can change a safety setting. Adding one needs its
-own design.
+Any write to the inverter, Hypervolt or Octopus from a client, the logger
+address, polling intervals, file paths and any poller option outside the
+settings above. The hub changes control only by restarting its own poller.

@@ -10,7 +10,9 @@ one lands. This page is the contract it builds against. The wire format is in
   an optional setting that adds the live inverter feed and voltage control
   activity.
 - Same single-controller rule as the Mac: the iOS app never opens a Modbus
-  session, and the hub has no write path to give it one.
+  session. It may change the hub's control settings and sign the hub in to
+  Hypervolt and Octopus through `HubAdminClient`, which the hub applies by
+  restarting its own poller.
 - iOS suspends sockets in the background. Disconnect when the app goes to the
   background and reconnect on foreground, sending attention on while the app is
   visible. Alerts while backgrounded come from notifications (the hub's ntfy

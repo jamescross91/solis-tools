@@ -6,8 +6,11 @@ control stops when the Mac sleeps. The hub is a second, optional consumer of
 exactly that stdout contract: it supervises one ``solis-poll`` child on a
 Raspberry Pi, caches the fields the stream only sends sometimes, and serves the
 result to clients over an authenticated WebSocket and a small HTTP API on one
-port. It never speaks Modbus and has no write path of any kind; the only thing
-it passes to the poller is ``attention on`` or ``attention off``.
+port. It never speaks Modbus. The only thing it writes to the poller is
+``attention on`` or ``attention off``; a client holding the token can also
+replace the poller's control settings or sign it in to Hypervolt and Octopus,
+which the hub applies by restarting the poller with new arguments (see
+``ControlSettingsStore``).
 
 Standard library only. The WebSocket server is hand-rolled, following the
 precedent of the client in ``hypervolt_client.py``, so PyModbus stays the only
@@ -27,6 +30,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import queue
 import re
@@ -48,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 import solis_poll
+import voltage_control
 
 HUB_PROTOCOL_VERSION = 1
 # The stream schema this hub was written against. Envelopes are forwarded
@@ -133,6 +138,11 @@ CONFIG_KEYS = {
 }
 NTFY_KEYS = {"url", "topic", "token_file", "min_interval_s"}
 NTFY_TOPIC = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SETTINGS_FILE = "control-settings.json"
+MAX_REQUEST_BODY_BYTES = 16 * 1024
+# hypervolt-login and octopus-login each make a few HTTPS calls with 10 s
+# timeouts; anything slower is a hung process, not a slow service.
+LOGIN_TIMEOUT_S = 60.0
 
 
 def log(message: str) -> None:
@@ -324,6 +334,223 @@ def load_config(path: Path, state_dir_override: Path | None = None) -> HubConfig
     return parse_config(data, state_dir_override)
 
 
+# --- Control settings set from clients ------------------------------------
+
+
+@dataclass(frozen=True)
+class SettingField:
+    key: str
+    option: str
+    dest: str
+    kind: type
+    # The --no- spelling of a flag solis-poll defines as BooleanOptionalAction.
+    negative: str | None = None
+
+
+# Exactly the controller settings the menu bar edits in Direct mode, so a hub
+# offers the same controls. Connection, polling and file paths stay in
+# hub.json: a client can tune the controller, never point it somewhere else.
+CONTROL_SETTINGS: tuple[SettingField, ...] = (
+    SettingField(
+        "dynamic_voltage_enabled", "--dynamic-voltage-control", "dynamic_voltage_control", bool
+    ),
+    SettingField(
+        "dynamic_import_enabled",
+        "--dynamic-import-control",
+        "dynamic_import_control",
+        bool,
+        "--no-dynamic-import-control",
+    ),
+    SettingField(
+        "dynamic_export_enabled", "--dynamic-export-control", "dynamic_export_control", bool
+    ),
+    SettingField("minimum_voltage", "--minimum-voltage", "minimum_voltage", float),
+    SettingField("maximum_voltage", "--maximum-voltage", "maximum_voltage", float),
+    SettingField(
+        "voltage_safety_margin", "--voltage-safety-margin", "voltage_safety_margin", float
+    ),
+    SettingField("voltage_deadband", "--voltage-deadband", "voltage_deadband", float),
+    SettingField("maximum_import_kw", "--maximum-import-kw", "maximum_import_kw", float),
+    SettingField("import_headroom_kw", "--import-headroom-kw", "import_headroom_kw", float),
+    SettingField("export_headroom_kw", "--export-headroom-kw", "export_headroom_kw", float),
+    SettingField("maximum_export_kw", "--maximum-export-kw", "maximum_export_kw", float),
+    SettingField(
+        "site_export_permission_kw",
+        "--site-export-permission-kw",
+        "site_export_permission_kw",
+        float,
+    ),
+    SettingField("increase_step_w", "--increase-step-w", "increase_step_w", int),
+    SettingField("reduction_step_w", "--reduction-step-w", "reduction_step_w", int),
+    SettingField(
+        "near_limit_reduction_w", "--near-limit-reduction-w", "near_limit_reduction_w", int
+    ),
+    SettingField("emergency_reduction_w", "--emergency-reduction-w", "emergency_reduction_w", int),
+    SettingField("control_settle_time", "--control-settle-time", "control_settle_time", float),
+    SettingField(
+        "control_activation_delay", "--control-activation-delay", "control_activation_delay", float
+    ),
+    SettingField(
+        "control_deactivation_delay",
+        "--control-deactivation-delay",
+        "control_deactivation_delay",
+        float,
+    ),
+    SettingField("import_activation_kw", "--import-activation-kw", "import_activation_kw", float),
+    SettingField("export_activation_kw", "--export-activation-kw", "export_activation_kw", float),
+    SettingField(
+        "minimum_write_interval", "--minimum-write-interval", "minimum_write_interval", float
+    ),
+    SettingField("hypervolt_enabled", "--hypervolt-enable", "hypervolt_enable", bool),
+    SettingField("ev_priority", "--ev-priority", "ev_priority", str),
+    SettingField("octopus_enabled", "--octopus-enable", "octopus_enable", bool),
+)
+SETTING_KEYS = {field.key for field in CONTROL_SETTINGS}
+# solis-poll refuses these without --dynamic-voltage-control. With control off
+# they are left out of the arguments but kept in the saved settings, so turning
+# control off never fails for them and turning it back on restores them, as the
+# menu bar's own Direct-mode arguments do.
+NEEDS_CONTROL = {"dynamic_export_enabled", "hypervolt_enabled", "octopus_enabled"}
+
+
+class SettingsError(ValueError):
+    """Settings from a client that cannot be applied; the message is shown to it."""
+
+
+def parse_settings(data: Any) -> dict[str, Any]:
+    """A complete settings document, strictly typed.
+
+    Every key is required, so a client built against an older field list cannot
+    silently leave a newer setting at whatever the file last held. Ranges are
+    not checked here: the poller's own validation does that, once, for both.
+    """
+    if not isinstance(data, dict):
+        raise SettingsError("settings must be a JSON object")
+    unknown = sorted(set(data) - SETTING_KEYS)
+    if unknown:
+        raise SettingsError(f"unknown setting(s): {', '.join(unknown)}")
+    missing = sorted(SETTING_KEYS - set(data))
+    if missing:
+        raise SettingsError(f"missing setting(s): {', '.join(missing)}")
+    settings: dict[str, Any] = {}
+    for field in CONTROL_SETTINGS:
+        value = data[field.key]
+        if field.kind is bool:
+            if not isinstance(value, bool):
+                raise SettingsError(f"{field.key} must be true or false")
+        elif field.kind is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise SettingsError(f"{field.key} must be a whole number")
+        elif field.kind is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise SettingsError(f"{field.key} must be a number")
+            value = float(value)
+            if not math.isfinite(value):
+                raise SettingsError(f"{field.key} must be finite")
+        elif not isinstance(value, str) or not value or len(value) > 32:
+            raise SettingsError(f"{field.key} must be a short string")
+        settings[field.key] = value
+    return settings
+
+
+def settings_arguments(settings: dict[str, Any]) -> list[str]:
+    arguments: list[str] = []
+    control = settings["dynamic_voltage_enabled"]
+    for field in CONTROL_SETTINGS:
+        value = settings[field.key]
+        if field.key in NEEDS_CONTROL and not control:
+            continue
+        if field.kind is bool:
+            if value:
+                arguments.append(field.option)
+            elif field.negative is not None:
+                arguments.append(field.negative)
+        else:
+            arguments += [field.option, str(value)]
+    return arguments
+
+
+def strip_settings(args: Sequence[str]) -> list[str]:
+    """`args` without any flag a settings document sets, nor the flag's value."""
+    kept: list[str] = []
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        index += 1
+        field = next(
+            (
+                field
+                for field in CONTROL_SETTINGS
+                if _option_matches(argument, field.option)
+                or (field.negative is not None and _option_matches(argument, field.negative))
+            ),
+            None,
+        )
+        if field is None:
+            kept.append(argument)
+        elif field.kind is not bool and "=" not in argument:
+            index += 1  # the value that follows the flag
+    return kept
+
+
+def compose_poller_args(base: Sequence[str], settings: dict[str, Any] | None) -> tuple[str, ...]:
+    """hub.json's arguments, with the settings set from clients in place of its
+    own control flags. With no settings saved, hub.json is used unchanged."""
+    if settings is None:
+        return tuple(base)
+    return (*strip_settings(base), *settings_arguments(settings))
+
+
+def check_poller_args(args: Sequence[str]) -> argparse.Namespace:
+    """What solis-poll would make of `args`, or SettingsError saying why it
+    would refuse them. --stream-json is the one flag the hub always adds."""
+    try:
+        return solis_poll.check_arguments([*args, "--stream-json"])
+    except solis_poll.PollerArgumentError as exc:
+        raise SettingsError(str(exc)) from exc
+    except SystemExit as exc:  # --help or --version in hub.json's arguments
+        raise SettingsError("the poller arguments ask for help or a version") from exc
+
+
+def settings_from_namespace(namespace: argparse.Namespace) -> dict[str, Any]:
+    return {field.key: getattr(namespace, field.dest) for field in CONTROL_SETTINGS}
+
+
+class ControlSettingsStore:
+    """The settings clients have set, in the state directory.
+
+    The state directory, not hub.json, because it is the only place the
+    systemd unit lets the hub write (/etc is read-only to it). The file is
+    absent until a client saves settings; until then hub.json's poller_args
+    are the whole story, as they always were.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def load(self) -> dict[str, Any] | None:
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise HubConfigError(f"cannot read {self.path}: {exc.strerror or exc}") from exc
+        try:
+            return parse_settings(strict_json_loads(text))
+        except (ValueError, SettingsError) as exc:
+            raise HubConfigError(
+                f"{self.path} is not valid ({exc}); fix or delete it to use hub.json's poller_args"
+            ) from exc
+
+    def save(self, settings: dict[str, Any]) -> None:
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(settings, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, self.path)
+
+
 # --- Token and hub identity ---------------------------------------------
 
 
@@ -500,11 +727,68 @@ _REASONS = {
     401: "Unauthorized",
     404: "Not Found",
     405: "Method Not Allowed",
+    409: "Conflict",
+    411: "Length Required",
+    413: "Content Too Large",
     426: "Upgrade Required",
     429: "Too Many Requests",
     431: "Request Header Fields Too Large",
+    500: "Internal Server Error",
     503: "Service Unavailable",
 }
+
+# Every path behind the token, and the methods each accepts.
+ROUTES = {
+    "/v1/stream": ("GET",),
+    "/v1/status": ("GET",),
+    "/v1/history/samples": ("GET",),
+    "/v1/history/control": ("GET",),
+    "/v1/settings": ("GET", "PUT"),
+    "/v1/credentials/hypervolt": ("POST",),
+    "/v1/credentials/octopus": ("POST",),
+}
+
+
+class HTTPProblem(Exception):
+    """A request that is answered with `status` and a short reason for the client."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+async def read_json_body(reader: asyncio.StreamReader, headers: dict[str, str]) -> Any:
+    """A small JSON body with a declared length. Chunked bodies are refused
+    rather than parsed: nothing a client sends needs them."""
+    if "transfer-encoding" in headers:
+        raise HTTPProblem(411, "send the body with a Content-Length")
+    declared = headers.get("content-length", "")
+    if not declared.isdigit():
+        raise HTTPProblem(411, "send the body with a Content-Length")
+    length = int(declared)
+    if length > MAX_REQUEST_BODY_BYTES:
+        raise HTTPProblem(413, "the body is too large")
+    data = await asyncio.wait_for(reader.readexactly(length), REQUEST_TIMEOUT_S)
+    try:
+        return strict_json_loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPProblem(400, "the body must be JSON") from exc
+
+
+def _text_field(body: dict[str, Any], key: str, *, limit: int, required: bool = True) -> str | None:
+    """A string from a request body that is safe to pass on as one line or one
+    argument: no control characters, which would split a stdin line."""
+    value = body.get(key)
+    if value is None or value == "":
+        if required:
+            raise HTTPProblem(400, f"{key} is required")
+        return None
+    if not isinstance(value, str) or len(value) > limit:
+        raise HTTPProblem(400, f"{key} must be a string of at most {limit} characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise HTTPProblem(400, f"{key} must not contain control characters")
+    return value
 
 
 def http_response(
@@ -771,32 +1055,83 @@ class SampleHistory:
 # --- Poller supervision --------------------------------------------------
 
 
-def locate_poller() -> list[str]:
-    """The command that starts solis-poll, mirroring ExecutableLocator.swift.
+def locate_command(name: str, script: str, override: str) -> list[str]:
+    """The command that starts one of the installed tools, mirroring
+    ExecutableLocator.swift.
 
-    SOLIS_POLL_PATH overrides everything (as in the menu bar). Otherwise beside
-    the hub's own executable first (a virtualenv's bin, or Homebrew's), then PATH. A source checkout has neither, so it falls back to the script
+    The `override` environment variable wins (as in the menu bar). Otherwise
+    beside the hub's own executable first (a virtualenv's bin, or Homebrew's),
+    then PATH. A source checkout has neither, so it falls back to the script
     next to this file, which is also what the tests run.
     """
-    override = os.environ.get("SOLIS_POLL_PATH")
-    if override and os.access(override, os.X_OK):
-        return [str(Path(override).absolute())]
+    forced = os.environ.get(override)
+    if forced and os.access(forced, os.X_OK):
+        return [str(Path(forced).absolute())]
     candidates = [
         Path(sys.argv[0]).parent,
         Path(sys.argv[0]).resolve().parent,
         Path(sys.executable).parent,
     ]
     for directory in candidates:
-        found = directory.absolute() / "solis-poll"
+        found = directory.absolute() / name
         if found.is_file() and os.access(found, os.X_OK):
             return [str(found)]
-    on_path = shutil.which("solis-poll")
+    on_path = shutil.which(name)
     if on_path:
         return [on_path]
-    script = Path(__file__).with_name("solis_poll.py")
-    if script.is_file():
-        return [sys.executable, str(script)]
-    raise HubConfigError("cannot find solis-poll beside solis-hub or on PATH")
+    source = Path(__file__).with_name(script)
+    if source.is_file():
+        return [sys.executable, str(source)]
+    raise HubConfigError(f"cannot find {name} beside solis-hub or on PATH")
+
+
+def locate_poller() -> list[str]:
+    return locate_command("solis-poll", "solis_poll.py", "SOLIS_POLL_PATH")
+
+
+@dataclass(frozen=True)
+class LoginResult:
+    ok: bool
+    message: str
+
+
+async def run_login(command: Sequence[str], secret: str, cwd: Path) -> LoginResult:
+    """Runs hypervolt-login or octopus-login with the secret on stdin, as the
+    menu bar's own sign-in forms do, so the secret is never an argument (and
+    never in a process listing) and is handled only by that command.
+
+    Its first "Saved ..." line, or its last "error: " line, is the answer; both
+    commands keep those prefixes for exactly this. Nothing from stdin or the
+    output is logged here.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        # Both commands read the secret with getpass, which prefers the
+        # controlling terminal to stdin. A hub started from a terminal would
+        # otherwise have the login prompt there and ignore the secret sent to
+        # it; a new session has no controlling terminal, so stdin is used.
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate((secret + "\n").encode()), LOGIN_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        return LoginResult(False, "the sign-in did not finish in time")
+    lines_out = stdout.decode("utf-8", "replace").splitlines()
+    lines_err = stderr.decode("utf-8", "replace").splitlines()
+    if process.returncode == 0:
+        saved = next((line for line in lines_out if line.startswith("Saved ")), None)
+        return LoginResult(True, saved or "Signed in.")
+    error = next((line for line in reversed(lines_err) if line.startswith("error: ")), None)
+    return LoginResult(False, error[len("error: ") :] if error else "the sign-in failed")
 
 
 SpawnFactory = Callable[[Sequence[str]], Awaitable[Any]]
@@ -860,6 +1195,8 @@ class PollerSupervisor:
         self._wanted_attention = False
         self._child_attention = True
         self._wake = asyncio.Event()
+        self._restart_requested = False
+        self._terminated: Any = None
         self.backoff_first_s = BACKOFF_FIRST_S
 
     def _set_state(self, state: str, **changes: Any) -> None:
@@ -874,12 +1211,18 @@ class PollerSupervisor:
         first = True
         while not self.stopping:
             started = self._monotonic()
-            if not first:
+            # A restart that was asked for is not a failure, so it is neither
+            # counted nor made to wait out a backoff.
+            if not first and not self._restart_requested:
                 self.status.restarts += 1
             first = False
+            self._restart_requested = False
             await self._run_child()
             if self.stopping:
                 break
+            if self._restart_requested:
+                attempt = 0
+                continue
             if self._monotonic() - started >= HEALTHY_RUN_S:
                 attempt = 0
             delay = backoff_delay(self.backoff_first_s, attempt)
@@ -902,10 +1245,9 @@ class PollerSupervisor:
             return
         self.process = process
         self._child_attention = True
-        if self.stopping:
-            # A stop that arrived mid-spawn found no child to signal.
-            with contextlib.suppress(ProcessLookupError):
-                process.send_signal(signal.SIGTERM)
+        if self.stopping or self._restart_requested:
+            # A stop or restart that arrived mid-spawn found no child to signal.
+            self._terminate()
         self.on_spawn()
         self._sync_attention()
         stderr = getattr(process, "stderr", None)
@@ -986,19 +1328,42 @@ class PollerSupervisor:
             return  # the child is going away; the next one is synced when it starts
         self._child_attention = self._wanted_attention
 
+    def _terminate(self) -> None:
+        """SIGTERM the child, once. solis-poll turns SIGTERM into an interrupt,
+        so a second one, from a stop after a restart or two quick changes,
+        would land while it is restoring the inverter's limits and could cut
+        that short."""
+        process = self.process
+        if process is None or process is self._terminated:
+            return
+        self._terminated = process
+        with contextlib.suppress(ProcessLookupError):
+            process.send_signal(signal.SIGTERM)
+
     def request_stop(self) -> None:
         """Forward SIGTERM; the poller restores the baseline on its way out."""
         self.stopping = True
         self._wake.set()
-        if self.process is not None:
-            self._set_state(STOPPING)
-            with contextlib.suppress(ProcessLookupError):
-                self.process.send_signal(signal.SIGTERM)
-        else:
-            self._set_state(STOPPING)
+        self._set_state(STOPPING)
+        self._terminate()
 
     def mark_restoration_pending(self) -> None:
         self._set_state(RESTORATION_PENDING)
+
+    def restart(self, command: Sequence[str]) -> None:
+        """Run `command` from now on, replacing the current child.
+
+        The child is sent SIGTERM and restores the baseline on its way out, as
+        when the hub stops. The new one starts only after it has exited and its
+        output is drained, like any restart, so two pollers never overlap: a
+        child that never exits is never replaced.
+        """
+        self.command = list(command)
+        self._restart_requested = True
+        self._wake.set()
+        if self.process is not None:
+            self._set_state(STOPPING)
+            self._terminate()
 
 
 # --- Notifications -------------------------------------------------------
@@ -1284,8 +1649,10 @@ class Hub:
         notifier: Notifier | None = None,
         ping_interval: float = PING_INTERVAL_S,
         pong_timeout: float = PONG_TIMEOUT_S,
+        locate: Callable[[str, str, str], list[str]] = locate_command,
     ):
         self.config = config
+        self.locate = locate
         self.token = token
         self.hub_id = hub_id
         self.notifier = notifier
@@ -1302,7 +1669,22 @@ class Hub:
         self.pending_by_peer: dict[str, int] = {}
         self.clients: set[HubClient] = set()
         self.health = HealthMonitor(self._alert)
+        # One change at a time: two sign-ins or saves racing would restart the
+        # poller twice and leave it unclear which settings it ended up with.
+        self.admin_lock = asyncio.Lock()
+        self.settings_store = ControlSettingsStore(config.state_dir / SETTINGS_FILE)
+        self.saved_settings = self.settings_store.load()
+        self.poller_args = compose_poller_args(config.poller_args, self.saved_settings)
+        if self.saved_settings is not None:
+            try:
+                check_poller_args(self.poller_args)
+            except SettingsError as exc:
+                raise HubConfigError(
+                    f"the saved control settings in {self.settings_store.path} are refused "
+                    f"by solis-poll ({exc}); fix or delete that file"
+                ) from exc
         command = list(poller_command or locate_poller())
+        self.poller_command = command
         if spawn is spawn_process:
             state_dir = config.state_dir
 
@@ -1310,7 +1692,7 @@ class Hub:
                 return await spawn_process(command, state_dir)
 
         self.supervisor = PollerSupervisor(
-            [*command, "--stream-json", *config.poller_args],
+            [*command, "--stream-json", *self.poller_args],
             on_line=self._on_line,
             on_status=self._on_status,
             on_spawn=self._on_spawn,
@@ -1518,6 +1900,151 @@ class Hub:
             if (moment := parse_timestamp(event.get("timestamp"))) is not None and moment > since
         ]
 
+    # Settings and sign-in --------------------------------------------------
+
+    def _poller_path(self, value: Path | None, default_name: str) -> Path:
+        """A path as the poller resolves it: its own state directory by default,
+        and relative to the hub's state directory, its working directory."""
+        path = value or solis_poll.default_control_state_dir() / default_name
+        return path if path.is_absolute() else self.config.state_dir / path
+
+    def _export_validated(self, namespace: argparse.Namespace) -> bool:
+        identity = solis_poll.control_identity(namespace.host, namespace.port, namespace.slave)
+        path = (
+            self._poller_path(namespace.export_control_validation, "")
+            if namespace.export_control_validation
+            else voltage_control.export_validation_path(
+                solis_poll.default_control_state_dir(), identity
+            )
+        )
+        try:
+            return voltage_control.ExportControlValidation.load(path, identity) is not None
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _credentials_file(path: Path) -> dict[str, Any]:
+        """The credentials file's non-secret fields only; the key and tokens in
+        it never leave this method."""
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def settings_payload(self) -> dict[str, Any]:
+        namespace = check_poller_args(self.poller_args)
+        hypervolt = self._credentials_file(
+            self._poller_path(namespace.hypervolt_credentials, "hypervolt.json")
+        )
+        octopus = self._credentials_file(
+            self._poller_path(namespace.octopus_credentials, "octopus.json")
+        )
+        return {
+            # Saved settings are returned as saved: with control off, the
+            # features that need it are not in the arguments but still chosen.
+            "settings": self.saved_settings or settings_from_namespace(namespace),
+            "source": "app" if self.saved_settings is not None else "hub_config",
+            "export_control_validated": self._export_validated(namespace),
+            "hypervolt": {
+                "signed_in": bool(hypervolt.get("refresh_token")),
+                "charger_id": hypervolt.get("charger_id") or None,
+            },
+            "octopus": {
+                "signed_in": bool(octopus.get("api_key")),
+                "account_number": octopus.get("account_number") or None,
+                "device_id": octopus.get("device_id") or None,
+            },
+        }
+
+    async def apply_settings(self, body: Any, source: str) -> dict[str, Any]:
+        try:
+            settings = parse_settings(body)
+            args = compose_poller_args(self.config.poller_args, settings)
+            namespace = check_poller_args(args)
+            if (
+                settings["dynamic_voltage_enabled"]
+                and settings["dynamic_export_enabled"]
+                and not self._export_validated(namespace)
+            ):
+                raise SettingsError(
+                    "export regulation needs this inverter's installation-validation record "
+                    "in the hub's state directory"
+                )
+        except SettingsError as exc:
+            raise HTTPProblem(400, str(exc)) from exc
+        try:
+            self.settings_store.save(settings)
+        except OSError as exc:
+            log(f"cannot save control settings: {exc.strerror or exc}")
+            raise HTTPProblem(500, "the hub could not save the settings") from exc
+        self.saved_settings = settings
+        restarted = args != self.poller_args
+        if restarted:
+            self.poller_args = args
+            log(f"control settings changed from {source}; restarting the poller")
+            self.supervisor.restart([*self.poller_command, "--stream-json", *args])
+        return {**self.settings_payload(), "restarted": restarted}
+
+    async def sign_in(self, service: str, body: Any, source: str) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise HTTPProblem(400, "the body must be a JSON object")
+        try:
+            namespace = check_poller_args(self.poller_args)
+        except SettingsError as exc:
+            raise HTTPProblem(500, str(exc)) from exc
+        if service == "hypervolt":
+            email = _text_field(body, "email", limit=254)
+            secret = _text_field(body, "password", limit=1024)
+            path = self._poller_path(namespace.hypervolt_credentials, "hypervolt.json")
+            command = [
+                *self.locate("hypervolt-login", "hypervolt_login.py", "HYPERVOLT_LOGIN_PATH"),
+                "--credentials",
+                str(path),
+                # The = form, so an address that starts with "-" is still a value.
+                f"--email={email}",
+                f"--token-host={namespace.hypervolt_token_host}",
+                f"--token-port={namespace.hypervolt_token_port}",
+                f"--api-host={namespace.hypervolt_api_host}",
+                f"--api-port={namespace.hypervolt_api_port}",
+            ]
+            if namespace.hypervolt_insecure:
+                command.append("--insecure")
+            enabled = namespace.hypervolt_enable
+        else:
+            secret = _text_field(body, "api_key", limit=256)
+            account = _text_field(body, "account", limit=64, required=False)
+            device = _text_field(body, "device", limit=128, required=False)
+            path = self._poller_path(namespace.octopus_credentials, "octopus.json")
+            command = [
+                *self.locate("octopus-login", "octopus_login.py", "OCTOPUS_LOGIN_PATH"),
+                "--credentials",
+                str(path),
+                f"--host={namespace.octopus_host}",
+                f"--port={namespace.octopus_port}",
+            ]
+            if namespace.octopus_insecure:
+                command.append("--insecure")
+            if account:
+                command.append(f"--account={account}")
+            if device:
+                command.append(f"--device={device}")
+            enabled = namespace.octopus_enable
+        assert secret is not None
+        try:
+            result = await run_login(command, secret, self.config.state_dir)
+        except OSError as exc:
+            log(f"cannot start the {service} sign-in: {exc.strerror or exc}")
+            raise HTTPProblem(500, f"the hub could not run the {service} sign-in") from exc
+        log(f"{service} sign-in from {source} {'succeeded' if result.ok else 'failed'}")
+        if not result.ok:
+            raise HTTPProblem(400, result.message)
+        # The poller reads the file only when it starts.
+        if enabled:
+            log(f"restarting the poller to use the new {service} credentials")
+            self.supervisor.restart(self.supervisor.command)
+        return {"message": result.message, "restarted": enabled, **self.settings_payload()}
+
     # Connection handling ---------------------------------------------------
 
     async def handle_connection(
@@ -1560,10 +2087,13 @@ class Hub:
                 self.pending_by_peer[peer_host] = remaining
             else:
                 self.pending_by_peer.pop(peer_host, None)
-        if request.method != "GET":
-            await self._respond(writer, http_response(405, headers=[("Allow", "GET")]))
+        if request.method not in ("GET", "PUT", "POST"):
+            await self._respond(writer, http_response(405, headers=[("Allow", "GET, PUT, POST")]))
             return
         if request.path == "/v1/healthz":
+            if request.method != "GET":
+                await self._respond(writer, http_response(405, headers=[("Allow", "GET")]))
+                return
             await self._respond(writer, http_response(200, json_bytes({"ok": True})))
             return
         source = source_address(peer_host, request.headers)
@@ -1576,6 +2106,13 @@ class Hub:
                 writer, http_response(401, headers=[("WWW-Authenticate", "Bearer")])
             )
             return
+        methods = ROUTES.get(request.path)
+        if methods is None:
+            await self._respond(writer, http_response(404))
+            return
+        if request.method not in methods:
+            await self._respond(writer, http_response(405, headers=[("Allow", ", ".join(methods))]))
+            return
         if request.path == "/v1/stream":
             await self._websocket(reader, writer, request, source)
         elif request.path == "/v1/status":
@@ -1583,7 +2120,38 @@ class Hub:
         elif request.path in ("/v1/history/samples", "/v1/history/control"):
             await self._history(writer, request)
         else:
-            await self._respond(writer, http_response(404))
+            await self._admin(reader, writer, request, source)
+
+    async def _admin(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request: Request,
+        source: str,
+    ) -> None:
+        """Settings and sign-in: everything that changes what the poller runs."""
+        try:
+            if request.method == "GET":
+                try:
+                    payload = self.settings_payload()
+                except SettingsError as exc:
+                    raise HTTPProblem(500, str(exc)) from exc
+            else:
+                body = await read_json_body(reader, request.headers)
+                if self.admin_lock.locked():
+                    raise HTTPProblem(409, "another change is still being applied")
+                async with self.admin_lock:
+                    if request.path == "/v1/settings":
+                        payload = await self.apply_settings(body, source)
+                    else:
+                        service = request.path.rsplit("/", 1)[1]
+                        payload = await self.sign_in(service, body, source)
+        except HTTPProblem as problem:
+            await self._respond(
+                writer, http_response(problem.status, json_bytes({"error": problem.message}))
+            )
+            return
+        await self._respond(writer, http_response(200, json_bytes(payload)))
 
     async def _history(self, writer: asyncio.StreamWriter, request: Request) -> None:
         raw_since = request.query.get("since", [None])[0]
@@ -1882,6 +2450,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "check":
             read_token(config.token_file)
             locate_poller()
+            saved = ControlSettingsStore(config.state_dir / SETTINGS_FILE).load()
+            if saved is not None:
+                try:
+                    check_poller_args(compose_poller_args(config.poller_args, saved))
+                except SettingsError as exc:
+                    raise HubConfigError(f"the saved control settings are refused: {exc}") from exc
+                print(f"control settings: {config.state_dir / SETTINGS_FILE} (set from an app)")
             print("configuration ok")
             return 0
         return asyncio.run(serve_forever(config))

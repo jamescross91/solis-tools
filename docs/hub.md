@@ -32,13 +32,18 @@ runs `solis-poll` itself exactly as before. The hub runs on Linux and macOS
 
 ## What the hub is not
 
-The hub never speaks Modbus and has no write path of any kind. It runs
-`solis-poll --stream-json` as a subprocess and forwards what it prints. The
-only thing it ever sends to the poller is the line `attention on` or
-`attention off`. Control settings live in the hub's config file, so there is no
-remote way to change a safety setting, and a client cannot enable or disable
-control. The register whitelist, the controller and `schema_version` are
-unchanged. See [hub-protocol.md](hub-protocol.md) for the wire format.
+The hub never speaks Modbus. It runs `solis-poll --stream-json` as a subprocess
+and forwards what it prints, and the only thing it ever writes to the poller is
+the line `attention on` or `attention off`. The register whitelist, the
+controller and `schema_version` are unchanged. See
+[hub-protocol.md](hub-protocol.md) for the wire format.
+
+A client holding the token can change the controller settings and sign the hub
+in to Hypervolt and Octopus (see "Changing settings from an app" below). The
+hub applies those by restarting its poller with new arguments, never by talking
+to the inverter itself. That makes the token an administrator credential: anyone
+who has it can turn control off or change its limits, so keep it as you would a
+password, and give a viewer you do not trust nothing at all.
 
 ## The single-controller rule
 
@@ -104,6 +109,38 @@ that `solis-poll` can be found, then exits. The hub looks for `solis-poll` besid
 its own executable, then on `PATH`; set `SOLIS_POLL_PATH` to use a specific
 binary. It runs the poller with the state directory as its working directory, so
 a relative `--csv` or `--jsonl` path lands inside it.
+
+### Changing settings from an app
+
+The menu bar's Hub settings show the controller settings the hub is running and
+let you edit them, and sign the hub in to Hypervolt and Octopus. The settings are
+exactly those the menu bar edits in Direct mode: control on or off, import and
+export regulation, the voltage band, headroom and limits, steps and delays, the
+Hypervolt priority and the Octopus charge windows. The logger address, polling
+intervals and file paths are not among them; those stay in `hub.json`.
+
+- **Where they are kept.** The first time an app applies settings, the hub writes
+  them to `control-settings.json` in its state directory (0600; `/etc` is
+  read-only to the service). From then on they replace the matching control
+  flags in `poller_args`, and the rest of `poller_args` is used as before.
+  `solis-hub check` says when that file is in use. Delete it and restart the hub
+  to go back to `hub.json` alone.
+- **How a change is applied.** The hub checks the whole set with `solis-poll`'s
+  own validation and refuses anything the poller would refuse at start, with the
+  poller's reason. Export regulation is refused unless the installation-validation
+  record for the logger is in the state directory. An accepted change that differs
+  from what is running restarts the poller: it gets SIGTERM, restores the
+  inverter's limits and exits, and only then does the new one start. Control
+  pauses for those few seconds. The app asks before it applies anything.
+- **Signing in.** The Hypervolt password or Octopus API key goes to the hub once,
+  in the request body, and the hub hands it on stdin to `hypervolt-login` or
+  `octopus-login`, the same commands you would run on the Pi. Only what those
+  commands save is kept: a Hypervolt refresh token, or the Octopus key with its
+  account and device. The answer to the app says which account or charger is
+  signed in, never the key or token. If that feature is on, the poller restarts
+  to use the new credentials.
+- **Over the LAN** the request is plain HTTP, like the token itself; through the
+  Cloudflare Tunnel it is HTTPS.
 
 ### Push notifications (ntfy)
 
@@ -207,8 +244,8 @@ curl -s -H "Authorization: Bearer $(sudo -u solis env XDG_STATE_HOME=/var/lib /o
   http://localhost:8765/v1/status
 ```
 
-Credentials for Hypervolt and Octopus stay on the Pi, written by the existing
-commands run there as the `solis` user:
+Credentials for Hypervolt and Octopus stay on the Pi. Sign in from the menu
+bar's Hub settings, or run the existing commands there as the `solis` user:
 
 ```sh
 sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/hypervolt-login \
@@ -220,7 +257,8 @@ sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/octopus-login \
 `--credentials` is the path of the file to write. The password or API key is
 typed at the prompt that follows, never on the command line, where it would be
 saved in your shell history. Both commands refuse an argument that looks like a
-key or token. The hub never reads, returns or relays those credentials.
+key or token. The hub reads only the non-secret account fields of those files,
+to show who is signed in, and never returns or logs a key or token.
 
 ### Without a Pi: `make hub-demo`
 
@@ -283,10 +321,11 @@ Control state is scoped to the logger endpoint, so the order matters.
 1. On the Mac, disable control and choose Save and connect, then quit the
    menu-bar app normally. Confirm the baseline was restored and the journal is
    clean (no pending restoration message).
-2. Write the control flags the Mac app was using (thresholds, margins, steps,
-   `--dynamic-import-control`, the EV and Octopus flags) into `poller_args` on
-   the Pi. The Mac's control settings are not read by the hub, and Hub mode
-   shows them read-only, so this step is what keeps control behaving the same.
+2. Decide how the Pi gets the control settings the Mac app was using. Either
+   write the flags (thresholds, margins, steps, `--dynamic-import-control`, the
+   EV and Octopus flags) into `poller_args`, or leave control flags out of
+   `poller_args`, so the hub starts with control off, and set them from the menu
+   bar's Hub settings in step 6. The hub never reads the Mac's own settings.
 3. Copy the export-control validation record, if one exists, to the Pi's state
    directory. It is `export-control-validation-<24 hex>.json` in the Mac's
    `~/Library/Application Support/SolisTools`; put it in `/var/lib/solis-tools`
@@ -297,11 +336,14 @@ Control state is scoped to the logger endpoint, so the order matters.
 4. Do not copy the control journal. A clean shutdown makes it unnecessary, and
    an unclean one must be recovered on the Mac first, following the README
    precautions.
-5. Run `hypervolt-login` and `octopus-login` on the Pi if you use those
-   features, with the commands and `--credentials` paths shown under
-   "Installing on a Raspberry Pi".
+5. If you use Hypervolt or Octopus, sign the hub in: from the menu bar's Hub
+   settings once it is connected, or with `hypervolt-login` and `octopus-login`
+   on the Pi, using the commands and `--credentials` paths shown under
+   "Installing on a Raspberry Pi". Do this before turning those features on, or
+   the poller stops at start for want of credentials.
 6. Start `solis-hub`, confirm `/v1/status` shows the poller `running`, then
-   switch the menu bar to Hub mode.
+   switch the menu bar to Hub mode and check, or set, the control settings in
+   its Hub settings.
 
 Reverse migration is the same steps the other way. The hub-detected guard stops
 the Mac reconnecting directly while the hub is still advertising, so stop the

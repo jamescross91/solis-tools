@@ -50,6 +50,7 @@ struct DashboardView: View {
     @StateObject private var hypervoltLogin = HypervoltLoginRunner()
     @StateObject private var octopusLogin = OctopusLoginRunner()
     @StateObject private var hubSettings = HubSettingsModel()
+    @StateObject private var hubControl = HubControlModel()
 
     @State private var showingSettings = false
     /// The mode chosen in the settings form. The active mode only changes when
@@ -702,22 +703,14 @@ struct DashboardView: View {
         }
     }
 
-    /// Hub mode: where the hub is, and the controller settings it is running,
-    /// shown read-only. Display preferences stay editable.
+    /// Hub mode: where the hub is, then the controller settings and service
+    /// sign-ins the hub runs, edited on the hub itself. Display preferences
+    /// are this Mac's own.
     private var hubSettingsForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             HubSettingsSection(model: hubSettings)
             Divider()
-            HubControlSummary(configuration: monitor.latest?.voltageControl?.configuration)
-            Divider()
-            Text("Hypervolt and Octopus")
-                .font(.headline)
-            Text(
-                "Sign in on the hub: run hypervolt-login and octopus-login there. The hub keeps "
-                    + "those credentials; this app never sees them."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            HubControlSettingsSection(model: hubControl, hubSettings: hubSettings)
             Divider()
             Text("Display")
                 .font(.headline)
@@ -888,7 +881,7 @@ struct DashboardView: View {
             }
             .disabled(!dynamicVoltageEnabled || !hypervoltEnabled)
             if isHubMode {
-                Text("While a hub is the controller, sign in to Hypervolt on the hub with hypervolt-login.")
+                Text("While a hub is the controller, sign in to Hypervolt on the hub from the Hub settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -913,7 +906,7 @@ struct DashboardView: View {
             }
             .disabled(!dynamicVoltageEnabled || !octopusEnabled)
             if isHubMode {
-                Text("While a hub is the controller, sign in to Octopus on the hub with octopus-login.")
+                Text("While a hub is the controller, sign in to Octopus on the hub from the Hub settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

@@ -2,11 +2,15 @@ import Foundation
 
 public enum HubHTTPError: Error, Equatable, LocalizedError {
     case status(Int)
+    /// The hub refused the request and said why, as `{"error": "..."}`.
+    case rejected(status: Int, message: String)
     case invalidResponse
     case decoding
 
     public var errorDescription: String? {
         switch self {
+        case let .rejected(_, message):
+            return message
         case let .status(code) where code == 401 || code == 403:
             return "The hub rejected the access token or Cloudflare Access credentials."
         case .status(429):
@@ -73,8 +77,45 @@ struct HubRESTCore: Sendable {
         for (name, value) in auth.headers(for: endpoint.kind) {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        return try await perform(request, as: type)
+    }
+
+    /// A PUT or POST with a JSON body, for the settings and sign-in calls.
+    func send<T: Decodable>(
+        _ method: String,
+        _ path: String,
+        body: some Encodable,
+        as type: T.Type
+    ) async throws -> T {
+        var request = URLRequest(url: endpoint.httpURL(path: path))
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (name, value) in auth.headers(for: endpoint.kind) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        request.httpBody = try encoder.encode(body)
+        return try await perform(request, as: type)
+    }
+
+    private struct Refusal: Decodable {
+        let error: String
+    }
+
+    private func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
         let (data, response) = try await transport.fetch(request)
-        guard response.statusCode == 200 else { throw HubHTTPError.status(response.statusCode) }
+        guard response.statusCode == 200 else {
+            // The hub explains a refused change; 401 and 429 carry no body and
+            // keep their generic descriptions.
+            if let refusal = try? JSONDecoder().decode(Refusal.self, from: data) {
+                throw HubHTTPError.rejected(status: response.statusCode, message: refusal.error)
+            }
+            throw HubHTTPError.status(response.statusCode)
+        }
         do {
             return try StreamDecoder.makeJSONDecoder().decode(type, from: data)
         } catch {

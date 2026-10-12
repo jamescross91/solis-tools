@@ -69,8 +69,9 @@ clamped to `--ev-minimum-current`/`--ev-maximum-current` within Hypervolt's
 own 6–32 A hardware range) and a pause. Only ever persist a Hypervolt refresh
 token, at 0600 permissions, never the account password; the password is used
 exactly once, in `hypervolt_login.py` (installed as `hypervolt-login`), either
-typed at a terminal prompt or entered into the menu bar app's own sign-in
-form, which drives that same command as a subprocess. A stale or unreachable
+typed at a terminal prompt or entered into a sign-in form: the menu bar's own in
+Direct mode, or the hub's in Hub mode. Both drive that same command as a
+subprocess with the password on stdin, never as an argument. A stale or unreachable
 Hypervolt connection must read as "the car is not charging", never be guessed
 as charging — see `HypervoltState.is_charging()` — and a failed Hypervolt
 command must fall back to the controller's original decision so Solis-side
@@ -81,7 +82,8 @@ docs/hypervolt-integration.md.
 never add an operation that starts, stops or reschedules a charge. A charge
 window may only narrow the voltage band, never widen it, and every failure
 rule keeps the band narrow for longer rather than relaxing it early. The API
-key is stored only by `octopus_login.py`, at 0600, and every value embedded in
+key is stored only by `octopus_login.py` (which the menu bar and the hub run as a
+subprocess, key on stdin), at 0600, and every value embedded in
 a query must pass its format check first. The HTTP call blocks, so it stays on
 `OctopusScheduleMonitor`'s thread; the control loop reads snapshots only.
 
@@ -92,15 +94,21 @@ local poller, even when the hub is unreachable; there is no automatic fallback
 from Hub to Direct; and in Direct mode a Bonjour-detected `_solis-hub._tcp`
 service blocks the local poller until the user decides. See docs/hub.md.
 
-**The hub has no dependency and no write path.** `solis_hub.py` is standard
-library only (its WebSocket server is hand-rolled, as in `hypervolt_client.py`),
-never speaks Modbus, and passes the poller only `attention on` or `attention
-off`. It forwards stream envelopes byte for byte and must not change the stream
-or `schema_version`. It exposes no control or settings command: control
-settings live in the hub's config file. It never reads or relays Hypervolt or
-Octopus credentials, and never logs a token, Authorization header or Cloudflare
-secret. `hub_protocol_version` follows the same additive-only rule as the
-stream; the wire format is in docs/hub-protocol.md.
+**The hub has no dependency and changes control only through the poller.**
+`solis_hub.py` is standard library only (its WebSocket server is hand-rolled, as
+in `hypervolt_client.py`), never speaks Modbus, and writes the poller only
+`attention on` or `attention off`. It forwards stream envelopes byte for byte
+and must not change the stream or `schema_version`. A client with the token may
+replace the controller settings in `CONTROL_SETTINGS` and sign the hub in to
+Hypervolt and Octopus; the hub applies either by restarting the poller with new
+arguments, after checking them with `solis_poll.check_arguments`. Keep that
+list to controller tuning: never let a client set the logger address, a file
+path or any option outside it, and never start a new poller before the old one
+has exited. Secrets reach the hub in a request body and leave it only on a
+login command's stdin; responses carry an account number or charger ID, never a
+key or token. Never log a token, Authorization header, Cloudflare secret,
+password or API key. `hub_protocol_version` follows the same additive-only rule
+as the stream; the wire format is in docs/hub-protocol.md.
 
 **British spelling**, in prose and in identifiers: `--no-colour`, `Palette`,
 `colour`, `analyse`. American spelling in a diff is a review comment.
