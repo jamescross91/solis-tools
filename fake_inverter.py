@@ -17,6 +17,7 @@ It can also inject the faults that are otherwise impossible to reproduce:
 ``--corrupt-after`` starts returning a nonsense battery-power register,
 ``--drop-after`` closes the connection, so the reconnect path can be tested, and
 ``--max-read`` refuses wide block reads the way a limited logger would.
+``--grid-charging`` puts the bank in the state the voltage controller acts on.
 """
 
 from __future__ import annotations
@@ -247,11 +248,23 @@ def main() -> int:
         action="store_true",
         help="report the string-inverter family in register 35000",
     )
+    parser.add_argument(
+        "--grid-charging",
+        action="store_true",
+        help="battery charging from a 2 kW grid import at 230 V, so dynamic voltage "
+        "control has something to regulate",
+    )
     arguments = parser.parse_args()
 
     bank = hybrid_bank()
     if arguments.string_inverter:
         bank[35000] = 0x1001
+    if arguments.grid_charging:
+        bank[33135] = 0  # charging
+        bank[33251] = 2300
+        bank[33263] = 0xFFFF
+        bank[33264] = 0xF830  # -2.0 kW import
+        bank[43488] = 100
     inverter = FakeInverter(
         bank,
         port=arguments.port,

@@ -13,7 +13,18 @@ solis-poll --host 192.168.1.57 --stream-json
 ```
 
 Produced by `stream_payload` in `solis_poll.py`; consumed by `StreamDecoder` and
-the types in `SolisMenuBar/Sources/SolisMenuBar/Models.swift`.
+the types in `SolisHubKit/Sources/SolisHubKit/StreamModels.swift`, which the
+menu bar and the iOS app share.
+
+The menu-bar app is not the only consumer. `solis-hub` is a second one: it
+reads this stream from a poller child on a Raspberry Pi and forwards each
+envelope unchanged, byte for byte, inside its own message wrapper (see
+[hub-protocol.md](hub-protocol.md)). It parses a line only to cache the fields
+that are sent once or on change, and never renames, removes or adds a field to
+a `sample`, so the rules below bind it exactly as they bind the app, and `schema_version`
+stays 2. A consumer that keeps the last `configuration`, `recent_events` or
+`octopus_schedule` it received must do so whether it reads this stream directly
+or a hub's `snapshot` messages, which carry those fields already merged.
 
 ## Shape
 
@@ -179,7 +190,7 @@ message rather than silently mis-rendering.
 
 When you bump it, change the constant in both places:
 `STREAM_SCHEMA_VERSION` in `solis_poll.py`, and
-`StreamDecoder.supportedSchemaVersion` in `Models.swift`.
+`StreamDecoder.supportedSchemaVersion` in `StreamModels.swift`.
 
 | Version | Change |
 | --- | --- |
@@ -187,10 +198,10 @@ When you bump it, change the constant in both places:
 | 2 | `cadence` added; `voltage_control.configuration` sent in the first sample only; `voltage_control.recent_events` sent only when changed |
 
 Every field is pinned in
-`SolisMenuBar/Tests/SolisMenuBarTests/StreamContractTests.swift`, including a
+`SolisHubKit/Tests/SolisHubKitTests/StreamContractTests.swift`, including a
 case asserting that an older poller without `rejected_samples` still decodes.
-Add to those tests in the same change; `swift test` runs them, and CI runs
-`swift test` on macOS.
+Add to those tests in the same change; `make swift` runs them with the menu
+bar's tests, and CI runs both packages on macOS.
 
 ## Consuming it from a script
 

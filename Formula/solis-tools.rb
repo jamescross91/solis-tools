@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.2/solis-tools-0.6.2.tar.gz"
-  sha256 "3b1481253cdba848e3dd7fdfd664d7ff80e215773df2ebd0bbd60f1eb07dc8e1"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.7.0/solis-tools-0.7.0.tar.gz"
+  sha256 "fe5fa98bc4b7ad866ef6b5adfee0763cccaa75e23d1041da077b575ea604965a"
   license "GPL-3.0-only"
 
   # `brew install --HEAD solis-tools` builds the current main branch, so a change
@@ -50,6 +50,7 @@ class SolisTools < Formula
     assert_match(/solis-poll #{version_pattern}/, shell_output("#{bin}/solis-poll --version"))
     assert_match "--host HOST", shell_output("#{bin}/solis-poll --help")
     assert_match "--credentials", shell_output("#{bin}/hypervolt-login --help")
+    assert_match(/solis-hub #{version_pattern}/, shell_output("#{bin}/solis-hub --version"))
     return unless OS.mac?
 
     assert_path_exists prefix/"SolisMenuBar.app/Contents/Info.plist"

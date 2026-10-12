@@ -32,7 +32,12 @@ the reviewed checksum. Never reuse a published version.
 
 ## 2. Review and merge once
 
-Run `make` (and `make swift` with full Xcode) before pushing. CI also:
+Run `make` and `make swift` with full Xcode. If the release touches the hub or
+`deploy/pi/`, also run `deploy/pi/install.sh` twice on a fresh Raspberry Pi OS
+Lite image (docs/hub.md, "Manual check of install.sh") and note the result in
+the PR; CI cannot run it. The source archive includes `deploy/` and
+`SolisHubKit/`, and the root `Package.swift` is what the iOS app resolves.
+CI also:
 
 - checks that version, changelog and source digest agree;
 - installs the exact candidate source archive with Homebrew on macOS and Linux.

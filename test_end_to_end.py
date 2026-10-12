@@ -188,6 +188,60 @@ class StreamContractTests(unittest.TestCase):
         self.assertEqual(values["grid_voltage_v"], "242.7")
         self.assertEqual(values["meter_voltage_v"], "242.5")
 
+    def test_sigterm_restores_the_baseline_before_the_poller_exits(self):
+        """systemd stops the hub's child with SIGTERM, not Ctrl-C.
+
+        It must take the same orderly path as SIGINT: restore the inverter's own
+        import limit, then exit, never leaving a reduced limit behind.
+        """
+        import signal
+        import tempfile
+
+        bank = hybrid_bank()
+        bank[33135] = 0  # charging
+        bank[33251] = 2300
+        bank[33263] = 0xFFFF
+        bank[33264] = 0xF830  # -2.0 kW import
+        bank[43488] = 100
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter:
+                process = start_stream(
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(inverter.port),
+                    "--interval",
+                    "0.05",
+                    "--slow-interval",
+                    "30",
+                    "--dynamic-voltage-control",
+                    "--control-activation-delay",
+                    "0.1",
+                    "--control-settle-time",
+                    "0.1",
+                    "--control-journal",
+                    str(Path(directory) / "journal.json"),
+                    "--voltage-history-db",
+                    str(Path(directory) / "history.sqlite3"),
+                )
+                try:
+                    assert process.stdout is not None
+                    deadline = time.monotonic() + TIMEOUT
+                    while (43488, 40) not in inverter.writes and time.monotonic() < deadline:
+                        self.assertTrue(process.stdout.readline())
+                    self.assertIn((43488, 40), inverter.writes)
+                    self.assertNotEqual(inverter.bank[43488], 100)
+                    process.send_signal(signal.SIGTERM)
+                    code = process.wait(timeout=TIMEOUT)
+                finally:
+                    stop(process)
+                restored = inverter.bank[43488]
+                last_write = inverter.writes[-1]
+
+        self.assertEqual(code, 130)
+        self.assertEqual(restored, 100)
+        self.assertEqual(last_write, (43488, 100))
+
     def test_dynamic_import_uses_one_session_and_restores_its_baseline(self):
         import tempfile
 

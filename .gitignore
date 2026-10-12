@@ -5,6 +5,7 @@ build/
 *.egg-info/
 .build/
 SolisMenuBar/.swiftpm/
+SolisHubKit/.swiftpm/
 .mypy_cache/
 .ruff_cache/
 dist/

@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output from `solis-poll --version` or `solis-menubar --version`.
+      description: Output from `solis-poll --version`, `solis-menubar --version` or `solis-hub --version`.
       placeholder: solis-poll 0.2.0
     validations:
       required: true
@@ -23,6 +23,7 @@ body:
       options:
         - Terminal monitor
         - macOS menu-bar app
+        - Always-on hub (solis-hub)
         - Homebrew installation
         - Register decoding
         - Other

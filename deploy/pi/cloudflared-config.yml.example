@@ -1,0 +1,11 @@
+# Cloudflare Tunnel for the Solis hub. See docs/hub-remote-access.md.
+#
+# cloudflared dials out from the Pi, so no router port is opened. WebSocket
+# upgrades pass through by default; do not enable any response buffering.
+tunnel: <TUNNEL-UUID>
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: energy.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404
