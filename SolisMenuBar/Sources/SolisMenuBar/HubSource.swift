@@ -11,6 +11,9 @@ final class HubSource: TelemetrySource {
 
     private let continuation: AsyncStream<TelemetryEvent>.Continuation
     private let settings: HubSourceSettings
+    /// Starts as saved and grows as the hub says where it is.
+    private var connection: HubConnectionSettings
+    private var network: HubNetworkState?
     private var client: HubClient?
     private var resolver: HubEndpointResolver?
     private var clientTask: Task<Void, Never>?
@@ -24,6 +27,7 @@ final class HubSource: TelemetrySource {
         events = stream
         self.continuation = continuation
         self.settings = settings
+        connection = settings.connection
     }
 
     func start() {
@@ -43,16 +47,11 @@ final class HubSource: TelemetrySource {
         }
 
         let updates = resolver.updates
-        let connection = settings.connection
-        resolverTask = Task {
+        resolverTask = Task { [weak self] in
             var pathRevision = 0
             for await network in updates {
-                let candidates = HubEndpointSelector.candidates(
-                    settings: connection,
-                    discovered: network.discovered,
-                    pathSatisfied: network.pathSatisfied
-                )
-                await client.updateEndpoints(candidates)
+                self?.network = network
+                await self?.refreshEndpoints()
                 // Leaving or reaching home can change nothing in the candidate
                 // list, so the client is told directly to start over.
                 if network.pathRevision != pathRevision {
@@ -84,6 +83,33 @@ final class HubSource: TelemetrySource {
         return true
     }
 
+    private func refreshEndpoints() async {
+        guard let client, let network else { return }
+        let candidates = HubEndpointSelector.candidates(
+            settings: connection,
+            discovered: network.discovered,
+            pathSatisfied: network.pathSatisfied
+        )
+        await client.updateEndpoints(candidates)
+    }
+
+    /// What the hub says about itself on an authenticated connection: its ID,
+    /// so its Bonjour advertisement is tried first at home, and where it is
+    /// away. Saved for next time, and used at once: a Mac that connected
+    /// through the public address while at home moves to the LAN as soon as
+    /// the hub there has proved itself.
+    private func learn(from hello: HubHello) {
+        HubSettingsStore.learn(hubID: hello.hubId, publicURL: hello.publicUrl)
+        var updated = connection
+        updated.preferredHubID = hello.hubId.isEmpty ? connection.preferredHubID : hello.hubId
+        if let url = hello.publicUrl.flatMap(HubURLInput.remote) {
+            updated.learnedRemoteURL = url
+        }
+        guard updated != connection else { return }
+        connection = updated
+        Task { await refreshEndpoints() }
+    }
+
     func setAttention(_ visible: Bool) {
         attention = visible
         client?.setAttention(visible)
@@ -100,6 +126,7 @@ final class HubSource: TelemetrySource {
         case let .hello(hello):
             link.hubVersion = hello.hubVersion
             link.hubID = hello.hubId
+            learn(from: hello)
             continuation.yield(.hubLink(link))
             if let poller = hello.poller {
                 apply(poller)

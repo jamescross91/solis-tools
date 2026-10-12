@@ -190,6 +190,7 @@ class RemoteAccessTests(unittest.TestCase):
             self.skipTest("bash is not available")
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory)
+        self.last_directory = directory
         log = directory / "calls.log"
         (directory / "status.json").write_text(json.dumps(status or {"BackendState": "NeedsLogin"}))
         (directory / "serve.json").write_text(json.dumps(serve or {}))
@@ -234,6 +235,7 @@ class RemoteAccessTests(unittest.TestCase):
                 "PATH": str(directory),
                 "SOLIS_OS_RELEASE": str(directory / "os-release"),
                 "SOLIS_JSON_PYTHON": sys.executable,
+                "SOLIS_STATE_DIR": str(directory),
             },
             capture_output=True,
             text=True,
@@ -250,6 +252,14 @@ class RemoteAccessTests(unittest.TestCase):
         self.assertIn("systemctl enable --now tailscaled.service", calls)
         self.assertIn("Remote address: https://raspberrypi.tail1234.ts.net", result.stdout)
         self.assertIn("Disable key expiry", result.stdout)
+        self.assertEqual(
+            (Path(self.last_directory) / "public-url").read_text(),
+            "https://raspberrypi.tail1234.ts.net\n",
+        )
+        self.assertEqual(
+            solis_hub.parse_public_url((Path(self.last_directory) / "public-url").read_text()),
+            "https://raspberrypi.tail1234.ts.net",
+        )
 
     def test_running_again_changes_nothing(self):
         result, calls = self.run_script(RUNNING, published(8765))

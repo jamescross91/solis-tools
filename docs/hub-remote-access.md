@@ -28,9 +28,11 @@ Then:
 - In the Tailscale admin console's Machines page, choose **Disable key expiry**
   for the Pi. Otherwise the Pi's key expires after some months and remote access
   stops while you are away.
-- Enter the address as the Remote URL in the menu bar's Hub settings, leave the
-  Cloudflare fields empty, and use Test connection. Public DNS can take up to
-  ten minutes to list a new address.
+- Nothing to type on a Mac that already connects at home: the hub tells the app
+  this address (`public_url`) and the app uses it whenever the hub is not on the
+  local network. On a new device, enter the address (or the hub's LAN address)
+  and the token; the app learns the rest. Public DNS can take up to ten minutes
+  to list a new address.
 
 Funnel is public: anyone can reach the address, and only the hub token stands
 in front of the hub. Requests arrive from `tailscaled` on loopback with the
@@ -111,11 +113,16 @@ without a token.
 
 ## How the clients choose
 
-Clients try the LAN endpoint first (the Bonjour result or the manual LAN URL)
-with a 2 second connect timeout, then the remote URL. They re-evaluate when the
-network path changes, so leaving the house moves the connection to the tunnel
-without any action. The "Test connection" button in the menu-bar app shows
-which endpoint answered. Remote connections are always `wss://`.
+The person gives one address, usually the public https one. On the first
+connection the hub tells the client its `hub_id` and `public_url`, and the
+client keeps both. From then on it tries, in order: the hub's own Bonjour
+advertisement, once that address has proved with `/v1/identity` that it holds the
+token; a LAN address from Advanced, if one was given; the address the person
+gave; and the hub's `public_url`. The LAN has a 2 second connect timeout. Clients
+re-evaluate when the network path changes, so arriving home moves the
+connection to the LAN and leaving moves it to the public address, without any
+action. The "Test connection" button in the menu-bar app shows which endpoint
+answered. Remote connections are always `wss://`.
 
 ## Things to check when it does not work
 

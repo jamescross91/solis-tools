@@ -18,6 +18,19 @@ versioning](https://semver.org/spec/v2.0.0.html).
   script can be run again on its own. Cloudflare Tunnel remains documented as
   the alternative.
 
+- One hub address is enough. The hub tells connected apps its public address
+  (`public_url` in `hello` and `/v1/status`, recorded by `remote-access.sh` or
+  set in `hub.json`) and its ID, and the menu bar keeps both: at home it uses the
+  hub's Bonjour advertisement over the LAN, away it uses the public address, and
+  it moves between them by itself. Its Hub settings now take a single Address
+  (the https address, or a LAN one), with a LAN address and the Cloudflare pair
+  under Advanced, and show where it will connect at home and away. Existing
+  two-address settings keep working and become one on the next save.
+- `GET /v1/identity`: a hub found by Bonjour proves it holds the token, with an
+  HMAC over a fresh nonce, before any client sends it the token. A device that
+  merely advertises the hub's ID gets nothing. SolisHubKit checks this for the
+  stream, settings and Test connection.
+
 ### Security
 
 - The hub's failed-authentication limit now takes the visitor's address from

@@ -131,6 +131,7 @@ public struct HubStatus: Decodable, Sendable, Equatable {
     public let poller: HubPollerStatus
     public let clients: Int
     public let envelopeAgeS: Double?
+    public let publicUrl: String?
 }
 
 /// GET /v1/status: cheap, authenticated, and independent of the WebSocket,
@@ -189,6 +190,10 @@ public enum HubConnectionTester {
                 timeout: configuration.connectTimeout(for: endpoint.kind)
             )
             do {
+                try await HubIdentity.verifyIfNeeded(
+                    endpoint, auth: auth, transport: transport,
+                    timeout: configuration.connectTimeout(for: endpoint.kind)
+                )
                 return HubConnectionTestResult(endpoint: endpoint, status: try await client.status())
             } catch {
                 attempts.append((endpoint, error.localizedDescription))

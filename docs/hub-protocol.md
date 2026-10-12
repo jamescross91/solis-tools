@@ -72,7 +72,7 @@ The server implements the part of RFC 6455 it needs and nothing else.
 
 | Type | When | Fields |
 | --- | --- | --- |
-| `hello` | Once, straight after the upgrade | `hub_protocol_version`, `hub_version`, `stream_schema_version`, `hub_id` (stable UUID), `poller` |
+| `hello` | Once, straight after the upgrade | `hub_protocol_version`, `hub_version`, `stream_schema_version`, `hub_id` (stable UUID), `public_url` (https origin or null), `poller` |
 | `snapshot` | After `hello`, after a lag overflow, after a poller restart | `envelope`: the merged envelope, or null before the first sample; `poller` |
 | `sample` | Every envelope from the poller | `envelope`, forwarded unchanged |
 | `poller_status` | On any supervisor state change | `state`, `since`, `restarts`, `last_exit_code`, `next_attempt_at` |
@@ -130,6 +130,7 @@ poller beyond those two fixed strings.
 | Method and path | Returns |
 | --- | --- |
 | `GET /v1/healthz` | `{"ok": true}` and nothing else. No token. For Cloudflare and systemd checks |
+| `GET /v1/identity?nonce=HEX` | `{"hub_id", "proof"}`. No token. `proof` is hex HMAC-SHA256 keyed by the token over `solis-hub-identity:` followed by the nonce (32 to 128 lowercase hex digits; anything else is 400) |
 | `GET /v1/status` | `hub_version`, `hub_protocol_version`, `hub_id`, `poller`, `clients`, `envelope_age_s` (null before the first sample) |
 | `GET /v1/history/samples?since=ISO&resolution=native\|compact` | Array of stored history entries after `since`; gzip when the client accepts it |
 | `GET /v1/history/control?since=ISO&kind=minutes\|events` | Rows from the poller's `voltage-history.sqlite3`, opened read-only, as objects keyed by column name |
@@ -199,6 +200,20 @@ left out of the poller's arguments (`solis-poll` refuses them without control)
 but kept as saved, so turning control off always works and turning it back on
 restores them. `restarted` is true when the change differs
 from what was running and the poller is being restarted with it.
+
+`/v1/status` also carries `public_url`, as in `hello`.
+
+### Finding the hub at home: `/v1/identity`
+
+A client knows its hub by `hub_id`, learned from `hello`, and finds it on the LAN
+by the `hub_id` in the Bonjour TXT record. Anything on the network can
+advertise that, and the LAN path is plain HTTP, so before sending the token to
+an address found by Bonjour a client sends a fresh random nonce to
+`/v1/identity` and checks the proof with its own copy of the token. Only a hub
+that already holds the token can answer; the request carries nothing secret,
+and failed answers are not counted against the rate limit. Addresses the person
+typed, and the https public address, are not checked this way: the person chose
+the first, and TLS identifies the second.
 
 `hypervolt` and `octopus` never carry a password, key or token. Secrets in a
 sign-in body must not contain control characters, and are passed to the login

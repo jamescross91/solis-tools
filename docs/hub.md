@@ -92,6 +92,7 @@ at `/etc/solis-tools/hub.json`. Unknown keys are an error, not ignored.
 | `history_compact_hours` | `24` | One sample per 30 s kept for this long (1 to 336) |
 | `max_clients` | `32` | WebSocket connection cap (1 to 1024) |
 | `ntfy` | `null` | Push notifications, below |
+| `public_url` | `null` | The https address clients should use away from home, told to them in `hello` and `/v1/status`. Leave it `null` with Tailscale Funnel: `remote-access.sh` records the Funnel address in the state directory (`public-url`) and the hub reads it from there. Set it for a Cloudflare hostname |
 
 `poller_args` rules: the hub adds `--stream-json` itself and refuses arguments
 containing it or `--once` (including abbreviations argparse would accept), and
@@ -302,8 +303,11 @@ journal, when control is on.
 
 The menu-bar app now declares `_solis-hub._tcp` in its Info.plist so it can find
 a hub by Bonjour, and allows local-network `ws://` connections (the LAN path is
-plain WebSocket; remote is always `wss://`). A found hub is only used once you
-choose it in the hub settings. macOS may ask once for local network access the first time the
+plain WebSocket; remote is always `wss://`). A found hub is used only when it is
+the app's own hub, chosen in the hub settings or learned from the hub on an
+earlier connection, and only after it answers `/v1/identity` with proof that it
+holds the token, so a device that merely advertises a hub never receives it.
+macOS may ask once for local network access the first time the
 upgraded app starts. In Hub mode the token and any Cloudflare Access credentials
 are kept in the Keychain; after a Homebrew upgrade the ad-hoc-signed app can
 trigger a Keychain "Always Allow" prompt again. In Direct mode nothing reads the

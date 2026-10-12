@@ -13,6 +13,7 @@ port="${1:-8765}"
 # The variables below exist so the tests can stand in for the system; nothing
 # else should need them.
 os_release="${SOLIS_OS_RELEASE:-/etc/os-release}"
+state="${SOLIS_STATE_DIR:-/var/lib/solis-tools}"
 python="${SOLIS_JSON_PYTHON:-/opt/solis-tools/bin/python}"
 [[ -x "$python" ]] || python="$(command -v python3)"
 
@@ -105,9 +106,15 @@ name="$(status_field Self.DNSName)"
 name="${name%.}"
 echo
 if [[ -n "$name" ]]; then
+  # The hub tells connected apps this address, so they use it away from home
+  # without anyone typing it. Readable by the hub's own user; not a secret.
+  if [[ -d "$state" ]]; then
+    (umask 022 && printf 'https://%s\n' "$name" >"$state/public-url")
+  fi
   echo "Remote address: https://$name"
-  echo "Enter it as the Remote URL in the menu bar's Hub settings. Leave the Cloudflare"
-  echo "fields empty. It can take up to ten minutes to appear in public DNS the first time."
+  echo "Apps that have connected to the hub at home pick this up by themselves. On a"
+  echo "new device, enter it as the hub address with the token. It can take up to ten"
+  echo "minutes to appear in public DNS the first time."
 else
   echo "Funnel is on; run 'tailscale funnel status' to see the address."
 fi
