@@ -3,6 +3,19 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `docs/hub.md` showed `hypervolt-login` and `octopus-login` on the Raspberry Pi
+  with no arguments, but both require `--credentials PATH`. The examples now pass
+  `/var/lib/solis-tools/hypervolt.json` and `octopus.json`, and say that secrets
+  are typed at the prompt, never on the command line.
+- `octopus-login` and `hypervolt-login` now refuse a `--credentials` value that
+  looks like an Octopus API key (`sk_`) or a Hypervolt token (`eyJ`), without
+  repeating it. Passing a key there writes it into shell history. If you did,
+  regenerate the key on the Octopus dashboard.
+
 ## 0.7.0
 
 Adds the optional `solis-hub` and a Hub connection mode for the menu-bar app; Direct mode is unchanged by default. After upgrading, macOS may ask once for local network access (Bonjour discovery). Stop the running menu-bar app and poller before upgrading, and keep dynamic control off while testing an installation. Only one controller should run: before enabling the hub on a Raspberry Pi, turn control off on the Mac (see `docs/hub.md`).

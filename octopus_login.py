@@ -29,12 +29,27 @@ from pathlib import Path
 from octopus_client import OctopusClient, OctopusCredentials, OctopusError
 
 
+def credentials_path(value: str) -> Path:
+    # A live key pasted here is already in shell history by the time this runs,
+    # so refuse it and, deliberately, never echo the value back.
+    if value.startswith("sk_"):
+        raise argparse.ArgumentTypeError(
+            "this looks like an API key, not a file path. --credentials names the file to "
+            "write; the key is typed at the prompt and never goes on the command line. "
+            "If it was typed into a terminal, regenerate it on the Octopus dashboard"
+        )
+    return Path(value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--credentials", type=Path, required=True, help="where to write the API-key file"
+        "--credentials",
+        type=credentials_path,
+        required=True,
+        help="file path to write the API key to (the key itself is typed at the prompt)",
     )
     parser.add_argument("--account", help="account number, such as A-1234ABCD")
     parser.add_argument("--device", help="Intelligent Octopus device ID")
