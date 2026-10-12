@@ -9,7 +9,8 @@ You gain three things:
 - Voltage control keeps running with the Mac asleep or away.
 - The Mac and the phone see the same real-time data, including every voltage
   control movement.
-- Both work from outside the home through a Cloudflare Tunnel, with no VPN. See
+- Both work from outside the home through Tailscale Funnel, which the installer
+  sets up, with nothing installed on the phone or the Mac. See
   [hub-remote-access.md](hub-remote-access.md).
 
 Without a Pi nothing changes. The menu-bar app's default is Direct mode, which
@@ -24,7 +25,7 @@ runs `solis-poll` itself exactly as before. The hub runs on Linux and macOS
           │ one JSON object per sample    │
           ▼                               │
      solis-hub  (supervisor, state cache, fan-out)
-          │  ws:// on the LAN, wss:// through Cloudflare Tunnel
+          │  ws:// on the LAN, wss:// through Tailscale Funnel
      ┌────┴─────┐
   menu bar     iPhone  ...
   (Hub mode)
@@ -83,7 +84,7 @@ at `/etc/solis-tools/hub.json`. Unknown keys are an error, not ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens (port 0 to 65535). After changing `listen_port`, re-run `deploy/pi/install.sh` (it renders the Bonjour advertisement from this file) and update the Cloudflare route |
+| `listen_host`, `listen_port` | `0.0.0.0`, `8765` | Where the hub listens (port 0 to 65535). After changing `listen_port`, re-run `deploy/pi/install.sh` (it renders the Bonjour advertisement and points Funnel at the port from this file) |
 | `state_dir` | platform state directory | Where the token and hub ID live, and where `/v1/history/control` looks for `voltage-history.sqlite3`. `null` resolves like `solis-poll` does. The hub does not pass it to the poller, which keeps its own state directory (`$XDG_STATE_HOME/solis-tools`; the unit sets these to the same place). If you set `state_dir` elsewhere, also pass `--control-journal` and `--voltage-history-db` in `poller_args`. On a Pi leave it `null`: `install.sh` and the unit assume `/var/lib/solis-tools`. Relative `token_file` paths resolve against it |
 | `token_file` | `hub-token` in the state directory | Bearer token file. Must not be readable by group or others |
 | `poller_args` | required | Passed to `solis-poll` verbatim. Control flags go here |
@@ -188,6 +189,18 @@ installed from the checkout, the state directory `/var/lib/solis-tools` (0700),
 printed once), the systemd unit and the Avahi advertisement. On a first run it
 stops before starting the service so you can set the logger's address in
 `poller_args`; then `sudo systemctl start solis-hub`.
+
+Last, it sets up remote access with `deploy/pi/remote-access.sh`: it installs
+Tailscale from Tailscale's signed apt repository, signs the Pi in, and publishes
+the hub with Tailscale Funnel at `https://<pi>.<tailnet>.ts.net`. The first run
+prints two links to open in a browser: one to sign the Pi in to a (free)
+Tailscale account, one to approve Funnel for the tailnet. It then prints the
+address to enter as the Remote URL in the menu bar, and reminds you to turn off
+key expiry for the Pi. Running the installer again leaves a working setup alone.
+A problem here never fails the install, since the hub already works on the LAN;
+run `sudo deploy/pi/remote-access.sh` to try again, or pass `--no-remote` to
+skip it (for example to use Cloudflare instead, as hub-remote-access.md
+describes).
 
 The installer checks the Python version first, before it changes anything. On an
 image whose Python is older than 3.10 it stops with a message and leaves the

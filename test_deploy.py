@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ElementTree
@@ -157,6 +158,153 @@ class InstallerPythonTests(unittest.TestCase):
         self.assertIn('rm -rf "$prefix"', text)
         self.assertIn("pyvenv.cfg", text)
         self.assertNotIn("--quiet", text)
+
+
+RUNNING = {
+    "BackendState": "Running",
+    "Self": {"DNSName": "raspberrypi.tail1234.ts.net.", "KeyExpiry": "2027-04-01T00:00:00Z"},
+}
+
+
+def published(port: int, funnel: bool = True) -> dict:
+    host = "raspberrypi.tail1234.ts.net:443"
+    return {
+        "TCP": {"443": {"HTTPS": True}},
+        "Web": {host: {"Handlers": {"/": {"Proxy": f"http://127.0.0.1:{port}"}}}},
+        "AllowFunnel": {host: True} if funnel else {},
+    }
+
+
+class RemoteAccessTests(unittest.TestCase):
+    """remote-access.sh, run against stand-ins for tailscale, apt and systemd.
+
+    Every command it uses is a stand-in on PATH that records how it was called,
+    so nothing on the machine running the tests is touched.
+    """
+
+    def run_script(
+        self, status: dict | None, serve: dict | None = None, *, installed=True, distro="debian"
+    ):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not available")
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        log = directory / "calls.log"
+        (directory / "status.json").write_text(json.dumps(status or {"BackendState": "NeedsLogin"}))
+        (directory / "serve.json").write_text(json.dumps(serve or {}))
+        (directory / "running.json").write_text(json.dumps(RUNNING))
+        (directory / "os-release").write_text(f"ID={distro}\nVERSION_CODENAME=bookworm\n")
+        record = f'echo "${{0##*/}} $*" >> "{log}"\n'
+        stand_ins = {
+            "id": "#!/bin/sh\necho 0\n",
+            "systemctl": "#!/bin/sh\n" + record,
+            "apt-get": "#!/bin/sh\n" + record,
+            "curl": "#!/bin/sh\n" + record,
+            "install": "#!/bin/sh\n" + record,
+        }
+        cat, cp, chmod = (shutil.which(tool) for tool in ("cat", "cp", "chmod"))
+        tailscale = (
+            "#!/bin/sh\n"
+            + record
+            + 'case "$*" in\n'
+            + f'  "status --json") {cat} "{directory}/status.json" ;;\n'
+            + f'  "serve status --json") {cat} "{directory}/serve.json" ;;\n'
+            # Signing in is what moves the stand-in from NeedsLogin to Running.
+            + f'  up*) {cp} "{directory}/running.json" "{directory}/status.json" ;;\n'
+            + "esac\n"
+        )
+        if installed:
+            stand_ins["tailscale"] = tailscale
+        else:
+            # apt-get install puts tailscale on PATH, as the real one would.
+            stand_ins["apt-get"] = (
+                "#!/bin/sh\n"
+                + record
+                + f'case "$*" in *"install -y tailscale"*) printf %s \'{tailscale}\' > "{directory}/tailscale"; '
+                + f'{chmod} 755 "{directory}/tailscale" ;; esac\n'
+            )
+        for name, body in stand_ins.items():
+            path = directory / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+        result = subprocess.run(
+            [bash, str(PI / "remote-access.sh"), "8765"],
+            env={
+                "PATH": str(directory),
+                "SOLIS_OS_RELEASE": str(directory / "os-release"),
+                "SOLIS_JSON_PYTHON": sys.executable,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calls = log.read_text().splitlines() if log.exists() else []
+        return result, calls
+
+    def test_a_fresh_pi_is_signed_in_and_published(self):
+        result, calls = self.run_script({"BackendState": "NeedsLogin"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tailscale up", calls)
+        self.assertIn("tailscale funnel --bg 8765", calls)
+        self.assertIn("systemctl enable --now tailscaled.service", calls)
+        self.assertIn("Remote address: https://raspberrypi.tail1234.ts.net", result.stdout)
+        self.assertIn("Disable key expiry", result.stdout)
+
+    def test_running_again_changes_nothing(self):
+        result, calls = self.run_script(RUNNING, published(8765))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("tailscale up", calls)
+        self.assertFalse(any(call.startswith("tailscale funnel") for call in calls))
+        self.assertFalse(any(call.startswith(("apt-get", "curl")) for call in calls))
+        self.assertIn("Remote address: https://raspberrypi.tail1234.ts.net", result.stdout)
+
+    def test_a_published_but_private_hub_is_made_public(self):
+        _, calls = self.run_script(RUNNING, published(8765, funnel=False))
+        self.assertIn("tailscale funnel --bg 8765", calls)
+
+    def test_someone_elses_service_on_443_is_left_alone(self):
+        result, calls = self.run_script(RUNNING, published(3000))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already publishes something else", result.stderr)
+        self.assertFalse(any(call.startswith("tailscale funnel") for call in calls))
+
+    def test_tailscale_comes_from_its_signed_apt_repository(self):
+        result, calls = self.run_script({"BackendState": "NeedsLogin"}, installed=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg "
+            "-o /usr/share/keyrings/tailscale-archive-keyring.gpg",
+            calls,
+        )
+        self.assertIn("apt-get install -y tailscale", calls)
+        self.assertIn("tailscale funnel --bg 8765", calls)
+        # Never a downloaded script piped into a shell.
+        self.assertNotIn("install.sh", " ".join(calls))
+
+    def test_a_system_without_a_package_source_stops_with_instructions(self):
+        result, calls = self.run_script(
+            {"BackendState": "NeedsLogin"}, installed=False, distro="fedora"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("tailscale.com/download/linux", result.stderr)
+        self.assertFalse(any(call.startswith("apt-get") for call in calls))
+
+    def test_no_key_expiry_warning_once_it_is_disabled(self):
+        status = {**RUNNING, "Self": {"DNSName": "raspberrypi.tail1234.ts.net."}}
+        result, _ = self.run_script(status, published(8765))
+        self.assertNotIn("key expiry", result.stdout)
+
+    def test_the_installer_runs_it_last_and_survives_its_failure(self):
+        text = (PI / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("--no-remote", text)
+        self.assertLess(
+            text.index("systemctl restart solis-hub.service"), text.index('remote-access.sh" ')
+        )
+        self.assertIn('if ! SOLIS_JSON_PYTHON="$prefix/bin/python" "$here/remote-access.sh"', text)
+        bash = shutil.which("bash")
+        if bash is not None:
+            subprocess.run([bash, "-n", str(PI / "remote-access.sh")], check=True)
 
 
 class DocumentationLinkTests(unittest.TestCase):

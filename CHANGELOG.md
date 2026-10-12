@@ -3,6 +3,29 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- The Pi installer sets up remote access by default. After installing the hub,
+  `deploy/pi/install.sh` runs the new `deploy/pi/remote-access.sh`, which
+  installs Tailscale from its signed apt repository, signs the Pi in (one link
+  to open) and publishes the hub with Tailscale Funnel at
+  `https://<pi>.<tailnet>.ts.net` (one link to approve), so the menu bar and the
+  iPhone reach it away from home with nothing installed on them. It prints the
+  address to enter as the Remote URL, never replaces another service published
+  on port 443, and never fails the install: `--no-remote` skips it, and the
+  script can be run again on its own. Cloudflare Tunnel remains documented as
+  the alternative.
+
+### Security
+
+- The hub's failed-authentication limit now takes the visitor's address from
+  `X-Forwarded-For` (its last entry) on loopback, and falls back to
+  `CF-Connecting-IP` only without it. Tailscale Funnel passes `CF-Connecting-IP`
+  through as the visitor sent it, so believing it first would have let a Funnel
+  visitor pick a fresh rate-limit bucket for every attempt.
+
 ## 0.8.0
 
 The menu bar can now configure a hub and sign it in to Hypervolt and Octopus.

@@ -499,6 +499,21 @@ class AuthenticationTests(HubTestCase):
         self.assertEqual(source_address("192.168.1.20", headers), "192.168.1.20")
         self.assertEqual(source_address("127.0.0.1", {"cf-connecting-ip": "junk"}), "127.0.0.1")
 
+    def test_a_funnel_visitor_cannot_choose_its_own_rate_limit_bucket(self):
+        # tailscaled replaces X-Forwarded-For with the visitor's address and
+        # passes CF-Connecting-IP through as sent, so the visitor controls only
+        # the latter.
+        headers = {"x-forwarded-for": "198.51.100.7", "cf-connecting-ip": "203.0.113.99"}
+        self.assertEqual(source_address("127.0.0.1", headers), "198.51.100.7")
+
+    def test_the_address_cloudflare_appends_is_the_one_believed(self):
+        headers = {"x-forwarded-for": "10.9.9.9, 203.0.113.9", "cf-connecting-ip": "203.0.113.9"}
+        self.assertEqual(source_address("127.0.0.1", headers), "203.0.113.9")
+        self.assertEqual(
+            source_address("192.168.1.20", {"x-forwarded-for": "203.0.113.9"}), "192.168.1.20"
+        )
+        self.assertEqual(source_address("127.0.0.1", {"x-forwarded-for": "junk"}), "127.0.0.1")
+
 
 class TokenTests(unittest.TestCase):
     def test_token_files_are_private_and_urlsafe(self):

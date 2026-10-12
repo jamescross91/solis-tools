@@ -652,9 +652,14 @@ def token_matches(presented: str | None, expected: str) -> bool:
 def source_address(peer: str, headers: dict[str, str]) -> str:
     """The address to rate-limit.
 
-    Behind Cloudflare Tunnel every request arrives from loopback (cloudflared),
-    so the peer is useless; CF-Connecting-IP is trusted only from there, because
-    anyone else could forge it to dodge the limiter.
+    Behind Tailscale Funnel or Cloudflare Tunnel every request arrives from
+    loopback (tailscaled or cloudflared), so the peer is useless and a header
+    names the visitor; it is believed only from loopback, because anyone else
+    could forge it to dodge the limiter. The last X-Forwarded-For entry is the
+    one to believe: Tailscale's proxy replaces whatever the visitor sent with
+    the visitor's address, and Cloudflare appends the visitor's address after
+    anything sent. CF-Connecting-IP is a fallback only: Funnel passes it through
+    untouched, so preferring it would let a Funnel visitor choose its own bucket.
     """
     try:
         address = ipaddress.ip_address(peer)
@@ -663,9 +668,15 @@ def source_address(peer: str, headers: dict[str, str]) -> str:
     except ValueError:
         return peer
     if address.is_loopback:
-        forwarded = headers.get("cf-connecting-ip", "")
-        with contextlib.suppress(ValueError):
-            return str(ipaddress.ip_address(forwarded))
+        forwarded_for = headers.get("x-forwarded-for", "")
+        candidates = (
+            [forwarded_for.rsplit(",", 1)[-1].strip()]
+            if forwarded_for
+            else [headers.get("cf-connecting-ip", "")]
+        )
+        for candidate in candidates:
+            with contextlib.suppress(ValueError):
+                return str(ipaddress.ip_address(candidate))
     return str(address)
 
 

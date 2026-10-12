@@ -476,7 +476,8 @@ Voltage control stops whenever the Mac running the menu-bar app sleeps. If you
 have a Raspberry Pi, `solis-hub` can run there instead: it owns the single
 Modbus session and the voltage controller, and shares the live stream with the
 Mac and an iPhone over an authenticated WebSocket, including from outside the
-home through a Cloudflare Tunnel with no VPN.
+home through Tailscale Funnel, which the installer sets up, with nothing to
+install on the phone or the Mac.
 
 ```sh
 sudo deploy/pi/install.sh    # on the Pi; see docs/hub.md
@@ -649,8 +650,8 @@ For Hub mode, `make hub-demo` prints a token; choose Hub mode with LAN URL
   versioning
 - [docs/hub-build-spec.md](docs/hub-build-spec.md): the specification the hub was
   built against, and where the implementation differs
-- [docs/hub-remote-access.md](docs/hub-remote-access.md): Cloudflare Tunnel and
-  Access setup
+- [docs/hub-remote-access.md](docs/hub-remote-access.md): remote access with
+  Tailscale Funnel (the installer's default) or a Cloudflare Tunnel
 - [docs/hub-ios-integration.md](docs/hub-ios-integration.md): SolisHubKit and the
   iOS app contract
 - [docs/hypervolt-integration.md](docs/hypervolt-integration.md) — the
