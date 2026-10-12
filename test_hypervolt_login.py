@@ -91,6 +91,16 @@ class HypervoltLoginTests(unittest.TestCase):
             self.assertEqual(fake.token_requests, [])
             self.assertFalse(credentials_path.exists())
 
+    def test_a_token_given_as_the_credentials_path_is_rejected_unechoed(self):
+        token = "eyJhbGciOiJIUzI1NiJ9.fakefakefake.fakefakefake"
+        with FakeHypervoltCloud() as fake:
+            process = run_login(fake, Path(token))
+            self.assertEqual(process.returncode, 2)
+            self.assertIn("looks like a token, not a file path", process.stderr)
+            self.assertNotIn(token, process.stdout + process.stderr)
+            self.assertEqual(fake.token_requests, [])
+            self.assertFalse(Path(token).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

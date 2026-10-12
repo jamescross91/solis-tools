@@ -15,6 +15,29 @@ versioning](https://semver.org/spec/v2.0.0.html).
   pip's own output so a network problem is visible. `docs/hub.md` has the steps for
   building Python 3.11 on an older image.
 
+## 0.7.1
+
+Fixes the menu-bar app never connecting in Hub mode, and the Raspberry Pi login examples. Stop the running menu-bar
+app before upgrading; the hub and poller are unchanged, so nothing on the
+Raspberry Pi needs to be touched, and control keeps running there throughout.
+
+### Fixed
+
+- The hub client could hang with no error and no retry. Choosing a hub found by
+  Bonjour makes the address list change a few milliseconds into the first
+  connection attempt; the attempt was abandoned, and its pending read never
+  returned, so the app sat on "No hub address to try; the network may be
+  offline" and the hub saw one connection open and close. Closing a hub socket
+  now always fails anything waiting on it.
+- `docs/hub.md` showed `hypervolt-login` and `octopus-login` on the Raspberry Pi
+  with no arguments, but both require `--credentials PATH`. The examples now pass
+  `/var/lib/solis-tools/hypervolt.json` and `octopus.json`, and say that secrets
+  are typed at the prompt, never on the command line.
+- `octopus-login` and `hypervolt-login` now refuse a `--credentials` value that
+  looks like an Octopus API key (`sk_`) or a Hypervolt token (`eyJ`), without
+  repeating it. Passing a key there writes it into shell history. If you did,
+  regenerate the key on the Octopus dashboard.
+
 ## 0.7.0
 
 Adds the optional `solis-hub` and a Hub connection mode for the menu-bar app; Direct mode is unchanged by default. After upgrading, macOS may ask once for local network access (Bonjour discovery). Stop the running menu-bar app and poller before upgrading, and keep dynamic control off while testing an installation. Only one controller should run: before enabling the hub on a Raspberry Pi, turn control off on the Mac (see `docs/hub.md`).
