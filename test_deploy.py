@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -79,6 +80,83 @@ class DeploymentFileTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
         self.assertIn("state=/var/lib/solis-tools", text)
         self.assertIn("config_dir=/etc/solis-tools", text)
+
+
+class InstallerPythonTests(unittest.TestCase):
+    """The interpreter check runs before the installer changes anything.
+
+    A Pi on Bullseye has Python 3.9, where pymodbus 3.10 cannot install. The
+    installer used to find that out half way through, after creating the user and
+    a virtualenv. `--check-python` exposes the choice without touching the system,
+    so it can be driven here with stand-in interpreters.
+    """
+
+    OLD = '#!/bin/sh\ncase "$*" in *sys.exit*) exit 1;; *) echo 3.9.2;; esac\n'
+    NEW = '#!/bin/sh\ncase "$*" in *platform*) echo 3.11.9;; *) exit 0;; esac\n'
+
+    def run_installer(self, interpreters: dict[str, str], *args: str, env=None):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not available")
+        with tempfile.TemporaryDirectory() as directory:
+            for name, body in interpreters.items():
+                path = Path(directory) / name
+                path.write_text(body, encoding="utf-8")
+                path.chmod(0o755)
+            # Only the stand-ins are on PATH, so a real python3.11 on the machine
+            # running the tests cannot be picked up by accident.
+            result = subprocess.run(
+                [bash, str(PI / "install.sh"), "--check-python", *args],
+                env={"PATH": directory, **(env or {})},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result, directory
+
+    def test_python_39_is_refused_before_anything_changes(self):
+        result, _ = self.run_installer({"python3": self.OLD})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("3.10 or newer", result.stderr)
+        self.assertIn("python3 is 3.9.2", result.stderr)
+        self.assertIn("Nothing has been changed", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_no_python_at_all_is_refused(self):
+        result, _ = self.run_installer({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("none was found (none)", result.stderr)
+
+    def test_a_newer_interpreter_beside_an_old_python3_is_used(self):
+        result, directory = self.run_installer({"python3": self.OLD, "python3.11": self.NEW})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"{directory}/python3.11 (Python 3.11.9)")
+
+    def test_a_suitable_system_python3_wins(self):
+        result, directory = self.run_installer({"python3": self.NEW, "python3.12": self.NEW})
+        self.assertEqual(result.stdout.strip(), f"{directory}/python3 (Python 3.11.9)")
+
+    def test_an_explicit_interpreter_is_never_replaced(self):
+        result, directory = self.run_installer(
+            {"python3": self.NEW, "old": self.OLD}, "--python", "old"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("old is Python 3.9.2", result.stderr)
+        result, directory = self.run_installer(
+            {"python3": self.OLD, "new": self.NEW}, env={"SOLIS_PYTHON": "new"}
+        )
+        self.assertEqual(result.stdout.strip(), f"{directory}/new (Python 3.11.9)")
+
+    def test_a_missing_explicit_interpreter_is_reported(self):
+        result, _ = self.run_installer({"python3": self.NEW}, "--python", "nowhere")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nowhere does not exist", result.stderr)
+
+    def test_unsuitable_virtualenv_is_replaced_not_reused(self):
+        text = (PI / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('rm -rf "$prefix"', text)
+        self.assertIn("pyvenv.cfg", text)
+        self.assertNotIn("--quiet", text)
 
 
 class DocumentationLinkTests(unittest.TestCase):
