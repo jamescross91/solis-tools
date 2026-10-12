@@ -72,6 +72,9 @@ public struct HubHello: Decodable, Sendable, Equatable {
     public let hubVersion: String
     public let streamSchemaVersion: Int
     public let hubId: String
+    /// Where the hub says to reach it away from home; nil when it has no
+    /// public address, or is older than this field.
+    public let publicUrl: String?
     public let poller: HubPollerStatus?
 }
 

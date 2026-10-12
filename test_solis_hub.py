@@ -1675,3 +1675,65 @@ class NotifierRedirectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdentityAndAddressTests(HubTestCase):
+    """Telling a client where the hub is, and proving which hub it is."""
+
+    NONCE = "0123456789abcdef" * 2
+
+    async def test_identity_needs_no_token_and_proves_the_hub_holds_it(self):
+        import hashlib
+        import hmac
+
+        status, _, body = await self.http(f"/v1/identity?nonce={self.NONCE}")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        expected = hmac.new(
+            self.token.encode(), f"solis-hub-identity:{self.NONCE}".encode(), hashlib.sha256
+        ).hexdigest()
+        self.assertEqual(payload, {"hub_id": "hub-id-1", "proof": expected})
+        self.assertNotIn(self.token, body.decode())
+
+    async def test_identity_refuses_a_missing_or_malformed_nonce(self):
+        for target in (
+            "/v1/identity",
+            "/v1/identity?nonce=short",
+            "/v1/identity?nonce=" + "Z" * 32,
+        ):
+            status, _, _ = await self.http(target)
+            self.assertEqual(status, 400, target)
+
+    async def test_identity_requests_do_not_count_as_failed_authentication(self):
+        for _ in range(12):
+            await self.http("/v1/identity")
+        status, _, _ = await self.http("/v1/status", self.token)
+        self.assertEqual(status, 200)
+
+    async def test_the_address_remote_access_recorded_is_advertised(self):
+        status, _, body = await self.http("/v1/status", self.token)
+        self.assertIsNone(json.loads(body)["public_url"])
+        (Path(self.directory) / "public-url").write_text("https://raspberrypi.tail1234.ts.net\n")
+        _, _, body = await self.http("/v1/status", self.token)
+        self.assertEqual(json.loads(body)["public_url"], "https://raspberrypi.tail1234.ts.net")
+        client = await self.connect()
+        hello = await client.receive_json()
+        self.assertEqual(hello["public_url"], "https://raspberrypi.tail1234.ts.net")
+        await client.close()
+
+    async def test_an_address_that_is_not_https_is_never_advertised(self):
+        for text in (
+            "http://raspberrypi.local:8765",
+            "https://host/path",
+            "https://user@host",
+            "junk",
+        ):
+            (Path(self.directory) / "public-url").write_text(text)
+            _, _, body = await self.http("/v1/status", self.token)
+            self.assertIsNone(json.loads(body)["public_url"], text)
+
+    def test_hub_json_public_url_is_checked_and_wins(self):
+        config = make_config(self.directory, public_url="https://energy.example.com/")
+        self.assertEqual(config.public_url, "https://energy.example.com")
+        with self.assertRaises(HubConfigError):
+            make_config(self.directory, public_url="http://energy.example.com")

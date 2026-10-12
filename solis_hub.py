@@ -135,6 +135,7 @@ CONFIG_KEYS = {
     "history_compact_hours",
     "max_clients",
     "ntfy",
+    "public_url",
 }
 NTFY_KEYS = {"url", "topic", "token_file", "min_interval_s"}
 NTFY_TOPIC = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -143,6 +144,10 @@ MAX_REQUEST_BODY_BYTES = 16 * 1024
 # hypervolt-login and octopus-login each make a few HTTPS calls with 10 s
 # timeouts; anything slower is a hung process, not a slow service.
 LOGIN_TIMEOUT_S = 60.0
+# Written by deploy/pi/remote-access.sh: the address Tailscale Funnel publishes
+# the hub at. hub.json's public_url takes precedence, for a Cloudflare hostname.
+PUBLIC_URL_FILE = "public-url"
+IDENTITY_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
 
 
 def log(message: str) -> None:
@@ -180,6 +185,7 @@ class HubConfig:
     history_compact_hours: int
     max_clients: int
     ntfy: NtfyConfig | None
+    public_url: str | None = None
 
 
 def default_state_dir() -> Path:
@@ -264,6 +270,21 @@ def _optional_path(
     return _resolve_path(value, state_dir)
 
 
+def parse_public_url(value: Any) -> str | None:
+    """An https origin a client can be told to use, or None when unusable.
+
+    Only a bare origin: clients send the token to it, so it must be TLS, and a
+    path, query or user name has no business there."""
+    if not isinstance(value, str) or len(value) > 256:
+        return None
+    parts = urllib.parse.urlsplit(value.strip())
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None
+    return f"https://{parts.netloc}"
+
+
 def parse_config(data: Any, state_dir_override: Path | None = None) -> HubConfig:
     if not isinstance(data, dict):
         raise HubConfigError("the configuration must be a JSON object")
@@ -294,7 +315,17 @@ def parse_config(data: Any, state_dir_override: Path | None = None) -> HubConfig
         history_compact_hours=_require_int(data, "history_compact_hours", 24, 1, 24 * 14),
         max_clients=_require_int(data, "max_clients", DEFAULT_MAX_CLIENTS, 1, 1024),
         ntfy=_parse_ntfy(data.get("ntfy"), state_dir),
+        public_url=_parse_public_url_key(data.get("public_url")),
     )
+
+
+def _parse_public_url_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    url = parse_public_url(value)
+    if url is None:
+        raise HubConfigError("public_url must be an https:// address with no path, or null")
+    return url
 
 
 def _parse_ntfy(data: Any, state_dir: Path) -> NtfyConfig | None:
@@ -1747,10 +1778,32 @@ class Hub:
                 "hub_version": solis_poll.VERSION,
                 "stream_schema_version": STREAM_SCHEMA_VERSION,
                 "hub_id": self.hub_id,
+                "public_url": self.public_url(),
                 "poller": self.supervisor.status.to_dict(),
             },
             separators=(",", ":"),
         )
+
+    def public_url(self) -> str | None:
+        """The address clients should use away from home: hub.json's
+        public_url, else what remote-access.sh recorded. Read each time, so
+        setting up Funnel needs no hub restart; it is a few bytes."""
+        if self.config.public_url is not None:
+            return self.config.public_url
+        try:
+            text = (self.config.state_dir / PUBLIC_URL_FILE).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return parse_public_url(text)
+
+    def identity_proof(self, nonce: str) -> str:
+        """Proof that this hub holds the token, without the client sending it.
+
+        A client about to send its token to an address it found by Bonjour asks
+        this first: anything on the network can advertise a hub, but only one
+        that knows the token can answer a fresh nonce."""
+        message = f"solis-hub-identity:{nonce}".encode()
+        return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()
 
     def _broadcast(self, message: str) -> None:
         for client in tuple(self.clients):
@@ -1869,6 +1922,7 @@ class Hub:
             "hub_version": solis_poll.VERSION,
             "hub_protocol_version": HUB_PROTOCOL_VERSION,
             "hub_id": self.hub_id,
+            "public_url": self.public_url(),
             "poller": self.supervisor.status.to_dict(),
             "clients": len(self.clients),
             "envelope_age_s": self.cache.age_s(time.monotonic()),
@@ -2106,6 +2160,16 @@ class Hub:
                 await self._respond(writer, http_response(405, headers=[("Allow", "GET")]))
                 return
             await self._respond(writer, http_response(200, json_bytes({"ok": True})))
+            return
+        if request.path == "/v1/identity":
+            # Before the token check on purpose: answering it is how a client
+            # decides whether to send the token at all.
+            nonce = request.query.get("nonce", [""])[0]
+            if request.method != "GET" or not IDENTITY_NONCE.match(nonce):
+                await self._respond(writer, http_response(400))
+                return
+            payload = {"hub_id": self.hub_id, "proof": self.identity_proof(nonce)}
+            await self._respond(writer, http_response(200, json_bytes(payload)))
             return
         source = source_address(peer_host, request.headers)
         if self.limiter.blocked(source):
