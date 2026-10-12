@@ -3,10 +3,20 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.7.1
+
+Fixes the menu-bar app never connecting in Hub mode, and the Raspberry Pi login examples. Stop the running menu-bar
+app before upgrading; the hub and poller are unchanged, so nothing on the
+Raspberry Pi needs to be touched, and control keeps running there throughout.
 
 ### Fixed
 
+- The hub client could hang with no error and no retry. Choosing a hub found by
+  Bonjour makes the address list change a few milliseconds into the first
+  connection attempt; the attempt was abandoned, and its pending read never
+  returned, so the app sat on "No hub address to try; the network may be
+  offline" and the hub saw one connection open and close. Closing a hub socket
+  now always fails anything waiting on it.
 - `docs/hub.md` showed `hypervolt-login` and `octopus-login` on the Raspberry Pi
   with no arguments, but both require `--credentials PATH`. The examples now pass
   `/var/lib/solis-tools/hypervolt.json` and `octopus.json`, and say that secrets
