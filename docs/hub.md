@@ -172,11 +172,16 @@ Credentials for Hypervolt and Octopus stay on the Pi, written by the existing
 commands run there as the `solis` user:
 
 ```sh
-sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/hypervolt-login
-sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/octopus-login
+sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/hypervolt-login \
+  --credentials /var/lib/solis-tools/hypervolt.json
+sudo -u solis env XDG_STATE_HOME=/var/lib /opt/solis-tools/bin/octopus-login \
+  --credentials /var/lib/solis-tools/octopus.json
 ```
 
-The hub never reads, returns or relays those credentials.
+`--credentials` is the path of the file to write. The password or API key is
+typed at the prompt that follows, never on the command line, where it would be
+saved in your shell history. Both commands refuse an argument that looks like a
+key or token. The hub never reads, returns or relays those credentials.
 
 ### Without a Pi: `make hub-demo`
 
@@ -254,7 +259,8 @@ Control state is scoped to the logger endpoint, so the order matters.
    an unclean one must be recovered on the Mac first, following the README
    precautions.
 5. Run `hypervolt-login` and `octopus-login` on the Pi if you use those
-   features.
+   features, with the commands and `--credentials` paths shown under
+   "Installing on a Raspberry Pi".
 6. Start `solis-hub`, confirm `/v1/status` shows the poller `running`, then
    switch the menu bar to Hub mode.
 
