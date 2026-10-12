@@ -3,7 +3,16 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.8.0
+
+The menu bar can now configure a hub and sign it in to Hypervolt and Octopus.
+Upgrade the hub as well as the Mac: until the hub runs 0.8.0, the app's Hub
+settings say to upgrade it. On a Raspberry Pi, `git pull` in the checkout and
+run `sudo deploy/pi/install.sh` again; the hub restarts, and its poller restores
+the inverter's limits before the new one starts. Stop the running menu-bar app
+before upgrading the Mac. The hub token now also authorises changing control
+settings, so treat it as a password. Nothing changes on the inverter until you
+apply settings from the app, and the hub keeps using `hub.json` until then.
 
 ### Added
 
