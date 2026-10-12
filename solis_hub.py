@@ -406,6 +406,11 @@ CONTROL_SETTINGS: tuple[SettingField, ...] = (
     SettingField("octopus_enabled", "--octopus-enable", "octopus_enable", bool),
 )
 SETTING_KEYS = {field.key for field in CONTROL_SETTINGS}
+# solis-poll refuses these without --dynamic-voltage-control. With control off
+# they are left out of the arguments but kept in the saved settings, so turning
+# control off never fails for them and turning it back on restores them, as the
+# menu bar's own Direct-mode arguments do.
+NEEDS_CONTROL = {"dynamic_export_enabled", "hypervolt_enabled", "octopus_enabled"}
 
 
 class SettingsError(ValueError):
@@ -450,8 +455,11 @@ def parse_settings(data: Any) -> dict[str, Any]:
 
 def settings_arguments(settings: dict[str, Any]) -> list[str]:
     arguments: list[str] = []
+    control = settings["dynamic_voltage_enabled"]
     for field in CONTROL_SETTINGS:
         value = settings[field.key]
+        if field.key in NEEDS_CONTROL and not control:
+            continue
         if field.kind is bool:
             if value:
                 arguments.append(field.option)
@@ -1102,6 +1110,11 @@ async def run_login(command: Sequence[str], secret: str, cwd: Path) -> LoginResu
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        # Both commands read the secret with getpass, which prefers the
+        # controlling terminal to stdin. A hub started from a terminal would
+        # otherwise have the login prompt there and ignore the secret sent to
+        # it; a new session has no controlling terminal, so stdin is used.
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -1928,7 +1941,9 @@ class Hub:
             self._poller_path(namespace.octopus_credentials, "octopus.json")
         )
         return {
-            "settings": settings_from_namespace(namespace),
+            # Saved settings are returned as saved: with control off, the
+            # features that need it are not in the arguments but still chosen.
+            "settings": self.saved_settings or settings_from_namespace(namespace),
             "source": "app" if self.saved_settings is not None else "hub_config",
             "export_control_validated": self._export_validated(namespace),
             "hypervolt": {
@@ -1947,7 +1962,11 @@ class Hub:
             settings = parse_settings(body)
             args = compose_poller_args(self.config.poller_args, settings)
             namespace = check_poller_args(args)
-            if settings["dynamic_export_enabled"] and not self._export_validated(namespace):
+            if (
+                settings["dynamic_voltage_enabled"]
+                and settings["dynamic_export_enabled"]
+                and not self._export_validated(namespace)
+            ):
                 raise SettingsError(
                     "export regulation needs this inverter's installation-validation record "
                     "in the hub's state directory"

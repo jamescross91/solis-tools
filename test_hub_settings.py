@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import io
 import json
+import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import termios
 import textwrap
+import threading
 import unittest
 from pathlib import Path
 
@@ -190,6 +195,22 @@ class SettingsDocumentTests(unittest.TestCase):
         settings = default_settings(minimum_voltage=260.0, maximum_voltage=250.0)
         with self.assertRaisesRegex(SettingsError, "voltage limits"):
             check_poller_args(compose_poller_args(["--host", "127.0.0.1"], settings))
+
+    def test_with_control_off_the_features_that_need_it_are_left_out(self):
+        settings = default_settings(
+            dynamic_voltage_enabled=False,
+            dynamic_export_enabled=True,
+            hypervolt_enabled=True,
+            octopus_enabled=True,
+        )
+        arguments = settings_arguments(settings)
+        for flag in ("--dynamic-export-control", "--hypervolt-enable", "--octopus-enable"):
+            self.assertNotIn(flag, arguments)
+        namespace = check_poller_args(compose_poller_args(["--host", "127.0.0.1"], settings))
+        self.assertFalse(namespace.dynamic_voltage_control)
+        on = settings_arguments({**settings, "dynamic_voltage_enabled": True})
+        for flag in ("--dynamic-export-control", "--hypervolt-enable", "--octopus-enable"):
+            self.assertIn(flag, on)
 
     def test_the_argument_list_for_every_boolean_spelling(self):
         on = settings_arguments(
@@ -458,6 +479,32 @@ class SettingsApiTests(SettingsApiTestCase):
         status, body = await self.request("PUT", "/v1/settings", settings)
         self.assertEqual(status, 200, body)
 
+    async def test_turning_control_off_is_accepted_with_the_features_that_need_it_on(self):
+        on = default_settings(
+            dynamic_voltage_enabled=True, hypervolt_enabled=True, octopus_enabled=True
+        )
+        status, body = await self.request("PUT", "/v1/settings", on)
+        self.assertEqual(status, 200, body)
+        await self.finish_current_poller()
+        # Export as well, which is not even validated: with control off it is
+        # simply not asked for, so it cannot stand in the way of turning off.
+        off = {**on, "dynamic_voltage_enabled": False, "dynamic_export_enabled": True}
+        status, body = await self.request("PUT", "/v1/settings", off)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["restarted"])
+        self.assertEqual(body["settings"], off)
+        await self.finish_current_poller()
+        command = self.spawner.commands[-1]
+        for flag in (
+            "--dynamic-voltage-control",
+            "--dynamic-export-control",
+            "--hypervolt-enable",
+            "--octopus-enable",
+        ):
+            self.assertNotIn(flag, command)
+        _, body = await self.request("GET", "/v1/settings")
+        self.assertEqual(body["settings"], off)
+
     async def test_a_record_for_another_inverter_does_not_validate_export(self):
         self.validation_file.write_text(
             json.dumps({**validation_record(), "device_identity": "10.0.0.9:502/1"})
@@ -561,6 +608,60 @@ class SignInTests(SettingsApiTestCase):
         self.assertTrue(body["restarted"])
         await self.finish_current_poller()
         self.assertIn("--octopus-enable", self.spawner.commands[-1])
+
+
+class ControllingTerminalTests(unittest.TestCase):
+    """getpass prefers the controlling terminal to stdin, so a hub started from
+    a terminal must not hand that terminal to the login commands."""
+
+    def test_a_hub_with_a_terminal_still_passes_the_secret_on_stdin(self):
+        master, slave = os.openpty()
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.json"
+            helper = textwrap.dedent(
+                f"""
+                import asyncio, json, sys
+                from pathlib import Path
+                sys.path.insert(0, {str(Path(__file__).parent)!r})
+                import solis_hub
+                solis_hub.LOGIN_TIMEOUT_S = 5
+                login = [
+                    sys.executable,
+                    "-c",
+                    "import getpass; print('Saved ' + getpass.getpass('secret: '))",
+                ]
+                outcome = asyncio.run(solis_hub.run_login(login, "from-the-app", Path({directory!r})))
+                Path({str(result)!r}).write_text(json.dumps([outcome.ok, outcome.message]))
+                """
+            )
+
+            def take_the_terminal() -> None:
+                # The hub's own session, with the pty as its controlling terminal.
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+            process = subprocess.Popen(
+                [sys.executable, "-c", helper],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+                preexec_fn=take_the_terminal,
+            )
+            os.close(slave)
+
+            def drain() -> None:
+                # Nobody answers the terminal; reading only keeps it from filling.
+                with contextlib.suppress(OSError):
+                    while os.read(master, 1024):
+                        pass
+
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            try:
+                process.wait(timeout=30)
+            finally:
+                os.close(master)
+            self.assertEqual(json.loads(result.read_text()), [True, "Saved from-the-app"])
 
 
 class RealOctopusLoginTests(SettingsApiTestCase):

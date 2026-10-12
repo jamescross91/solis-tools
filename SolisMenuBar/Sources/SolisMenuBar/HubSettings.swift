@@ -145,9 +145,9 @@ final class HubSettingsModel: ObservableObject {
         )
     }
 
-    /// The addresses to try, LAN first, and the token, from the form as it
-    /// stands, so settings can be read from a hub before they are saved.
-    var target: (candidates: [HubEndpoint], auth: HubAuth)? {
+    /// The hub the form describes as it stands, saved or not, so its settings
+    /// can be read before the connection is saved.
+    var adminTarget: HubAdminTarget? {
         let auth = currentAuth()
         guard !auth.token.isEmpty else { return nil }
         let settings = HubConnectionSettings(
@@ -155,7 +155,13 @@ final class HubSettingsModel: ObservableObject {
             remoteURL: HubURLInput.remote(remoteText),
             preferredHubID: preferredHubID.isEmpty ? nil : preferredHubID
         )
-        return (HubEndpointSelector.candidates(settings: settings, discovered: discovered), auth)
+        guard !settings.isEmpty else { return nil }
+        return HubAdminTarget(connection: settings, auth: auth, discovered: discovered)
+    }
+
+    /// The addresses to try, LAN first, and the token.
+    var target: (candidates: [HubEndpoint], auth: HubAuth)? {
+        adminTarget.map { ($0.candidates, $0.auth) }
     }
 
     /// Asks the hub's /v1/status over the same LAN-then-remote order a live

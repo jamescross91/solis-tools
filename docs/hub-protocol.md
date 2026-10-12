@@ -193,7 +193,11 @@ is `"app"`, otherwise read from `hub.json`'s `poller_args`. A `PUT` body is a
 complete `settings` object: every key is required and unknown keys are refused,
 so a client written against an older list cannot leave a newer setting unset.
 Values are checked by `solis-poll`'s own validation; export regulation also needs
-the installation-validation record. `restarted` is true when the change differs
+the installation-validation record when control is on. With
+`dynamic_voltage_enabled` false, export regulation, Hypervolt and Octopus are
+left out of the poller's arguments (`solis-poll` refuses them without control)
+but kept as saved, so turning control off always works and turning it back on
+restores them. `restarted` is true when the change differs
 from what was running and the poller is being restarted with it.
 
 `hypervolt` and `octopus` never carry a password, key or token. Secrets in a

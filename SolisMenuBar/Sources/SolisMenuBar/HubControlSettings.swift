@@ -1,12 +1,36 @@
 import SolisHubKit
 import SwiftUI
 
+/// Which hub settings and sign-ins go to: its addresses and its credentials.
+///
+/// Two targets are the same hub when those match. The Bonjour results are
+/// carried only to work out the addresses: a discovered hub resolving, or its
+/// address changing, alters how it is reached, not which hub it is.
+struct HubAdminTarget: Equatable {
+    let connection: HubConnectionSettings
+    let auth: HubAuth
+    var discovered: [DiscoveredHub] = []
+
+    var candidates: [HubEndpoint] {
+        HubEndpointSelector.candidates(settings: connection, discovered: discovered)
+    }
+
+    static func == (lhs: HubAdminTarget, rhs: HubAdminTarget) -> Bool {
+        lhs.connection == rhs.connection && lhs.auth == rhs.auth
+    }
+}
+
 /// The hub's control settings and its Hypervolt and Octopus sign-ins, read
 /// from and written to the hub's /v1/settings API.
 ///
 /// Edits are made to a draft and sent only when the person applies them,
 /// because applying restarts the hub's poller: it restores the inverter's
 /// limits first, then starts again with the new settings.
+///
+/// Everything here belongs to the hub it was loaded from. When the address or
+/// token in the form changes, it is all dropped and read again, and nothing is
+/// sent anywhere until it has been: settings or a password meant for one hub
+/// must never reach another.
 @MainActor
 final class HubControlModel: ObservableObject {
     enum LoadState: Equatable {
@@ -37,7 +61,15 @@ final class HubControlModel: ObservableObject {
     @Published var octopusAccount = ""
     @Published var octopusDevice = ""
 
+    /// The hub `state`, `draft` and `client` belong to.
+    private(set) var loadedTarget: HubAdminTarget?
     private var client: HubAdminClient?
+    private var generation = 0
+    private let transport: any HubHTTPTransport
+
+    init(transport: any HubHTTPTransport = URLSessionHTTPTransport()) {
+        self.transport = transport
+    }
 
     var hasChanges: Bool {
         guard let state else { return false }
@@ -48,45 +80,86 @@ final class HubControlModel: ObservableObject {
         client.map { $0.endpoint.kind.label }
     }
 
-    func load(from target: (candidates: [HubEndpoint], auth: HubAuth)?) {
+    /// True when what is shown was read from `target`, so acting on it is safe.
+    func isCurrent(for target: HubAdminTarget?) -> Bool {
+        client != nil && target != nil && target == loadedTarget
+    }
+
+    /// Follows the form: a different hub drops everything shown for the old one.
+    func targetChanged(to target: HubAdminTarget?) async {
+        guard target != loadedTarget || loadState == .idle else { return }
+        forget()
+        await load(from: target)
+    }
+
+    func load(from target: HubAdminTarget?) async {
         guard let target else {
+            forget()
             loadState = .failed("Enter the hub address and token above first.")
             return
         }
+        generation += 1
+        let mine = generation
         loadState = .loading
-        Task {
-            do {
-                let (client, state) = try await HubAdminClient.connect(
-                    candidates: target.candidates, auth: target.auth
-                )
-                self.client = client
-                self.state = state
-                draft = state.settings
-                applyState = .idle
-                loadState = .loaded
-            } catch {
-                loadState = .failed(error.localizedDescription)
-            }
+        do {
+            let (client, state) = try await HubAdminClient.connect(
+                candidates: target.candidates, auth: target.auth, transport: transport
+            )
+            // A newer load, for this hub or another, has started since.
+            guard mine == generation else { return }
+            self.client = client
+            self.state = state
+            loadedTarget = target
+            draft = state.settings
+            applyState = .idle
+            loadState = .loaded
+        } catch {
+            guard mine == generation, !Task.isCancelled else { return }
+            forget()
+            loadState = .failed(error.localizedDescription)
         }
     }
 
-    func apply() {
-        guard let client else { return }
+    private func forget() {
+        generation += 1
+        client = nil
+        state = nil
+        loadedTarget = nil
+        draft = .placeholder
+        loadState = .idle
+        applyState = .idle
+        hypervoltState = .idle
+        octopusState = .idle
+    }
+
+    /// The client for `target`, or nil, with `fail` told why, when what is on
+    /// screen came from another hub.
+    private func client(for target: HubAdminTarget?, fail: (String) -> Void) -> HubAdminClient? {
+        guard isCurrent(for: target), let client else {
+            fail("The hub address or token has changed. Wait for its settings to load, then try again.")
+            return nil
+        }
+        return client
+    }
+
+    func apply(for target: HubAdminTarget?) async {
+        guard let client = client(for: target, fail: { applyState = .failed($0) }) else { return }
         let settings = draft
+        let mine = generation
         applyState = .running
-        Task {
-            do {
-                let state = try await client.save(settings)
-                self.state = state
-                draft = state.settings
-                applyState = .succeeded(
-                    state.restarted == true
-                        ? "Saved. The hub's poller is restoring the inverter's limits and restarting with these settings."
-                        : "Saved. The hub was already running these settings."
-                )
-            } catch {
-                applyState = .failed(error.localizedDescription)
-            }
+        do {
+            let state = try await client.save(settings)
+            guard mine == generation else { return }
+            self.state = state
+            draft = state.settings
+            applyState = .succeeded(
+                state.restarted == true
+                    ? "Saved. The hub's poller is restoring the inverter's limits and restarting with these settings."
+                    : "Saved. The hub was already running these settings."
+            )
+        } catch {
+            guard mine == generation else { return }
+            applyState = .failed(error.localizedDescription)
         }
     }
 
@@ -97,43 +170,45 @@ final class HubControlModel: ObservableObject {
         applyState = .idle
     }
 
-    func signInToHypervolt() {
-        guard let client else { return }
+    func signInToHypervolt(for target: HubAdminTarget?) async {
+        guard let client = client(for: target, fail: { hypervoltState = .failed($0) }) else { return }
         let email = hypervoltEmail.trimmingCharacters(in: .whitespaces)
         let password = hypervoltPassword
         // Cleared at once, so the password is held only for the one request.
         hypervoltPassword = ""
+        let mine = generation
         hypervoltState = .running
-        Task {
-            do {
-                let state = try await client.signInToHypervolt(email: email, password: password)
-                accountsChanged(state)
-                hypervoltState = .succeeded(Self.confirmation(state, service: "Hypervolt"))
-            } catch {
-                hypervoltState = .failed(error.localizedDescription)
-            }
+        do {
+            let state = try await client.signInToHypervolt(email: email, password: password)
+            guard mine == generation else { return }
+            accountsChanged(state)
+            hypervoltState = .succeeded(Self.confirmation(state, service: "Hypervolt"))
+        } catch {
+            guard mine == generation else { return }
+            hypervoltState = .failed(error.localizedDescription)
         }
     }
 
-    func signInToOctopus() {
-        guard let client else { return }
+    func signInToOctopus(for target: HubAdminTarget?) async {
+        guard let client = client(for: target, fail: { octopusState = .failed($0) }) else { return }
         let key = octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let account = octopusAccount.trimmingCharacters(in: .whitespacesAndNewlines)
         let device = octopusDevice.trimmingCharacters(in: .whitespacesAndNewlines)
         octopusAPIKey = ""
+        let mine = generation
         octopusState = .running
-        Task {
-            do {
-                let state = try await client.signInToOctopus(
-                    apiKey: key,
-                    account: account.isEmpty ? nil : account,
-                    device: device.isEmpty ? nil : device
-                )
-                accountsChanged(state)
-                octopusState = .succeeded(Self.confirmation(state, service: "Octopus"))
-            } catch {
-                octopusState = .failed(error.localizedDescription)
-            }
+        do {
+            let state = try await client.signInToOctopus(
+                apiKey: key,
+                account: account.isEmpty ? nil : account,
+                device: device.isEmpty ? nil : device
+            )
+            guard mine == generation else { return }
+            accountsChanged(state)
+            octopusState = .succeeded(Self.confirmation(state, service: "Octopus"))
+        } catch {
+            guard mine == generation else { return }
+            octopusState = .failed(error.localizedDescription)
         }
     }
 
@@ -202,6 +277,9 @@ struct HubControlSettingsSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            case .loaded where !model.isCurrent(for: hubSettings.adminTarget):
+                ProgressView("Reading the new hub's settings")
+                    .controlSize(.small)
             case .loaded:
                 controlForm
                 Divider()
@@ -210,10 +288,12 @@ struct HubControlSettingsSection: View {
                 octopusSection
             }
         }
-        .task {
-            if model.loadState == .idle, hubSettings.isComplete {
-                model.load(from: hubSettings.target)
-            }
+        // Restarts whenever the hub in the form changes; the pause lets typing
+        // finish before a hub is asked for anything.
+        .task(id: hubSettings.adminTarget) {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            await model.targetChanged(to: hubSettings.adminTarget)
         }
         .confirmationDialog(
             "Apply these settings to the hub?",
@@ -221,7 +301,8 @@ struct HubControlSettingsSection: View {
             titleVisibility: .visible
         ) {
             Button("Apply and restart the hub's poller") {
-                model.apply()
+                let target = hubSettings.adminTarget
+                Task { await model.apply(for: target) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -238,7 +319,8 @@ struct HubControlSettingsSection: View {
                 .font(.headline)
             Spacer()
             Button("Reload") {
-                model.load(from: hubSettings.target)
+                let target = hubSettings.adminTarget
+                Task { await model.load(from: target) }
             }
             .disabled(model.loadState == .loading || model.applyState == .running)
         }
@@ -364,7 +446,8 @@ struct HubControlSettingsSection: View {
             .textFieldStyle(.roundedBorder)
         HStack(spacing: 8) {
             Button("Sign in on the hub") {
-                model.signInToHypervolt()
+                let target = hubSettings.adminTarget
+                Task { await model.signInToHypervolt(for: target) }
             }
             .disabled(
                 model.hypervoltEmail.trimmingCharacters(in: .whitespaces).isEmpty
@@ -414,7 +497,8 @@ struct HubControlSettingsSection: View {
         }
         HStack(spacing: 8) {
             Button("Sign in on the hub") {
-                model.signInToOctopus()
+                let target = hubSettings.adminTarget
+                Task { await model.signInToOctopus(for: target) }
             }
             .disabled(
                 model.octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
