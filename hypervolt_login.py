@@ -76,12 +76,26 @@ def login(
     return HypervoltCredentials(refresh_token=token["refresh_token"])
 
 
+def credentials_path(value: str) -> Path:
+    # Refresh tokens are JWTs. One pasted here is already in shell history by
+    # the time this runs, so refuse it and never echo the value back.
+    if value.startswith("eyJ"):
+        raise argparse.ArgumentTypeError(
+            "this looks like a token, not a file path. --credentials names the file to "
+            "write; secrets are typed at the prompt and never go on the command line"
+        )
+    return Path(value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--credentials", type=Path, required=True, help="where to write the resulting refresh token"
+        "--credentials",
+        type=credentials_path,
+        required=True,
+        help="file path to write the refresh token to (the password is typed at the prompt)",
     )
     parser.add_argument("--email", help="Hypervolt account email (prompted if omitted)")
     # end-to-end tests can redirect to a local fake_hypervolt.py instead of

@@ -290,6 +290,17 @@ class LoginTests(unittest.TestCase):
             any(line.startswith("error: ") for line in bad.stderr.splitlines()), bad.stderr
         )
 
+    def test_an_api_key_given_as_the_credentials_path_is_rejected_unechoed(self):
+        """Passing the key as --credentials leaks it into shell history, so the
+        script refuses before prompting and must not repeat it in its output."""
+        with tempfile.TemporaryDirectory() as directory, FakeOctopusApi() as fake:
+            result = self.run_login(fake, Path(FAKE_API_KEY), FAKE_API_KEY)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("looks like an API key, not a file path", result.stderr)
+            self.assertNotIn(FAKE_API_KEY, result.stdout + result.stderr)
+            self.assertFalse((Path(directory) / FAKE_API_KEY).exists())
+            self.assertFalse(Path(FAKE_API_KEY).exists())
+
     def test_a_refused_key_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory, FakeOctopusApi() as fake:
             fake.refuse_key = True
