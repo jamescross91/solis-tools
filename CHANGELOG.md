@@ -3,7 +3,9 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.7.0
+
+Adds the optional `solis-hub` and a Hub connection mode for the menu-bar app; Direct mode is unchanged by default. After upgrading, macOS may ask once for local network access (Bonjour discovery). Stop the running menu-bar app and poller before upgrading, and keep dynamic control off while testing an installation. Only one controller should run: before enabling the hub on a Raspberry Pi, turn control off on the Mac (see `docs/hub.md`).
 
 ### Added
 
@@ -39,6 +41,41 @@ versioning](https://semver.org/spec/v2.0.0.html).
   acts on.
 - A test that the poller restores the inverter's baseline on SIGTERM, which is
   how systemd stops it.
+
+## 0.6.2
+
+Export regulation now holds the export limit close to what is actually being
+exported, so a restart climbs back from a lower limit and recovers more slowly
+than before; raise `--export-headroom-kw` (or the menu-bar setting) to trade
+some of that margin back. Export control still needs the endpoint's installation
+validation and stays off until you enable it. Stop the running menu-bar app and
+poller before upgrading, and keep dynamic control off while testing an
+installation. Homebrew now builds the menu-bar app on your Mac, so Xcode or the
+Command Line Tools must be installed. The GitHub Actions used by CI and releases
+were also updated; this does not change the installed tools.
+
+### Fixed
+
+- Stop the export limit running far above real export. The house absorbs part
+  of the generation, so the limit was raised whenever voltage had room even
+  though export never reached it; a sudden drop in house load then sent export
+  straight to that limit, over the voltage limit, and the inverter tripped. The
+  limit is now held at most `--export-headroom-kw` (default 1 kW, also a menu-bar
+  setting) above measured export and capped at `--maximum-export-kw`, the
+  inverter's rating. It is brought down at once when export regulation starts
+  and after 30 seconds of sustained excess thereafter, and is never raised while
+  the export is not pressing on it. Reductions and emergencies are now cut from
+  real export, so an emergency takes export down immediately instead of stepping
+  an unused limit down over several cycles, and after a voltage-driven cut the
+  limit stays under control for up to 10 minutes rather than snapping back to the
+  captured baseline. Export regulation remains blocked until the installation is
+  validated.
+
+### Changed
+
+- Homebrew builds the macOS menu-bar app from source again instead of
+  downloading a prebuilt universal binary, which removes the two-push release
+  flow. The formula needs Xcode or the Command Line Tools on macOS.
 
 ## 0.6.1
 

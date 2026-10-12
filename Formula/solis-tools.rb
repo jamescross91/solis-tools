@@ -3,8 +3,8 @@ class SolisTools < Formula
 
   desc "Nmon-inspired terminal monitor for Solis hybrid inverters"
   homepage "https://github.com/jamescross91/solis-tools"
-  url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.1/solis-tools-0.6.1.tar.gz"
-  sha256 "619cd472eba93ec5100f17555db745dcfadbb72f58c8f2aeafbf886567786314"
+  url "https://github.com/jamescross91/solis-tools/releases/download/v0.7.0/solis-tools-0.7.0.tar.gz"
+  sha256 "fe5fa98bc4b7ad866ef6b5adfee0763cccaa75e23d1041da077b575ea604965a"
   license "GPL-3.0-only"
 
   # `brew install --HEAD solis-tools` builds the current main branch, so a change
@@ -18,36 +18,20 @@ class SolisTools < Formula
     sha256 "4c5f715128bfeba59f4c9fb3542b0c32a8afd4b90081111e39c12f7af0c89aae"
   end
 
-  # BEGIN PREBUILT MACOS
-  resource "solis-menubar" do
-    on_macos do
-      url "https://github.com/jamescross91/solis-tools/releases/download/v0.6.1/solis-menubar-0.6.1-macos-universal.tar.gz"
-      sha256 "41df5266958a833d7620b6ee66f449e35234f804a9b23a3b98423b6ab3a23d07"
-    end
-  end
-  # END PREBUILT MACOS
-
   def install
-    prebuilt = resources.any? { |item| item.name == "solis-menubar" }
-    virtualenv_install_with_resources without: (prebuilt ? ["solis-menubar"] : nil)
+    virtualenv_install_with_resources
     return unless OS.mac?
 
     app = prefix/"SolisMenuBar.app"
-    if !build.head? && prebuilt
-      resource("solis-menubar").stage { prefix.install "SolisMenuBar.app" }
-      system "codesign", "--verify", "--strict", app
-    else
-      # HEAD and historical source-only releases remain developer builds.
-      system "swift", "build", "--disable-sandbox", "--configuration", "release",
-             "--package-path", "SolisMenuBar"
-      swift_bin = Utils.safe_popen_read(
-        "swift", "build", "--disable-sandbox", "--configuration", "release",
-        "--package-path", "SolisMenuBar", "--show-bin-path"
-      ).strip
-      (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
-      (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
-      system "codesign", "--force", "--sign", "-", app
-    end
+    system "swift", "build", "--disable-sandbox", "--configuration", "release",
+           "--package-path", "SolisMenuBar"
+    swift_bin = Utils.safe_popen_read(
+      "swift", "build", "--disable-sandbox", "--configuration", "release",
+      "--package-path", "SolisMenuBar", "--show-bin-path"
+    ).strip
+    (app/"Contents/MacOS").install Pathname(swift_bin)/"SolisMenuBar"
+    (app/"Contents").install "SolisMenuBar/Resources/Info.plist"
+    system "codesign", "--force", "--sign", "-", app
     (bin/"solis-menubar").write <<~SH
       #!/bin/bash
       if [[ "$1" == "--version" ]]; then

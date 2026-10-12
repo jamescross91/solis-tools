@@ -48,28 +48,16 @@ class ReleaseTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "Fixture", "--allow-empty")
 
-    def metadata(self, checksum):
-        return {
-            "version": "0.6.0",
-            "source_sha256": checksum,
-            "name": "solis-menubar-0.6.0-macos-universal.tar.gz",
-            "sha256": hashlib.sha256(b"binary").hexdigest(),
-            "run_id": "123",
-        }
-
     def prepare_fixture(self):
         checksum = hashlib.sha256(release.archive(self.root, "0.6.0", "HEAD")).hexdigest()
-        metadata = self.metadata(checksum)
         formula = release.update_formula(self.formula, release.url("0.6.0"), checksum)
-        self.write("Formula/solis-tools.rb", release.binary_formula(formula, metadata))
-        self.write(".release-assets.json", json.dumps(metadata))
+        self.write("Formula/solis-tools.rb", formula)
         self.commit()
         return checksum
 
     def test_archive_is_identical_across_commits_formula_changes_and_file_times(self):
         before = release.archive(self.root, "0.6.0", "HEAD")
         self.write("Formula/solis-tools.rb", "different formula\n")
-        self.write(".release-assets.json", "{}")
         self.commit()
         os.utime(self.root / "README.md", (1_700_000_000, 1_700_000_000))
         self.assertEqual(before, release.archive(self.root, "0.6.0", "HEAD"))
@@ -105,54 +93,10 @@ class ReleaseTests(unittest.TestCase):
     def test_prepared_release_matches_but_source_drift_fails(self):
         checksum = self.prepare_fixture()
         self.assertEqual(release.check(self.root)[1], checksum)
-        self.write("README.md", "Changed after binary preparation\n")
+        self.write("README.md", "Changed after preparation\n")
         self.commit()
         with self.assertRaisesRegex(ValueError, "stale"):
             release.check(self.root)
-
-    def test_binary_resource_is_idempotent_and_keeps_dependency_checksum(self):
-        metadata = self.metadata("a" * 64)
-        text = self.formula.replace(
-            "  def install",
-            '  resource "pymodbus" do\n    sha256 "dependency"\n  end\n  def install',
-        )
-        updated = release.binary_formula(text, metadata)
-        self.assertEqual(release.binary_formula(updated, metadata), updated)
-        self.assertEqual(updated.count('resource "solis-menubar"'), 1)
-        self.assertIn('sha256 "dependency"', updated)
-        self.assertIn('  resource "solis-menubar" do\n    on_macos do', updated)
-
-    def test_source_preparation_removes_stale_prebuilt_resource(self):
-        metadata = self.metadata("a" * 64)
-        with_binary = release.binary_formula(self.formula, metadata)
-        source_only = release.source_only_formula(with_binary)
-        self.assertNotIn("BEGIN PREBUILT MACOS", source_only)
-        self.assertEqual(source_only, self.formula)
-
-    def test_binary_rejects_other_source_and_path_traversal(self):
-        metadata = self.metadata("a" * 64)
-        with self.assertRaisesRegex(ValueError, "does not match"):
-            release.validate_binary(metadata, "0.6.0", "b" * 64)
-        metadata["name"] = "../../binary"
-        with self.assertRaisesRegex(ValueError, "archive name"):
-            release.validate_binary(metadata, "0.6.0", "a" * 64)
-
-    def test_download_checks_workflow_provenance_and_actual_bytes(self):
-        metadata = self.metadata("a" * 64)
-
-        def fake_gh(*args):
-            if args[0] == "api":
-                return json.dumps(
-                    {"conclusion": "success", "path": ".github/workflows/release-candidate.yml"}
-                )
-            target = Path(args[args.index("--dir") + 1])
-            (target / "metadata.json").write_text(json.dumps(metadata))
-            (target / metadata["name"]).write_bytes(b"tampered")
-            return ""
-
-        with patch.object(release, "gh", side_effect=fake_gh):
-            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-                release.download_binary(self.root, "123", "a" * 64, "0.6.0")
 
     def test_api_network_error_is_not_treated_as_missing_release(self):
         failure = subprocess.CompletedProcess([], 1, "", "HTTP 403: forbidden")
@@ -188,11 +132,7 @@ class ReleaseTests(unittest.TestCase):
     def test_publisher_refuses_to_move_existing_tag(self):
         self.prepare_fixture()
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
-        metadata = json.loads((self.root / ".release-assets.json").read_text())
-        binary = self.root / "binary.tar.gz"
-        binary.write_bytes(b"binary")
         with (
-            patch.object(release, "download_binary", return_value=(binary, metadata)),
             patch.object(
                 release,
                 "api_optional",
@@ -207,14 +147,11 @@ class ReleaseTests(unittest.TestCase):
     def test_publisher_refuses_to_overwrite_mismatched_public_asset(self):
         self.prepare_fixture()
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
-        metadata = json.loads((self.root / ".release-assets.json").read_text())
         source, _ = release.check(self.root)
-        binary = self.root / metadata["name"]
-        binary.write_bytes(b"binary")
         commit = self.git("rev-parse", "HEAD").decode().strip()
         responses = [
             {"object": {"type": "commit", "sha": commit}},
-            {"draft": False, "assets": [{"name": source.name}, {"name": binary.name}]},
+            {"draft": False, "assets": [{"name": source.name}]},
         ]
 
         def fake_gh(*args):
@@ -224,7 +161,6 @@ class ReleaseTests(unittest.TestCase):
             return ""
 
         with (
-            patch.object(release, "download_binary", return_value=(binary, metadata)),
             patch.object(release, "api_optional", side_effect=responses),
             patch.object(release, "gh", side_effect=fake_gh),
         ):

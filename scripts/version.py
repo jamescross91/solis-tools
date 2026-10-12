@@ -13,7 +13,7 @@ wrong version, and nothing checked.
 
 pyproject.toml reads solis_poll.VERSION dynamically, so it is never edited here.
 The Homebrew formula is prepared by scripts/release.py, which knows the archive
-and prebuilt-package checksums. This helper reports it but never rewrites it.
+checksum. This helper reports it but never rewrites it.
 """
 
 from __future__ import annotations

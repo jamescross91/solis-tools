@@ -266,7 +266,9 @@ class OctopusChargeWindowTests(unittest.TestCase):
         controller = DynamicVoltageController(self.configuration())
         decision = controller.evaluate(self.exporting(0, 254, window=True), 0, 5_000)
         self.assertEqual(decision.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
-        self.assertEqual(decision.desired_limit_w, 3_000)
+        # 3 kW is being exported, so the emergency cuts from that, not from the
+        # 5 kW limit above it.
+        self.assertEqual(decision.desired_limit_w, 1_000)
         self.assertEqual(controller.voltage_bounds_v, (215.0, 253.0))
 
     def test_the_window_is_ignored_while_octopus_is_disabled(self):
@@ -281,7 +283,7 @@ class OctopusChargeWindowTests(unittest.TestCase):
         during = controller.evaluate(self.exporting(1, 252.6, window=True), 0, 5_000)
         self.assertEqual(during.action, ControlAction.REDUCING)
 
-        after = controller.evaluate(self.exporting(2, 252.6, window=False), 0, 4_500)
+        after = controller.evaluate(self.exporting(2, 252.6, window=False), 0, 3_500)
         self.assertEqual(controller.voltage_bounds_v, (215.0, 258.0))
         self.assertEqual(after.action, ControlAction.INCREASING)
 
@@ -562,17 +564,106 @@ class ControllerTests(unittest.TestCase):
             maximum_export_w=12_000,
             site_export_permission_w=10_000,
         )
-        exporting = sample(0, voltage=250, grid_kw=2, battery_status="Idle")
+        exporting = sample(0, voltage=250, grid_kw=5, battery_status="Idle")
         controller.evaluate(exporting, 10_000, 5_000)
         increase = controller.evaluate(exporting, 10_000, 5_000)
         self.assertEqual(increase.action, ControlAction.INCREASING)
         self.assertEqual(increase.desired_limit_w, 5_200)
 
         emergency = controller.evaluate(
-            sample(1, voltage=258, grid_kw=2, battery_status="Idle"), 10_000, 5_000
+            sample(1, voltage=258, grid_kw=5, battery_status="Idle"), 10_000, 5_000
         )
         self.assertEqual(emergency.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
         self.assertEqual(emergency.desired_limit_w, 3_000)
+
+    def export_controller(self, **changes: object) -> DynamicVoltageController:
+        controller = self.controller(
+            import_enabled=False,
+            export_enabled=True,
+            export_control_validated=True,
+            settle_time_s=0,
+            **changes,
+        )
+        # The first evaluation only starts the activation timer.
+        controller.evaluate(sample(0, voltage=245, grid_kw=3, battery_status="Idle"), 0, 8_000)
+        return controller
+
+    def test_export_limit_is_trimmed_to_real_export_plus_headroom(self):
+        """The house was absorbing most of the generation, so an 8 kW limit was
+        never binding; a sudden drop in house load then jumped export to 8 kW,
+        over the voltage limit, and the inverter tripped."""
+        controller = self.export_controller()
+        decision = controller.evaluate(
+            sample(1, voltage=245, grid_kw=3, battery_status="Idle"), 0, 8_000
+        )
+        self.assertEqual(decision.action, ControlAction.REDUCING)
+        self.assertEqual(decision.desired_limit_w, 4_000)
+        self.assertIn("unused export allowance", decision.reason)
+
+    def test_the_export_headroom_is_configurable(self):
+        controller = self.export_controller(export_headroom_w=2_500)
+        decision = controller.evaluate(
+            sample(1, voltage=245, grid_kw=3, battery_status="Idle"), 0, 8_000
+        )
+        self.assertEqual(decision.desired_limit_w, 5_500)
+
+    def test_export_limit_never_exceeds_the_inverter_rating(self):
+        controller = self.export_controller(maximum_export_w=10_000, export_headroom_w=4_000)
+        decision = controller.evaluate(
+            sample(1, voltage=245, grid_kw=9, battery_status="Idle"), 0, 10_000
+        )
+        self.assertNotEqual(decision.action, ControlAction.INCREASING)
+        self.assertLessEqual(decision.desired_limit_w or 0, 10_000)
+
+    def test_an_unused_export_limit_is_not_raised_and_a_later_fall_is_trimmed(self):
+        controller = self.export_controller()
+        controller.evaluate(sample(1, voltage=245, grid_kw=3, battery_status="Idle"), 0, 8_000)
+        # Voltage has plenty of room, but the export is nowhere near 6 kW.
+        held = controller.evaluate(
+            sample(2, voltage=245, grid_kw=3, battery_status="Idle"), 0, 6_000
+        )
+        self.assertEqual(held.action, ControlAction.HOLDING)
+        self.assertIn("not binding", held.reason)
+        # Only once the excess has persisted does the limit follow it down.
+        still = controller.evaluate(
+            sample(31, voltage=245, grid_kw=3, battery_status="Idle"), 0, 6_000
+        )
+        self.assertEqual(still.action, ControlAction.HOLDING)
+        trimmed = controller.evaluate(
+            sample(33, voltage=245, grid_kw=3, battery_status="Idle"), 0, 6_000
+        )
+        self.assertEqual(trimmed.action, ControlAction.REDUCING)
+        self.assertEqual(trimmed.desired_limit_w, 4_000)
+
+    def test_a_binding_export_limit_still_climbs_when_the_voltage_allows(self):
+        controller = self.export_controller()
+        controller.evaluate(sample(1, voltage=245, grid_kw=3, battery_status="Idle"), 0, 8_000)
+        decision = controller.evaluate(
+            sample(2, voltage=245, grid_kw=4, battery_status="Idle"), 0, 4_000
+        )
+        self.assertEqual(decision.action, ControlAction.INCREASING)
+        self.assertGreater(decision.desired_limit_w or 0, 4_000)
+
+    def test_an_export_emergency_cuts_from_what_is_exported(self):
+        """From an 8 kW limit with 3 kW exported, a 2 kW step used to leave the
+        limit at 6 kW and the export untouched, so it took several cycles of
+        8, 6, 4 kW before anything actually fell."""
+        controller = self.export_controller()
+        emergency = controller.evaluate(
+            sample(1, voltage=259, grid_kw=3, battery_status="Idle"), 0, 8_000
+        )
+        self.assertEqual(emergency.state, VoltageControlState.EMERGENCY_HIGH_VOLTAGE)
+        self.assertEqual(emergency.desired_limit_w, 1_000)
+
+    def test_a_voltage_cut_holds_export_control_only_for_a_bounded_time(self):
+        controller = self.export_controller()
+        controller.evaluate(sample(1, voltage=259, grid_kw=3, battery_status="Idle"), 0, 8_000)
+        idle = sample(2, voltage=245, grid_kw=0, battery_status="Idle")
+        controller.evaluate(idle, 0, 1_000, export_baseline_w=8_000)
+        self.assertEqual(controller.detector._candidate(idle), "export")
+        late = sample(700, voltage=245, grid_kw=0, battery_status="Idle")
+        controller.evaluate(late, 0, 1_000, export_baseline_w=8_000)
+        self.assertIsNone(controller.detector._candidate(late))
 
 
 class FakeClient:
