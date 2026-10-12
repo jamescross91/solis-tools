@@ -133,8 +133,8 @@ password. APNs push to the iOS app is deferred.
 
 ## Installing on a Raspberry Pi
 
-Target: Raspberry Pi 4 or 5 on Raspberry Pi OS Lite 64-bit (Bookworm or later),
-on wired Ethernet, booting from SSD or NVMe rather than an SD card. If the
+Target: Raspberry Pi 4 or 5 on Raspberry Pi OS Lite 64-bit (Bookworm or later,
+which ships Python 3.11; the hub needs Python 3.10 or newer), on wired Ethernet, booting from SSD or NVMe rather than an SD card. If the
 inverter has a backup (EPS) output, put the Pi on a backed-up circuit so it
 keeps running in an outage.
 
@@ -151,6 +151,45 @@ installed from the checkout, the state directory `/var/lib/solis-tools` (0700),
 printed once), the systemd unit and the Avahi advertisement. On a first run it
 stops before starting the service so you can set the logger's address in
 `poller_args`; then `sudo systemctl start solis-hub`.
+
+The installer checks the Python version first, before it changes anything. On an
+image whose Python is older than 3.10 it stops with a message and leaves the
+system untouched, and a virtualenv left by an earlier failed run is replaced
+rather than reused. `sudo deploy/pi/install.sh --check-python` shows which
+interpreter it would use without installing anything, and `--python PATH` (or
+`SOLIS_PYTHON`) chooses one explicitly.
+
+### Older images, such as Bullseye
+
+Raspberry Pi OS 11 (Bullseye) ships Python 3.9, which cannot install pymodbus
+3.10 (pip reports `No matching distribution found for pymodbus`). The simplest
+fix is to flash Bookworm or later. To keep the image, build Python 3.11
+alongside the system one; it does not replace `python3`. Expect 15 to 40
+minutes on a Pi 4:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential libssl-dev zlib1g-dev libbz2-dev \
+  libreadline-dev libsqlite3-dev libffi-dev liblzma-dev
+cd /tmp
+curl -fsSLO https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
+tar -xzf Python-3.11.9.tgz
+cd Python-3.11.9
+./configure --prefix=/opt/python-3.11
+make -j"$(nproc)"
+sudo make altinstall
+/opt/python-3.11/bin/python3.11 -c 'import ssl, sqlite3, bz2, lzma, ctypes, venv; print("ok")'
+```
+
+The last line must print `ok`: a Python built without `libssl-dev` cannot
+install anything from PyPI. Then run the installer from the checkout as usual.
+It finds `/opt/python-3.11/bin/python3.11` by itself, because the system
+`python3` is too old:
+
+```sh
+cd ~/solis-tools
+sudo deploy/pi/install.sh
+```
 
 The unit runs as `solis`, sets `XDG_STATE_HOME=/var/lib` so the existing state
 directory logic resolves to `/var/lib/solis-tools`, and hardens the process

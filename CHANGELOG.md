@@ -3,6 +3,18 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `deploy/pi/install.sh` no longer fails half way on a Raspberry Pi whose Python is
+  older than 3.10 (Raspberry Pi OS Bullseye ships 3.9, where pymodbus 3.10 cannot
+  install). It now checks the interpreter first and stops with instructions before
+  changing anything, picks a newer Python if one is installed, accepts
+  `--python PATH`, replaces a virtualenv left by an earlier failed run, and shows
+  pip's own output so a network problem is visible. `docs/hub.md` has the steps for
+  building Python 3.11 on an older image.
+
 ## 0.7.0
 
 Adds the optional `solis-hub` and a Hub connection mode for the menu-bar app; Direct mode is unchanged by default. After upgrading, macOS may ask once for local network access (Bonjour discovery). Stop the running menu-bar app and poller before upgrading, and keep dynamic control off while testing an installation. Only one controller should run: before enabling the hub on a Raspberry Pi, turn control off on the Mac (see `docs/hub.md`).
