@@ -113,15 +113,14 @@ struct DashboardView: View {
             footer
         }
         .frame(width: 450, height: 680)
+        .background(WindowVisibilityReader { visible in
+            monitor.setDashboardVisible(visible)
+        })
         .onAppear {
             pendingMode = monitor.policy.mode
-            monitor.setDashboardVisible(true)
             if !needsSetup, !monitor.isRunning {
                 connect()
             }
-        }
-        .onDisappear {
-            monitor.setDashboardVisible(false)
         }
         // "Switch to Hub" from a banner changes the mode while the settings
         // form may be open on the other one.

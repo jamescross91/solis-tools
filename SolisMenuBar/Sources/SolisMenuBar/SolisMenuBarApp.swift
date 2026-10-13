@@ -4,11 +4,14 @@ import SwiftUI
 
 @main
 struct SolisMenuBarApp: App {
-    @StateObject private var monitor: MonitorStore
+    // Held, not observed. As a @StateObject every change to the store
+    // re-evaluated the whole scene, which redrew the status item and the
+    // hidden popover on each sample. The views below observe what they show.
+    @State private var monitor: MonitorStore
 
     init() {
         if CommandLine.arguments.contains("--version") {
-            print("solis-menubar 0.8.0")
+            print("solis-menubar 0.8.1")
             Darwin.exit(EXIT_SUCCESS)
         }
 
@@ -16,7 +19,7 @@ struct SolisMenuBarApp: App {
         // has just exited, that write would otherwise kill this process.
         signal(SIGPIPE, SIG_IGN)
         let monitor = MonitorStore()
-        _monitor = StateObject(wrappedValue: monitor)
+        _monitor = State(initialValue: monitor)
         // MenuBarExtra label tasks are not guaranteed to run until macOS
         // presents the item. Start from the application lifecycle so a login
         // launch resumes unattended monitoring without needing a click.

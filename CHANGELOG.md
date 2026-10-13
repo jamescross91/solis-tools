@@ -3,6 +3,26 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.1
+
+Fixes the menu bar's energy use. Upgrading only the Mac is enough; the hub is
+unchanged. Stop the running menu-bar app before upgrading. Nothing on the
+inverter changes.
+
+### Fixed
+
+- The menu bar no longer keeps working after its popover is closed. Closing the
+  popover hides its window without SwiftUI reporting it, so the app went on
+  treating the dashboard as open: it re-rendered the dashboard and both charts
+  in the hidden window on every sample, redrew the menu bar item each time, and
+  kept the poller (or, in Hub mode, the hub's poller) at its fast cadence
+  instead of the idle interval. Visibility now follows the popover's window,
+  and the app no longer redraws the menu bar item on every change to the
+  dashboard's state. On a Hub-mode Mac this took the closed menu bar from about
+  10–16% CPU and 350 MB to under 2% and about 60 MB.
+- The Swift tests no longer leave a preferences file in `~/Library/Preferences`
+  for every test that stores settings.
+
 ## 0.8.0
 
 The menu bar can now configure a hub and sign it in to Hypervolt and Octopus.

@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 import SolisHubKit
@@ -87,7 +88,7 @@ final class ConnectionPolicyTests: XCTestCase {
     }
 
     func testModeAndIgnoredHubsPersist() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-policy-\(UUID().uuidString)"))
+        let defaults = try temporaryDefaults(prefix: "solis-policy")
         XCTAssertEqual(ConnectionPolicy.stored(defaults).mode, .direct)
 
         var policy = ConnectionPolicy.stored(defaults)
@@ -103,7 +104,7 @@ final class ConnectionPolicyTests: XCTestCase {
     /// A value from a newer build, or a corrupted preference, must land on
     /// the mode that behaves exactly as the app always has.
     func testUnknownStoredModeFallsBackToDirect() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-policy-\(UUID().uuidString)"))
+        let defaults = try temporaryDefaults(prefix: "solis-policy")
         defaults.set("satellite", forKey: ConnectionMode.defaultsKey)
         XCTAssertEqual(ConnectionPolicy.stored(defaults).mode, .direct)
         defaults.set("", forKey: ConnectionMode.defaultsKey)
@@ -111,7 +112,7 @@ final class ConnectionPolicyTests: XCTestCase {
     }
 
     func testIgnoreSurvivesRoundTripToHubAndBack() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-policy-\(UUID().uuidString)"))
+        let defaults = try temporaryDefaults(prefix: "solis-policy")
         var policy = ConnectionPolicy.stored(defaults)
         policy.ignore(hubID: "hub-1")
         policy.persist(defaults)
@@ -273,7 +274,7 @@ final class MonitorStoreModeTests: XCTestCase {
         if let existing {
             defaults = existing
         } else {
-            defaults = try XCTUnwrap(UserDefaults(suiteName: "solis-store-\(UUID().uuidString)"))
+            defaults = try temporaryDefaults(prefix: "solis-store")
         }
         defaults.set("192.168.1.57", forKey: "host")
         defaults.set(mode.rawValue, forKey: ConnectionMode.defaultsKey)
@@ -703,6 +704,36 @@ final class MonitorStoreModeTests: XCTestCase {
         try await settle()
         let arrived = try XCTUnwrap(fixture.store.lastEnvelopeAt)
         XCTAssertGreaterThanOrEqual(arrived, before)
+    }
+
+    // MARK: Closed popover
+
+    /// Each change the store publishes re-renders the dashboard, charts and
+    /// all, even in the ordered-out popover window. A routine sample must
+    /// publish nothing until someone opens it.
+    func testSamplesPublishNothingWhileTheDashboardIsHidden() async throws {
+        let fixture = try makeFixture(mode: .hub)
+        fixture.store.startIfConfigured()
+        await fixture.store.waitUntilIdle()
+        let hub = try XCTUnwrap(fixture.log.hubs.first)
+        hub.emit(.envelope(try envelope(timestamp: "2026-08-19T16:30:00+01:00")))
+        try await settle()
+        XCTAssertEqual(fixture.store.state, .connected)
+
+        var changes = 0
+        let subscription = fixture.store.objectWillChange.sink { changes += 1 }
+        defer { subscription.cancel() }
+        for poll in 2...4 {
+            hub.emit(.envelope(try envelope(timestamp: "2026-08-19T16:30:0\(poll)+01:00", successfulPolls: poll)))
+        }
+        try await settle()
+        XCTAssertEqual(changes, 0)
+
+        fixture.store.setDashboardVisible(true)
+        changes = 0
+        hub.emit(.envelope(try envelope(timestamp: "2026-08-19T16:30:05+01:00", successfulPolls: 5)))
+        try await settle()
+        XCTAssertGreaterThan(changes, 0)
     }
 
     /// A hub that is down but still being retried counts as running, so
