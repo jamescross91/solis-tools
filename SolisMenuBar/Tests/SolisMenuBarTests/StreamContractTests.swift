@@ -6,22 +6,22 @@ import SolisHubKit
 /// The stream contract tests moved to SolisHubKit with the models. What stays
 /// here is the menu bar's own state: stored settings and the chart buffers.
 final class StoredConfigurationTests: XCTestCase {
-    private func defaults(_ values: [String: Any]) -> UserDefaults {
-        let suite = UserDefaults(suiteName: "solis-tests-\(UUID().uuidString)")!
+    private func defaults(_ values: [String: Any]) throws -> UserDefaults {
+        let suite = try temporaryDefaults(prefix: "solis-tests")
         for (key, value) in values {
             suite.set(value, forKey: key)
         }
         return suite
     }
 
-    func testNoHostMeansNothingToStart() {
-        XCTAssertNil(MonitorConfiguration.stored(defaults([:])))
-        XCTAssertNil(MonitorConfiguration.stored(defaults(["host": "   "])))
+    func testNoHostMeansNothingToStart() throws {
+        XCTAssertNil(MonitorConfiguration.stored(try defaults([:])))
+        XCTAssertNil(MonitorConfiguration.stored(try defaults(["host": "   "])))
     }
 
     func testStoredSettingsAreReadWithTheDashboardDefaults() throws {
         let configuration = try XCTUnwrap(
-            MonitorConfiguration.stored(defaults(["host": " 192.168.1.57 "]))
+            MonitorConfiguration.stored(try defaults(["host": " 192.168.1.57 "]))
         )
         XCTAssertEqual(configuration.host, "192.168.1.57")
         XCTAssertEqual(configuration.port, 502)
@@ -51,7 +51,7 @@ final class StoredConfigurationTests: XCTestCase {
     func testUnreasonableStoredValuesAreClamped() throws {
         let configuration = try XCTUnwrap(
             MonitorConfiguration.stored(
-                defaults([
+                try defaults([
                     "host": "inverter.local",
                     "pollInterval": 0.01,
                     "idlePollInterval": 0.1,
