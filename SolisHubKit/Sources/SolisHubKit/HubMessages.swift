@@ -1,6 +1,6 @@
 import Foundation
 
-/// Constants of the hub protocol; docs/hub-protocol.md is the reference.
+/// Constants of the hub protocol; the Wattlark hub's docs/hub-protocol.md is the reference.
 public enum HubProtocol {
     /// Independent of the stream's schema_version. Bumped only for a change
     /// to the hub's own messages.

@@ -2,7 +2,7 @@
 
 The iOS energy monitor adopts `SolisHubKit` in its own repository, after this
 one lands. This page is the contract it builds against. The wire format is in
-[hub-protocol.md](hub-protocol.md); running the hub is in [hub.md](hub.md).
+the Wattlark hub repository, which also covers running the hub.
 
 ## Principles
 

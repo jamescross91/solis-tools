@@ -1,7 +1,7 @@
 # Architecture
 
-Two programs, one repository, one interface between them. An optional third,
-the hub, is a second consumer of that interface (see below).
+Two programs, one repository, one interface between them. An always-on hub,
+developed separately, is a second consumer of that interface (see below).
 
 ```
              Modbus TCP: FC04 telemetry; typed FC03/FC06 control
@@ -20,8 +20,8 @@ the hub, is a second consumer of that interface (see below).
                                                      SolisMenuBar.app
 ```
 
-With the optional hub the menu-bar app is a viewer instead of the poller's
-parent; see [The hub](#the-hub-optional) below.
+In Hub mode the menu-bar app is a viewer instead of the poller's parent; see
+[Hub mode](#hub-mode-optional) below.
 
 ## Python poller and controller
 
@@ -38,7 +38,6 @@ crash journal, so safety behaviour can be tested with deterministic samples.
 | Presentation | `render`, `sparkline`, `bar`, `fit`, `Palette` |
 | Interfaces | `parse_args`, `print_once`, `stream_payload`, `main` |
 | Voltage control | Typed actuators, baseline ownership, SQLite minute history and event log |
-| Hub | `solis_hub.py`: supervises the poller and serves its stream to many clients; see [The hub](#the-hub-optional) |
 | Hypervolt | `hypervolt_client.py` — cloud auth and WebSocket transport for the EV charger, independent of Modbus |
 | Octopus | `octopus_client.py`, which reads Intelligent Octopus planned charges on a background thread |
 
@@ -200,48 +199,21 @@ translates stream state from either source into `.connecting` / `.connected` /
 `.degraded` / `.failed`. See
 [stream-contract.md](stream-contract.md) for the payload and how to change it.
 
-## The hub (optional)
+## Hub mode (optional)
 
-`solis_hub.py` (console script `solis-hub`) is a second consumer of exactly the
-stdout contract above. It runs on a Raspberry Pi, supervises one
-`solis-poll --stream-json` child and fans the stream out to any number of
-clients over an authenticated WebSocket, with a small HTTP API on the same
-port. Without it nothing changes.
-
-```text
-   inverter ◄── Modbus TCP, one session ── solis-poll ◄── attention on/off ──┐
-                                                │ one JSON object per sample │
-                                                ▼                            │
-                                            solis-hub                        │
-                      supervisor · state cache · history · fan-out ──────────┘
-                              │  ws:// (LAN)   wss:// (Cloudflare Tunnel)
-                     ┌────────┴───────┐
-            SolisMenuBar (Hub mode)   iOS app, through SolisHubKit
-```
-
-| Part | What it does |
-| --- | --- |
-| Poller supervisor | Finds `solis-poll` beside its own executable then on `PATH`, drops lines that are not JSON, restarts with 1 s to 60 s backoff, never runs two children, and on SIGTERM forwards it and waits up to 20 s for restoration |
-| State cache | Keeps `configuration`, `recent_events` and `octopus_schedule`, which the stream sends once or on change, so a late joiner's snapshot is complete |
-| Attention aggregation | Writes `attention on` when the first client wants it and `attention off` when the last stops |
-| Fan-out | A bounded queue of 16 per client; on overflow the queue is replaced by one snapshot |
-| History | Two in-memory rings (30 minutes native, 24 hours at one sample per 30 s) plus read-only endpoints over the poller's SQLite history |
-| Notifications | Optional ntfy posts from a background thread |
-
-The hub uses the standard library only. Its WebSocket server is hand-rolled,
-like the client in `hypervolt_client.py`, so PyModbus stays the only runtime
-dependency. It never speaks Modbus and the only thing it writes to the poller
-is the two attention strings. Clients can change the controller settings and
-sign in to Hypervolt and Octopus over its HTTP API; the hub saves settings to
-`control-settings.json` in its state directory, checks them with
-`solis_poll.check_arguments`, and restarts the poller with them (the old poller
-restores the baseline and exits before the new one starts). Wire format and
-versioning are in [hub-protocol.md](hub-protocol.md); operation in
-[hub.md](hub.md).
+The menu bar can also be a viewer instead of the poller's parent. The Wattlark
+hub, developed and distributed separately from this repository, runs one
+`solis-poll --stream-json` child on an always-on machine and fans its stream
+out to clients over an authenticated WebSocket. It is a second consumer of
+exactly the stdout contract above, and it depends on `solis_poll` for
+`check_arguments`, `PollerArgumentError`, `control_identity`,
+`default_control_state_dir` and `VERSION`, and on `voltage_control` for
+`ExportControlValidation` and `export_validation_path`. Treat those names as an
+interface: renaming one breaks the hub.
 
 **The single-controller rule.** At any moment exactly one `solis-poll` holds
 the Modbus session and runs voltage control, either the Mac's (Direct mode) or
-the Pi's. No client opens a second session and none falls back automatically
+the hub's. No client opens a second session and none falls back automatically
 from one to the other.
 
 ### SolisHubKit
@@ -367,8 +339,6 @@ See [releasing.md](releasing.md).
 | Decoders, recorder, sparkline | `test_solis_poll.py`, with a fake client |
 | Control, freshness, write recovery, ownership and history | `test_voltage_control.py`, deterministic samples and fake clients |
 | Poll loop, reconnect, CLI, recording | `test_end_to_end.py`, real subprocess against `fake_inverter.py` |
-| Hub: framing, auth, cache, attention, history, alerts | `test_solis_hub.py`, with a fake poller process |
-| Hub with the real poller | `test_hub_end_to_end.py`, real `solis-hub` and `solis-poll` against `fake_inverter.py`, asserting one Modbus session throughout |
 | Python/Swift contract | `SolisHubKit/Tests/`, `SolisMenuBar/Tests/SolisMenuBarTests/` |
 
 `fake_inverter.py` is the reason the middle row exists. Nothing in the main loop

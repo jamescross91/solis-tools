@@ -16,10 +16,10 @@ Produced by `stream_payload` in `solis_poll.py`; consumed by `StreamDecoder` and
 the types in `SolisHubKit/Sources/SolisHubKit/StreamModels.swift`, which the
 menu bar and the iOS app share.
 
-The menu-bar app is not the only consumer. `solis-hub` is a second one: it
-reads this stream from a poller child on a Raspberry Pi and forwards each
-envelope unchanged, byte for byte, inside its own message wrapper (see
-[hub-protocol.md](hub-protocol.md)). It parses a line only to cache the fields
+The menu-bar app is not the only consumer. The Wattlark hub, developed
+separately, is a second one: it reads this stream from a poller child on an
+always-on machine and forwards each envelope unchanged, byte for byte, inside
+its own message wrapper. It parses a line only to cache the fields
 that are sent once or on change, and never renames, removes or adds a field to
 a `sample`, so the rules below bind it exactly as they bind the app, and `schema_version`
 stays 2. A consumer that keeps the last `configuration`, `recent_events` or

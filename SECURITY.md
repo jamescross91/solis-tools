@@ -40,16 +40,8 @@ other address, writes while control is disabled, bypass of the export gate,
 exposure of credentials, or execution of untrusted output should be treated as
 security-sensitive.
 
-The optional `solis-hub` listens on a network port. Every request except
-`/v1/healthz` needs a bearer token, compared in constant time and kept in a
-0600 file, with failed attempts rate-limited per source address; remote access
-is meant to sit behind Cloudflare Access as well. The hub never speaks Modbus.
-A client holding the token can change the controller settings and sign the hub
-in to Hypervolt and Octopus; the hub checks settings with the poller's own rules
-and applies them by restarting the poller, and passes secrets only to the
-login commands, on stdin. The token is therefore an administrator credential:
-treat it like a password. A report that shows an authentication bypass, a
-setting outside the controller settings (an address, a path, an arbitrary
-poller option) reaching the poller, a secret in a log or response, any
-client-driven Modbus write, or a way to make a second Modbus session should be
-treated as security-sensitive.
+Hub mode in the menu bar keeps the hub's token and any Cloudflare Access
+credentials in the Keychain. A report that shows either reaching a log,
+`UserDefaults` or a host the user did not choose, or Hub mode starting a local
+poller, should be treated as security-sensitive. The hub server is maintained
+separately; report hub vulnerabilities through the same private channel.
