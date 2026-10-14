@@ -16,5 +16,5 @@ PR using scripts/release.py prepare VERSION. Do not create a second formula PR. 
 - [ ] Documentation is updated where necessary.
 - [ ] No secrets, credentials or captured logs from a real network are included.
 - [ ] Telemetry remains read-only; control writes require explicit opt-in, stay within the typed whitelist, and preserve the export-validation gate.
-- [ ] Hub changes stay standard-library only, add no write path or control command, and leave `schema_version` unchanged.
+- [ ] Changes to names the hub imports (see "Hub mode" in docs/architecture.md) are deliberate and coordinated with the hub.
 - [ ] Control changes include fake-inverter or deterministic safety/recovery tests; no test writes to physical hardware.

@@ -3,6 +3,16 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Removed
+
+- `solis-hub`, the Raspberry Pi deployment files and the hub's documentation
+  have moved out of solis-tools into the separate Wattlark hub. Installing or
+  upgrading solis-tools no longer installs `solis-hub`; an existing Pi
+  installation keeps running, and is upgraded from the Wattlark hub from now
+  on. The menu bar's Hub mode and `SolisHubKit` are unchanged and stay here.
+
 ## 0.8.1
 
 Fixes the menu bar's energy use. Upgrading only the Mac is enough; the hub is

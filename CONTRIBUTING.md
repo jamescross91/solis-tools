@@ -47,17 +47,14 @@ bank, so the monitor, the menu-bar app and the tests all run with no hardware:
 make demo                                          # dashboard against a fake inverter
 python3 fake_inverter.py --port 5020 --drop-after 10   # forces a reconnect
 python3 fake_inverter.py --port 5020 --corrupt-after 8 # a bad register mid-run
-make hub-demo                                          # solis-hub for Hub mode
 ```
 
 Tests must never write to physical inverter hardware. `fake_inverter.py`
 implements input reads plus FC03/FC06 for only the two control whitelist
 addresses, allowing actuator, ownership and restoration behaviour to be tested
 locally. `test_solis_poll.py` holds decoder tests against a fake client;
-`test_end_to_end.py` drives the real CLI against the fake Modbus server;
-`test_solis_hub.py` and `test_hub_end_to_end.py` cover the optional hub (the
-latter runs the real hub and poller), and `test_deploy.py` checks the Pi files
-against the code and docs.
+`test_end_to_end.py` drives the real CLI against the fake Modbus server, and
+`test_docs.py` checks the documentation's relative links.
 
 [CLAUDE.md](CLAUDE.md) records the conventions and the traps that have caused
 real bugs — register numbering, the five places a new metric has to be added,
