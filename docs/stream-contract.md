@@ -135,7 +135,13 @@ stale telemetry, to decide whether the car is charging.
 offset) and `kind` (Octopus's dispatch type, such as `SMART` or `BOOST`, or
 `MIXED` where touching slots of different types were merged).
 `charge_window_active` counts the lead-in, so it can be true a few minutes
-before `active_window.start`. After a failed refresh the previous plan is
+before `active_window.start`. `planned_windows` is what the voltage band
+follows: once a charge has started it is kept to its end even if Octopus
+drops or shortens it, so the band doesn't relax under a car still drawing.
+`dispatches` (from 0.8.2) is Octopus's plan exactly as last sent, unmerged
+and not kept, so it shows the gaps Octopus has replanned; use it to know when
+Octopus is dispatching, for example to price a half-hour or plan around the
+car. It is absent from an older poller. After a failed refresh the previous plan is
 kept and `last_error` says why; `fetched_at` is the last successful refresh.
 `normal_minimum_voltage_v` / `normal_maximum_voltage_v` are the band held
 outside a charge and `charge_minimum_voltage_v` / `charge_maximum_voltage_v`

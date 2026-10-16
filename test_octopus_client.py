@@ -195,6 +195,34 @@ class MonitorTests(unittest.TestCase):
         schedule = monitor.refresh()
         self.assertEqual(schedule.windows, (window(-10, 50),))
 
+    def test_dispatches_are_octopus_plan_as_sent_while_the_band_keeps_a_running_charge(self):
+        """Octopus shortens a charge already under way and splits off a later
+        one. The band keeps the running window to its old end; `dispatches`
+        says what Octopus now plans, gap included."""
+        client, now = FakeClient(), [NOW]
+        monitor = self.monitor(client, now)
+        client.results = [[window(-10, 120)], [window(-10, 40), window(60, 120)]]
+        monitor.refresh()
+        now[0] = NOW + timedelta(minutes=5)
+        schedule = monitor.refresh()
+        self.assertEqual(schedule.windows, (window(-10, 120),))
+        self.assertEqual(schedule.dispatches, (window(-10, 40), window(60, 120)))
+        sent = schedule.stream_dict(now[0], 300)["dispatches"]
+        self.assertEqual(
+            [(d["start"], d["end"]) for d in sent],
+            [
+                (window(-10, 40).stream_dict()["start"], window(-10, 40).stream_dict()["end"]),
+                (window(60, 120).stream_dict()["start"], window(60, 120).stream_dict()["end"]),
+            ],
+        )
+
+    def test_a_failed_refresh_keeps_the_known_dispatches(self):
+        client, now = FakeClient(), [NOW]
+        monitor = self.monitor(client, now)
+        client.results = [[window(30, 90)], OctopusError("Octopus API answered HTTP 503")]
+        monitor.refresh()
+        self.assertEqual(monitor.refresh().dispatches, (window(30, 90),))
+
     def test_a_cancellation_before_the_charge_starts_is_honoured(self):
         """Inside the lead-in the band is already tight, but the charge has
         not started, so Octopus withdrawing it must relax the band."""

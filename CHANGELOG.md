@@ -5,6 +5,15 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- The stream's `octopus_schedule` carries `dispatches`: Intelligent Octopus's
+  plan exactly as Octopus last sent it. `planned_windows` keeps a charge that
+  has started to its original end, which is right for the voltage band but
+  wrong for knowing when Octopus is dispatching: when Octopus split a running
+  charge into 13:30–17:00 and 18:00–19:30, `planned_windows` still said
+  12:09–19:30. The voltage band is unchanged.
+
 ### Removed
 
 - `solis-hub`, the Raspberry Pi deployment files and the hub's documentation
