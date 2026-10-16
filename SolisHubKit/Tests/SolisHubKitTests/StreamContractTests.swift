@@ -172,6 +172,10 @@ final class StreamContractTests: XCTestCase {
                   "start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T05:30:00+01:00",
                   "kind": "SMART"
                 }],
+                "dispatches": [
+                  {"start": "2026-09-27T23:30:00+01:00", "end": "2026-09-28T02:00:00+01:00", "kind": "SMART"},
+                  {"start": "2026-09-28T03:00:00+01:00", "end": "2026-09-28T05:30:00+01:00", "kind": "SMART"}
+                ],
                 "lead_time_s": 300.0,
                 "fetched_at": "2026-09-27T23:28:00+01:00",
                 "last_error": null,
@@ -194,6 +198,7 @@ final class StreamContractTests: XCTestCase {
         )
         XCTAssertNil(schedule.nextWindow)
         XCTAssertEqual(schedule.plannedWindows.count, 1)
+        XCTAssertEqual(schedule.dispatches?.count, 2)
         XCTAssertEqual(schedule.leadTimeS, 300)
         XCTAssertNil(schedule.lastError)
         XCTAssertEqual(schedule.normalMaximumVoltageV, 258.0)

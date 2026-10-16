@@ -193,11 +193,21 @@ def merge_windows(windows: list[ChargeWindow]) -> tuple[ChargeWindow, ...]:
 
 @dataclass(frozen=True)
 class OctopusSchedule:
-    """An immutable view of the plan, safe to hand across threads."""
+    """An immutable view of the plan, safe to hand across threads.
+
+    `windows` is what the voltage band follows: Octopus's plan, merged, with a
+    charge already under way kept to its end even if Octopus drops or shortens
+    it (see `OctopusScheduleMonitor.refresh`). `dispatches` is Octopus's plan
+    exactly as it last sent it, unmerged, for anything that needs to know when
+    Octopus is actually dispatching, such as pricing a half-hour or planning
+    around the car: a kept window covers time Octopus no longer plans to
+    charge in.
+    """
 
     windows: tuple[ChargeWindow, ...] = ()
     fetched_at: datetime | None = None
     last_error: str | None = None
+    dispatches: tuple[ChargeWindow, ...] = ()
 
     def active_window(self, now: datetime, lead_time_s: float) -> ChargeWindow | None:
         """The window whose tightened band applies at `now`, starting
@@ -239,6 +249,7 @@ class OctopusSchedule:
             "active_window": active.stream_dict() if active else None,
             "next_window": following.stream_dict() if following else None,
             "planned_windows": [window.stream_dict() for window in self.upcoming(now)],
+            "dispatches": [window.stream_dict() for window in self.dispatches if window.end > now],
             "lead_time_s": lead_time_s,
             "fetched_at": (
                 self.fetched_at.astimezone().isoformat(timespec="seconds")
@@ -527,9 +538,13 @@ class OctopusScheduleMonitor:
             raise
         except OctopusError as exc:
             self.consecutive_failures += 1
-            schedule = OctopusSchedule(previous.windows, previous.fetched_at, str(exc))
+            schedule = OctopusSchedule(
+                previous.windows, previous.fetched_at, str(exc), previous.dispatches
+            )
         else:
             self.consecutive_failures = 0
+            # As Octopus sent them, before a started window is kept below.
+            dispatches = tuple(sorted((w for w in fetched if w.end > now), key=lambda w: w.start))
             # Lead time 0: a window still in its lead-in has not started, so
             # a cancellation Octopus sends before then is honoured.
             started = previous.active_window(now, 0.0)
@@ -539,6 +554,7 @@ class OctopusScheduleMonitor:
                 tuple(window for window in merge_windows(fetched) if window.end > now),
                 now,
                 None,
+                dispatches,
             )
         self._schedule = schedule
         return schedule

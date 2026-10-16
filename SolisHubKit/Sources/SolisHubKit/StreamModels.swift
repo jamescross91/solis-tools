@@ -183,6 +183,11 @@ public struct OctopusScheduleDetails: Decodable, Sendable {
     public let activeWindow: OctopusChargeWindow?
     public let nextWindow: OctopusChargeWindow?
     public let plannedWindows: [OctopusChargeWindow]
+    /// Octopus's plan exactly as it last sent it: unlike `plannedWindows`, a
+    /// running charge Octopus shortens or splits shows its gaps. For when
+    /// Octopus is dispatching (pricing, planning around the car), not for
+    /// the voltage band. Nil from a poller before 0.8.2.
+    public let dispatches: [OctopusChargeWindow]?
     public let leadTimeS: Double
     public let fetchedAt: String?
     public let lastError: String?
