@@ -43,11 +43,18 @@ class FakeOctopusApi:
         api_key: str = FAKE_API_KEY,
         accounts: tuple[str, ...] = ("A-1234ABCD",),
         devices: tuple[str, ...] = ("00000000-0009-4000-8020-000000000001",),
+        unknown_device_is_empty: bool = False,
         port: int = 0,
     ):
         self.api_key = api_key
         self.accounts = accounts
         self.devices = devices
+        # Live Octopus answers a device no longer on the account with an
+        # empty plan, not an error (seen when it re-enrolled a car).
+        self.unknown_device_is_empty = unknown_device_is_empty
+        # A device's own plan, where it differs from `dispatches`, which every
+        # listed device otherwise shares.
+        self.device_dispatches: dict[str, list[dict[str, str]]] = {}
         self.dispatches: list[dict[str, str]] = []
         self.valid_tokens: set[str] = set()
         self.token_requests = 0
@@ -154,8 +161,11 @@ class FakeOctopusApi:
             if "flexPlannedDispatches" in query:
                 match = re.search(r'deviceId: "([^"]*)"', query)
                 if not match or match.group(1) not in self.devices:
+                    if self.unknown_device_is_empty:
+                        return 200, {"data": {"flexPlannedDispatches": []}}
                     return 200, self._error("KT-CT-4340", "Device not found.")
-                return 200, {"data": {"flexPlannedDispatches": list(self.dispatches)}}
+                plan = self.device_dispatches.get(match.group(1), self.dispatches)
+                return 200, {"data": {"flexPlannedDispatches": list(plan)}}
             if "devices(" in query:
                 devices = [
                     {

@@ -5,6 +5,17 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Intelligent Octopus charges are read for every device on the account, on
+  every refresh. The device was found once at sign-in and saved; when Octopus
+  enrolled the car again under a new device ID it answered the old one with an
+  empty plan, not an error, and the poller reported nothing planned through a
+  whole day of charging. Any enrolled car or charger can now be dispatched,
+  and added, replaced or removed, with nothing to re-run. `octopus-login` and
+  the menu bar's form no longer ask for a device; `--device` is still accepted
+  and ignored.
+
 ### Added
 
 - The stream's `octopus_schedule` carries `dispatches`: Intelligent Octopus's

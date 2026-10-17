@@ -29,7 +29,7 @@ final class OctopusLoginRunner: ObservableObject {
     /// credentials file once, rather than polling it.
     @Published private(set) var completedSignIns = 0
 
-    func signIn(apiKey: String, accountNumber: String, deviceID: String, credentialsPath: String) {
+    func signIn(apiKey: String, accountNumber: String, credentialsPath: String) {
         guard
             let path = ExecutableLocator.locate(
                 named: "octopus-login", environmentOverride: "OCTOPUS_LOGIN_PATH"
@@ -42,9 +42,6 @@ final class OctopusLoginRunner: ObservableObject {
         var arguments = ["--credentials", credentialsPath]
         if !accountNumber.isEmpty {
             arguments.append(contentsOf: ["--account", accountNumber])
-        }
-        if !deviceID.isEmpty {
-            arguments.append(contentsOf: ["--device", deviceID])
         }
 
         let process = Process()

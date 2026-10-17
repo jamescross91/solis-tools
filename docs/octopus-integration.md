@@ -51,10 +51,15 @@ Octopus Energy integration uses:
 - `obtainKrakenToken(input: {APIKey})` exchanges the account's API key for a JWT,
   reused until five minutes before its `exp` claim and renewed once if a query is
   rejected.
-- `viewer { accounts { number } }` and `devices(accountNumber)` find the account
-  and the enrolled device, once, in `octopus-login`.
-- `flexPlannedDispatches(deviceId)` returns the plan: `start`, `end` and `type`
-  for each dispatch. `plannedDispatches`, the older query, was withdrawn.
+- `viewer { accounts { number } }` finds the account, once, in `octopus-login`.
+- `devices(accountNumber)` lists the account's Intelligent Octopus devices on
+  every refresh, and `flexPlannedDispatches(deviceId)` returns each one's plan
+  (`start`, `end` and `type` for each dispatch); the plans are read together.
+  A dispatch for any enrolled car or charger bills the whole house at the
+  off-peak rate, and the devices change: Octopus gives a car a new device ID
+  when it is enrolled again, and answers the old ID with an empty plan rather
+  than an error, so a saved device once read "nothing planned" through a day
+  of charging. No device is chosen or saved.
 
 Octopus is read and never written. This client has no operation that starts,
 stops, bumps or reschedules a charge.
@@ -75,7 +80,9 @@ The poller runs unattended for weeks, and wakeups rather than CPU decide its
 power draw (see "Polling cadence" in `docs/architecture.md`), so this adds as
 few as it can:
 
-- **Network**: one HTTPS request per `--octopus-interval`, and a token renewal
+- **Network**: one HTTPS connection per `--octopus-interval`, carrying the
+  device list and one plan query per device (two queries for one car), and a
+  token renewal
   about once an hour that shares that request's connection. The TLS context is
   built once per run, not per connection. The connection is closed after each
   refresh rather than kept for the next one, which the server would have
@@ -118,17 +125,18 @@ charging report when `--hypervolt-enable` is on.
 
 A personal API key is the only long-lived credential Octopus issues; the
 refresh token `obtainKrakenToken` can return expires within days. So the key is
-what is stored, with the account number and device ID, at 0600 permissions in
+what is stored, with the account number, at 0600 permissions in
 `--octopus-credentials` (default `octopus.json` in the state directory). It is
 never logged, streamed or passed on a command line.
 
 `octopus_login.py` (installed as `octopus-login`) reads the key with
 `getpass`, which also accepts it on a piped stdin, checks it against Octopus,
-discovers the account and device, reads the plan once to prove the whole path
-works, and only then writes the file. With more than one account or device it
-lists them and asks for `--account` or `--device` (the optional fields in the
-app's form). Re-running it replaces the file, which is how to recover from a
-regenerated key.
+discovers the account, reads every device's plan once to prove the whole path
+works, and only then writes the file. With more than one account it lists them
+and asks for `--account` (the optional field in the app's form). There is no
+device to choose: every device on the account is read on each refresh, and an
+older caller's `--device` is accepted and ignored. Re-running it replaces the
+file, which is how to recover from a regenerated key.
 
 ## Stream and menu bar
 

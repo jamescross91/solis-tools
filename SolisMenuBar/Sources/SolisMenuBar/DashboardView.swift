@@ -63,7 +63,6 @@ struct DashboardView: View {
     @State private var octopusAccountNumber: String?
     @State private var octopusAPIKey = ""
     @State private var octopusAccountField = ""
-    @State private var octopusDeviceField = ""
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -969,14 +968,10 @@ struct DashboardView: View {
             }
             SecureField("Octopus API key (sk_live_…)", text: $octopusAPIKey)
                 .textFieldStyle(.roundedBorder)
-            HStack(spacing: 8) {
-                TextField("Account number (optional)", text: $octopusAccountField)
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-                TextField("Device ID (optional)", text: $octopusDeviceField)
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-            }
+            // No device: the poller reads every device on the account.
+            TextField("Account number (optional)", text: $octopusAccountField)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
             HStack(spacing: 8) {
                 Button("Sign in to Octopus") {
                     signInToOctopus()
@@ -1026,7 +1021,6 @@ struct DashboardView: View {
         octopusLogin.signIn(
             apiKey: octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines),
             accountNumber: octopusAccountField.trimmingCharacters(in: .whitespacesAndNewlines),
-            deviceID: octopusDeviceField.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialsPath: octopusCredentialsResolvedPath
         )
         octopusAPIKey = ""

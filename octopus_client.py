@@ -437,43 +437,40 @@ class OctopusClient:
         self.credentials.account_number = _check(numbers[0], _ACCOUNT_PATTERN, "account number")
         return self.credentials.account_number
 
-    def discover_device_id(self) -> str:
-        with self._session():
-            return self._discover_device_id()
-
-    def _discover_device_id(self) -> str:
-        account = self.credentials.account_number or self.discover_account_number()
-        data = self._query(
-            f"query {{ devices(accountNumber: {json.dumps(account)}) "
-            "{ id provider deviceType __typename } }"
-        )
-        devices = [
-            device
-            for device in data.get("devices") or []
-            if isinstance(device, dict) and isinstance(device.get("id"), str)
-        ]
-        if not devices:
-            raise OctopusAuthError(
-                f"account {account} has no Intelligent Octopus device; "
-                "is the car or charger enrolled?"
-            )
-        if len(devices) > 1:
-            listed = ", ".join(
-                f"{device['id']} ({device.get('provider') or device.get('__typename')})"
-                for device in devices
-            )
-            raise OctopusAuthError(
-                f"account {account} has {len(devices)} devices ({listed}); choose one with --device"
-            )
-        self.credentials.device_id = _check(devices[0]["id"], _DEVICE_PATTERN, "device ID")
-        return self.credentials.device_id
-
     def planned_dispatches(self) -> list[ChargeWindow]:
         with self._session():
             return self._planned_dispatches()
 
     def _planned_dispatches(self) -> list[ChargeWindow]:
-        device = self.credentials.device_id or self.discover_device_id()
+        """Every enrolled device's plan, together. A dispatch for any of them
+        bills the whole house at the off-peak rate, and which devices are
+        enrolled changes: Octopus gives a car a new device ID when it is
+        enrolled again, and answers the old one with an empty plan rather than
+        an error, so reading one saved device missed a day of charging."""
+        windows: list[ChargeWindow] = []
+        for device in self.device_ids():
+            windows.extend(self._fetch_planned(device))
+        return sorted(windows, key=lambda window: window.start)
+
+    def device_ids(self) -> list[str]:
+        """The account's Intelligent Octopus devices, as of now."""
+        account = self.credentials.account_number or self.discover_account_number()
+        data = self._query(
+            f"query {{ devices(accountNumber: {json.dumps(account)}) "
+            "{ id provider deviceType __typename } }"
+        )
+        ids = [
+            _check(item["id"], _DEVICE_PATTERN, "device ID")
+            for item in data.get("devices") or []
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        if not ids:
+            raise OctopusAuthError(
+                f"account {account} has no Intelligent Octopus device; is the car or charger enrolled?"
+            )
+        return ids
+
+    def _fetch_planned(self, device: str) -> list[ChargeWindow]:
         data = self._query(
             f"query {{ flexPlannedDispatches(deviceId: {json.dumps(device)}) "
             "{ start end type } }"

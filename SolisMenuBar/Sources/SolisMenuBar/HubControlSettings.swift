@@ -59,7 +59,6 @@ final class HubControlModel: ObservableObject {
     @Published var hypervoltPassword = ""
     @Published var octopusAPIKey = ""
     @Published var octopusAccount = ""
-    @Published var octopusDevice = ""
 
     /// The hub `state`, `draft` and `client` belong to.
     private(set) var loadedTarget: HubAdminTarget?
@@ -193,15 +192,13 @@ final class HubControlModel: ObservableObject {
         guard let client = client(for: target, fail: { octopusState = .failed($0) }) else { return }
         let key = octopusAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let account = octopusAccount.trimmingCharacters(in: .whitespacesAndNewlines)
-        let device = octopusDevice.trimmingCharacters(in: .whitespacesAndNewlines)
         octopusAPIKey = ""
         let mine = generation
         octopusState = .running
         do {
             let state = try await client.signInToOctopus(
                 apiKey: key,
-                account: account.isEmpty ? nil : account,
-                device: device.isEmpty ? nil : device
+                account: account.isEmpty ? nil : account
             )
             guard mine == generation else { return }
             accountsChanged(state)
@@ -487,14 +484,11 @@ struct HubControlSettingsSection: View {
         }
         SecureField("Octopus API key (sk_live_…)", text: $model.octopusAPIKey)
             .textFieldStyle(.roundedBorder)
-        HStack(spacing: 8) {
-            TextField("Account number (optional)", text: $model.octopusAccount)
-                .textFieldStyle(.roundedBorder)
-                .disableAutocorrection(true)
-            TextField("Device ID (optional)", text: $model.octopusDevice)
-                .textFieldStyle(.roundedBorder)
-                .disableAutocorrection(true)
-        }
+        // No device: the poller reads every Intelligent Octopus device on the
+        // account, since any of them can be dispatched and they change.
+        TextField("Account number (optional)", text: $model.octopusAccount)
+            .textFieldStyle(.roundedBorder)
+            .disableAutocorrection(true)
         HStack(spacing: 8) {
             Button("Sign in on the hub") {
                 let target = hubSettings.adminTarget
