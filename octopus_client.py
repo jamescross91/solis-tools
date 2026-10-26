@@ -567,7 +567,7 @@ class OctopusScheduleMonitor:
         # main() fetches once before starting the thread; do not repeat it.
         return self.interval_s if self.snapshot().fetched_at else 0.0
 
-    def _publish_error(self, message: str) -> None:
+    def publish_error(self, message: str) -> None:
         previous = self.snapshot()
         self._schedule = OctopusSchedule(previous.windows, previous.fetched_at, message)
         self.consecutive_failures += 1
@@ -577,9 +577,9 @@ class OctopusScheduleMonitor:
             try:
                 self.refresh()
             except OctopusAuthError as exc:
-                self._publish_error(str(exc))
+                self.publish_error(str(exc))
             except Exception as exc:  # the thread must outlive a surprise
-                self._publish_error(f"unexpected Octopus error: {exc}")
+                self.publish_error(f"unexpected Octopus error: {exc}")
 
     def start(self) -> None:
         if self._thread is not None:
