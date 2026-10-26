@@ -130,6 +130,7 @@ public actor HubClient {
     private let configuration: HubClientConfiguration
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let jitter: @Sendable () -> Double
+    private let verifyIdentity: @Sendable (HubEndpoint, HubAuth, TimeInterval) async throws -> Void
     private let attentionRelay = SerialRelay()
 
     private var endpoints: [HubEndpoint]
@@ -156,7 +157,11 @@ public actor HubClient {
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         },
-        jitter: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
+        jitter: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        verifyIdentity: @escaping @Sendable (HubEndpoint, HubAuth, TimeInterval) async throws -> Void = {
+            endpoint, auth, timeout in
+            try await HubIdentity.verify(endpoint, auth: auth, timeout: timeout)
+        }
     ) {
         var captured: AsyncStream<HubEvent>.Continuation?
         events = AsyncStream<HubEvent> { captured = $0 }
@@ -168,6 +173,7 @@ public actor HubClient {
         self.configuration = configuration
         self.sleep = sleep
         self.jitter = jitter
+        self.verifyIdentity = verifyIdentity
     }
 
     public func start() {
@@ -304,6 +310,18 @@ public actor HubClient {
     }
 
     private func attempt(_ endpoint: HubEndpoint) async -> Outcome {
+        if endpoint.requiresProof {
+            do {
+                try await verifyIdentity(endpoint, auth, configuration.connectTimeout(for: endpoint.kind))
+            } catch {
+                // Not definitive: the next address, usually the remote one, is
+                // still worth trying, and the token never went to this one.
+                return Outcome(
+                    reason: .unreachable(HubIdentityError.notProven.localizedDescription),
+                    completedHandshake: false
+                )
+            }
+        }
         let opened: any HubSocket
         do {
             opened = try await transport.open(endpoint, headers: auth.headers(for: endpoint.kind))

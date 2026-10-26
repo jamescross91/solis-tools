@@ -27,6 +27,19 @@ versioning](https://semver.org/spec/v2.0.0.html).
   charge into 13:30–17:00 and 18:00–19:30, `planned_windows` still said
   12:09–19:30. The voltage band is unchanged.
 
+- One hub address is enough. A Wattlark hub tells connected apps its public
+  address (`public_url` in `hello` and `/v1/status`) and its ID, and the menu
+  bar keeps both: at home it uses the hub's Bonjour advertisement over the LAN,
+  away it uses the public address, and it moves between them by itself. Its Hub
+  settings now take a single Address (the https address, or a LAN one), with a
+  LAN address and the Cloudflare pair under Advanced, and show where it will
+  connect at home and away. Existing two-address settings keep working and
+  become one on the next save.
+- A hub found by Bonjour must prove it holds the token (`GET /v1/identity`, an
+  HMAC over a fresh nonce) before SolisHubKit sends it the token, for the
+  stream, settings and Test connection. A device that merely advertises the
+  hub's ID gets nothing. Needs a Wattlark hub with `/v1/identity`.
+
 ### Removed
 
 - `solis-hub`, the Raspberry Pi deployment files and the hub's documentation
