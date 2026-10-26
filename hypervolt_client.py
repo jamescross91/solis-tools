@@ -484,6 +484,11 @@ class HypervoltClient:
             raise HypervoltProtocolError(f"could not reach Hypervolt's API: {exc}") from exc
         try:
             ws.handshake(path, {"Origin": "https://hypervolt.co.uk", "User-Agent": _USER_AGENT})
+        except HypervoltError:
+            # Already says what went wrong (a refused handshake, say); it is
+            # an OSError too, so it must not be relabelled as unreachable.
+            ws.close()
+            raise
         except OSError as exc:
             ws.close()
             raise HypervoltProtocolError(f"could not reach Hypervolt's API: {exc}") from exc

@@ -91,6 +91,7 @@ class ClientLifecycleTests(unittest.TestCase):
             try:
                 self.assertTrue(client.state.connected)
                 self.assertIn("404", client.state.session_error or "")
+                self.assertNotIn("could not reach", client.state.session_error or "")
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline and client.state.max_current_ma is None:
                     client.poll()
