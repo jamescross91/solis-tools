@@ -1007,8 +1007,9 @@ struct DashboardView: View {
                     .foregroundStyle(.orange)
             }
             Text(
-                "The account and your car or charger are found automatically; fill in the account "
-                    + "number or device ID only if Octopus reports more than one. The key is checked "
+                "The account and your car or charger are found automatically, and found again if "
+                    + "you re-add the car in the Octopus app; fill in the account number only if "
+                    + "Octopus reports more than one. The key is checked "
                     + "with Octopus and saved only to the credentials file above, at owner-only "
                     + "permissions; this app never stores it."
             )

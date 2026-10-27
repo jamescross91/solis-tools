@@ -56,7 +56,7 @@ from voltage_control import (
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 # Bumped whenever a stream field is renamed, removed or changes meaning; the
 # menu-bar app refuses a version it does not know. Two sends configuration
 # once per run and recent_events only when they change.
@@ -3167,13 +3167,25 @@ def main() -> int:
             if args.octopus_enable:
                 # Like Hypervolt, optional: a failure is reported in the
                 # schedule's error and retried, and never stops the readings.
+                octopus_credentials_path = args.octopus_credentials or state_dir / "octopus.json"
                 try:
-                    octopus_credentials = OctopusCredentials.load(
-                        args.octopus_credentials or state_dir / "octopus.json"
-                    )
+                    octopus_credentials = OctopusCredentials.load(octopus_credentials_path)
                 except OctopusError as exc:
                     warn(f"Octopus disabled for this run: {exc}")
                 else:
+
+                    def save_octopus_devices(credentials: OctopusCredentials) -> None:
+                        try:
+                            credentials.save(octopus_credentials_path)
+                        except OSError as exc:
+                            warn(f"cannot save Octopus's device list: {exc}")
+                        else:
+                            warn(
+                                "Octopus devices are now "
+                                + ", ".join(credentials.device_ids)
+                                + "; saved for the next start"
+                            )
+
                     octopus_monitor = OctopusScheduleMonitor(
                         OctopusClient(
                             octopus_credentials,
@@ -3181,6 +3193,7 @@ def main() -> int:
                             host=args.octopus_host,
                             port=args.octopus_port,
                             use_tls=not args.octopus_insecure,
+                            on_devices_changed=save_octopus_devices,
                         ),
                         interval_s=args.octopus_interval,
                         lead_time_s=configuration.octopus_lead_time_s,
