@@ -54,11 +54,12 @@ class CredentialsTests(unittest.TestCase):
     def test_a_file_from_before_the_device_list_is_read(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "octopus.json"
-            path.write_text(
-                json.dumps(
-                    {"api_key": FAKE_API_KEY, "account_number": "A-1234ABCD", "device_id": "car-1"}
-                )
-            )
+            OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", ["car-1"]).save(path)
+            # Rewritten in place, as 0.9.0 and earlier wrote it: no list.
+            saved = json.loads(path.read_text())
+            del saved["device_ids"]
+            with path.open("w", encoding="utf-8") as destination:
+                json.dump(saved, destination)
             self.assertEqual(OctopusCredentials.load(path).device_ids, ["car-1"])
 
     def test_the_first_device_is_saved_for_readers_of_the_older_file(self):
