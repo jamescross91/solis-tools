@@ -3,7 +3,16 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.9.0
+
+Keeps `solis-poll` running when Hypervolt or Octopus fails, streams Octopus's
+dispatches as sent, and lets the menu bar use one hub address at home and
+away. `solis-hub` is no longer part of solis-tools.
+
+Upgrade the Wattlark hub before the Mac: the menu bar now asks a hub it finds
+on the LAN to prove itself at `GET /v1/identity` before sending it the token,
+and stays disconnected from a hub without that endpoint. Stop the running
+menu-bar app before upgrading. Nothing on the inverter changes.
 
 ### Fixed
 
