@@ -534,6 +534,39 @@ class HypervoltPriorityTests(unittest.TestCase):
             wanted=5,
         )
 
+    def test_a_refused_session_socket_leaves_the_readings_and_the_charger_cap(self):
+        """Hypervolt refused the session socket (404) while accepting the sync
+        socket, and the poller exited over and over, taking the inverter
+        readings down with it."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.refuse_session = True
+                samples = self._run("battery", inverter, hypervolt, directory)
+
+        self.assertGreaterEqual(len(samples), 5)
+        self.assertIsNotNone(samples[-1]["reading"])
+        charger = samples[-1]["voltage_control"]["hypervolt_actuator"]
+        self.assertTrue(charger["connected"])
+        self.assertIn("404", charger["session_error"])
+        self.assertIsNone(charger["measured_current_a"])
+
+    def test_a_charger_that_cannot_be_reached_at_startup_does_not_stop_the_run(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.refuse_tokens = True
+                samples = self._run("battery", inverter, hypervolt, directory)
+
+        self.assertGreaterEqual(len(samples), 5)
+        self.assertIsNotNone(samples[-1]["reading"])
+        charger = samples[-1]["voltage_control"]["hypervolt_actuator"]
+        self.assertFalse(charger["connected"])
+        self.assertTrue(charger["last_error"])
+        self.assertFalse(samples[-1]["voltage_control"]["ev_charging"])
+
     def test_battery_priority_cuts_the_ev_and_the_site_ceiling_together(self):
         """The Solis ceiling caps the whole site, car included. Cutting only
         the car handed its import to the battery and left the voltage where
@@ -822,36 +855,22 @@ class OctopusChargeWindowTests(unittest.TestCase):
         self.assertTrue(samples[-1]["voltage_control"]["ev_voltage_limits_active"])
         self.assertEqual(samples[-1]["cadence"], {"interval_s": 0.2, "idle": True})
 
-    def test_a_refused_api_key_stops_the_run(self):
+    def test_a_refused_api_key_is_reported_and_the_readings_carry_on(self):
+        """Octopus is one optional source: a refused key must not stop the
+        inverter readings or voltage control, only leave no plan."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             with FakeInverter(self._bank()) as inverter, FakeOctopusApi() as octopus:
                 octopus.refuse_key = True
-                credentials = Path(directory) / "octopus.json"
-                OctopusCredentials(FAKE_API_KEY).save(credentials)
-                result = run_monitor(
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(inverter.port),
-                    "--dynamic-voltage-control",
-                    "--control-journal",
-                    str(Path(directory) / "journal.json"),
-                    "--voltage-history-db",
-                    str(Path(directory) / "history.sqlite3"),
-                    "--octopus-enable",
-                    "--octopus-credentials",
-                    str(credentials),
-                    "--octopus-host",
-                    "127.0.0.1",
-                    "--octopus-port",
-                    str(octopus.port),
-                    "--octopus-insecure",
-                )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cannot read the Octopus charge schedule", result.stderr)
-        self.assertNotIn(FAKE_API_KEY, result.stderr)
+                samples = self._run(inverter, octopus, directory, 3)
+
+        self.assertGreaterEqual(len(samples), 3)
+        self.assertIsNotNone(samples[-1]["reading"])
+        schedule = latest_octopus_schedule(samples)
+        self.assertFalse(schedule["charge_window_active"])
+        self.assertTrue(schedule["last_error"])
+        self.assertNotIn(FAKE_API_KEY, json.dumps(samples))
 
 
 class CadenceTests(unittest.TestCase):

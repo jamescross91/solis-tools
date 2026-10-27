@@ -102,6 +102,9 @@ class FakeHypervoltCloud:
         self.true_milli_amps = 0
         self.watt_hours = 0
         self.refuse_tokens = False
+        # Answer the session socket with 404, as Hypervolt has while still
+        # accepting the sync socket.
+        self.refuse_session = False
         self.token_requests: list[dict[str, str]] = []
         self.applied: list[dict[str, object]] = []
         self._lock = threading.Lock()
@@ -171,6 +174,10 @@ class FakeHypervoltCloud:
             return
         method, path, headers, body = request
         if headers.get("Upgrade", "").lower() == "websocket":
+            if self.refuse_session and not path.endswith("/sync"):
+                connection.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                connection.close()
+                return
             self._serve_websocket(connection, path, headers)
             return
         try:

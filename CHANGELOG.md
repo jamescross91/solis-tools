@@ -5,6 +5,19 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- A failing optional source no longer stops `solis-poll`. Hypervolt began
+  refusing the session socket (HTTP 404) while still accepting the sync
+  socket; the poller exited, restarted, and exited again, so inverter
+  readings and voltage control were down for as long as Hypervolt refused.
+  Now the charger connects without live session telemetry
+  (`hypervolt_actuator.session_error` says why) and retries it every 5
+  minutes. A Hypervolt or Octopus failure at startup, including a refused key
+  or a missing credentials file, is reported and retried instead of fatal.
+- A network error reaching Hypervolt is reported as Hypervolt's, not as
+  "cannot connect to" the inverter.
+
 ### Added
 
 - The stream's `octopus_schedule` carries `dispatches`: Intelligent Octopus's

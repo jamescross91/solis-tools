@@ -127,7 +127,10 @@ actually drawing, from the charger's session telemetry, and
 `session_energy_kwh` is the current session's energy and `telemetry_age_s` the
 seconds since Hypervolt last reported. The four are null until the charger
 reports them, and consumers should use `ev_charging`, which fails closed on
-stale telemetry, to decide whether the car is charging.
+stale telemetry, to decide whether the car is charging. `session_error` is
+null while the session telemetry streams, and otherwise why Hypervolt refused
+it; the charger can still be capped, the measured fields stay null, and the
+poller asks again every 5 minutes.
 
 `octopus_schedule` contains `charge_window_active`, `active_window`,
 `next_window`, `planned_windows`, `lead_time_s`, `fetched_at` and

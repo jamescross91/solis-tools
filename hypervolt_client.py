@@ -50,6 +50,8 @@ _TOKEN_PATH = "/realms/retail-customers/protocol/openid-connect/token"
 _API_HOST = "api.hypervolt.co.uk"
 _USER_AGENT = "solis-tools-hypervolt-client/1"
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+# How long to wait before asking again for a session socket Hypervolt refused.
+SESSION_RETRY_S = 300.0
 
 
 class HypervoltError(ConnectionError):
@@ -135,6 +137,9 @@ class HypervoltState:
     true_milli_amps: int | None = None
     watt_hours: int | None = None
     updated_monotonic: float | None = None
+    # Why the session socket (live charging state and current draw) is not
+    # open, or None while it is. The charger is still controllable without it.
+    session_error: str | None = None
 
     def is_charging(self, now: float, stale_age_s: float) -> bool:
         """Fail closed: stale or absent telemetry reads as "not charging", so
@@ -335,6 +340,7 @@ class HypervoltClient:
         self._access_token_expires_at = 0.0
         self._sync_ws: _WebSocket | None = None
         self._session_ws: _WebSocket | None = None
+        self._session_retry_at = 0.0
 
     def _http_connection(self, host: str, port: int) -> http.client.HTTPConnection:
         if self.use_tls:
@@ -436,25 +442,69 @@ class HypervoltClient:
         self.credentials.charger_id = self.charger_id
         self._sync_ws = self._open(f"/ws/charger/{self.charger_id}/sync")
         self._login(self._sync_ws)
-        self._send(self._sync_ws, {"method": "sync.snapshot"})
+        try:
+            self._send(self._sync_ws, {"method": "sync.snapshot"})
+        except OSError as exc:
+            self.close()
+            raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
         # Only the session socket reports live charging state and actual
         # current draw; the sync socket's snapshot never includes them.
-        self._session_ws = self._open(f"/ws/charger/{self.charger_id}/session/in-progress")
-        self._login(self._session_ws)
+        self._open_session()
         self.state.connected = True
         self.state.charger_id = self.charger_id
 
+    def _open_session(self) -> None:
+        """Open the session socket, or note why not and retry later.
+
+        Hypervolt has refused it (HTTP 404) while the sync socket worked, which
+        used to fail the whole connection and, at startup, the poller with
+        it. Without it the charger can still be capped; charging just reads
+        as unknown, which `is_charging` already treats as not charging.
+        """
+        try:
+            ws = self._open(f"/ws/charger/{self.charger_id}/session/in-progress")
+            self._login(ws)
+        except HypervoltProtocolError as exc:
+            self._session_ws = None
+            self.state.session_error = str(exc)
+            self.state.charging = None
+            self.state.true_milli_amps = None
+            self._session_retry_at = time.monotonic() + SESSION_RETRY_S
+            return
+        self._session_ws = ws
+        self.state.session_error = None
+
     def _open(self, path: str) -> _WebSocket:
-        ws = _WebSocket(self.api_host, self.api_port, self.timeout, use_tls=self.use_tls)
+        # A socket error is the charger's cloud being unreachable, and must
+        # say so: left bare, it read as the inverter being unreachable to the
+        # poller, which reports every OSError as a Modbus connection failure.
+        try:
+            ws = _WebSocket(self.api_host, self.api_port, self.timeout, use_tls=self.use_tls)
+        except OSError as exc:
+            raise HypervoltProtocolError(f"could not reach Hypervolt's API: {exc}") from exc
         try:
             ws.handshake(path, {"Origin": "https://hypervolt.co.uk", "User-Agent": _USER_AGENT})
+        except HypervoltError:
+            # Already says what went wrong (a refused handshake, say); it is
+            # an OSError too, so it must not be relabelled as unreachable.
+            ws.close()
+            raise
+        except OSError as exc:
+            ws.close()
+            raise HypervoltProtocolError(f"could not reach Hypervolt's API: {exc}") from exc
         except Exception:
             ws.close()
             raise
         return ws
 
     def _login(self, ws: _WebSocket) -> None:
-        self._send(ws, {"method": "login", "params": {"token": self._access_token, "version": 3}})
+        try:
+            self._send(
+                ws, {"method": "login", "params": {"token": self._access_token, "version": 3}}
+            )
+        except OSError as exc:
+            ws.close()
+            raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
 
     def close(self) -> None:
         for ws in (self._sync_ws, self._session_ws):
@@ -523,9 +573,13 @@ class HypervoltClient:
 
         Never blocks: each call reads only frames that are already pending.
         """
-        if self._sync_ws is None or self._session_ws is None:
+        if self._sync_ws is None:
             raise HypervoltError("poll() called before connect()")
+        if self._session_ws is None and time.monotonic() >= self._session_retry_at:
+            self._open_session()
         for ws in (self._sync_ws, self._session_ws):
+            if ws is None:
+                continue
             while True:
                 try:
                     text = ws.poll_recv(0.0)

@@ -59,6 +59,14 @@ class CredentialsTests(unittest.TestCase):
             self.assertNotIn("password", path.read_text(encoding="utf-8"))
 
 
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 class ClientLifecycleTests(unittest.TestCase):
     def test_connect_discovers_the_charger_and_reads_the_snapshot(self):
         with FakeHypervoltCloud() as fake:
@@ -74,6 +82,45 @@ class ClientLifecycleTests(unittest.TestCase):
                 self.assertEqual(client.state.max_current_ma, 32000)
             finally:
                 client.close()
+
+    def test_a_refused_session_socket_keeps_the_charger_and_is_retried(self):
+        with FakeHypervoltCloud() as fake:
+            fake.refuse_session = True
+            client = make_client(fake)
+            client.connect()
+            try:
+                self.assertTrue(client.state.connected)
+                self.assertIn("404", client.state.session_error or "")
+                self.assertNotIn("could not reach", client.state.session_error or "")
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and client.state.max_current_ma is None:
+                    client.poll()
+                    time.sleep(0.01)
+                self.assertEqual(client.state.max_current_ma, 32000)
+                self.assertIsNone(client.state.charging)
+
+                fake.refuse_session = False
+                fake.set_charging(True, true_milli_amps=16000)
+                client._session_retry_at = 0.0  # as if the retry interval had passed
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and client.state.charging is not True:
+                    client.poll()
+                    time.sleep(0.01)
+                self.assertIsNone(client.state.session_error)
+                self.assertTrue(client.state.charging)
+            finally:
+                client.close()
+
+    def test_an_unreachable_api_is_a_hypervolt_error_not_a_bare_socket_error(self):
+        from hypervolt_client import HypervoltProtocolError
+
+        with FakeHypervoltCloud() as fake:
+            client = make_client(fake)
+            client._ensure_access_token()
+            client.charger_id = fake.charger_id
+            client.api_port = _free_port()
+            with self.assertRaises(HypervoltProtocolError):
+                client.connect()
 
     def test_a_stored_charger_id_skips_discovery(self):
         with FakeHypervoltCloud(charger_id="already-known") as fake:

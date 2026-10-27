@@ -152,6 +152,11 @@ STATUS_LABELS = {
 }
 
 
+def warn(message: str) -> None:
+    """Report a degraded optional source; the run carries on without it."""
+    print(f"warning: {message}", file=sys.stderr, flush=True)
+
+
 def fail(message: str, code: int = 2) -> NoReturn:
     """Print a concise, actionable error without starting the dashboard."""
     print(f"error: {message}", file=sys.stderr)
@@ -915,6 +920,9 @@ class HypervoltCurrentActuator:
             "maximum_current_a": self.maximum_ma / 1000,
             "total_write_count": self.total_write_count,
             "last_error": self.last_error,
+            # Why live charging state is unavailable (Hypervolt refused the
+            # session socket), or null while it streams. Additive.
+            "session_error": state.session_error,
             "measured_current_a": measured_a,
             "charging_power_kw": (
                 round(measured_a * voltage_v / 1000, 3)
@@ -3125,44 +3133,68 @@ def main() -> int:
                 hypervolt_credentials_path = (
                     args.hypervolt_credentials or state_dir / "hypervolt.json"
                 )
-                hypervolt_credentials = HypervoltCredentials.load(hypervolt_credentials_path)
-                hypervolt_client = HypervoltClient(
-                    hypervolt_credentials,
-                    timeout=args.hypervolt_timeout,
-                    token_host=args.hypervolt_token_host,
-                    token_port=args.hypervolt_token_port,
-                    api_host=args.hypervolt_api_host,
-                    api_port=args.hypervolt_api_port,
-                    use_tls=not args.hypervolt_insecure,
-                )
-                hypervolt_client.connect()
-                hypervolt_credentials.save(hypervolt_credentials_path)
-                hypervolt_actuator = HypervoltCurrentActuator(
-                    hypervolt_client,
-                    configuration.ev_minimum_current_a,
-                    configuration.ev_maximum_current_a,
-                    args.minimum_write_interval,
-                )
+                # The charger is one optional source among several: a failure
+                # here is reported and retried, never allowed to stop the
+                # inverter readings or voltage control.
+                try:
+                    hypervolt_credentials = HypervoltCredentials.load(hypervolt_credentials_path)
+                except HypervoltError as exc:
+                    warn(f"Hypervolt disabled for this run: {exc}")
+                else:
+                    hypervolt_client = HypervoltClient(
+                        hypervolt_credentials,
+                        timeout=args.hypervolt_timeout,
+                        token_host=args.hypervolt_token_host,
+                        token_port=args.hypervolt_token_port,
+                        api_host=args.hypervolt_api_host,
+                        api_port=args.hypervolt_api_port,
+                        use_tls=not args.hypervolt_insecure,
+                    )
+                    hypervolt_actuator = HypervoltCurrentActuator(
+                        hypervolt_client,
+                        configuration.ev_minimum_current_a,
+                        configuration.ev_maximum_current_a,
+                        args.minimum_write_interval,
+                    )
+                    try:
+                        hypervolt_client.connect()
+                        hypervolt_credentials.save(hypervolt_credentials_path)
+                    except HypervoltError as exc:
+                        warn(f"cannot connect to the Hypervolt charger yet, retrying: {exc}")
+                        hypervolt_actuator.note_connection_error(str(exc))
+                        hypervolt_reconnect_attempt = 1
+                        hypervolt_reconnect_not_before = time.monotonic() + _next_backoff_delay_s(0)
             if args.octopus_enable:
-                octopus_monitor = OctopusScheduleMonitor(
-                    OctopusClient(
-                        OctopusCredentials.load(
-                            args.octopus_credentials or state_dir / "octopus.json"
+                # Like Hypervolt, optional: a failure is reported in the
+                # schedule's error and retried, and never stops the readings.
+                try:
+                    octopus_credentials = OctopusCredentials.load(
+                        args.octopus_credentials or state_dir / "octopus.json"
+                    )
+                except OctopusError as exc:
+                    warn(f"Octopus disabled for this run: {exc}")
+                else:
+                    octopus_monitor = OctopusScheduleMonitor(
+                        OctopusClient(
+                            octopus_credentials,
+                            timeout=args.octopus_timeout,
+                            host=args.octopus_host,
+                            port=args.octopus_port,
+                            use_tls=not args.octopus_insecure,
                         ),
-                        timeout=args.octopus_timeout,
-                        host=args.octopus_host,
-                        port=args.octopus_port,
-                        use_tls=not args.octopus_insecure,
-                    ),
-                    interval_s=args.octopus_interval,
-                    lead_time_s=configuration.octopus_lead_time_s,
-                )
-                # One synchronous fetch so a refused key stops the run here,
-                # like any other configuration mistake. Any other failure is
-                # transient: the thread retries, and until it succeeds the
-                # controller simply has no window to tighten for.
-                octopus_monitor.refresh()
-                octopus_monitor.start()
+                        interval_s=args.octopus_interval,
+                        lead_time_s=configuration.octopus_lead_time_s,
+                    )
+                    # One synchronous fetch so the first sample has a plan.
+                    # A refused key is published as the schedule's error and
+                    # retried by the thread; until a fetch succeeds the
+                    # controller simply has no window to tighten for.
+                    try:
+                        octopus_monitor.refresh()
+                    except OctopusError as exc:
+                        warn(f"cannot read the Octopus charge schedule yet, retrying: {exc}")
+                        octopus_monitor.publish_error(str(exc))
+                    octopus_monitor.start()
             device_key = hashlib.sha256(client.control_identity.encode()).hexdigest()[:24]
             voltage_runtime = VoltageControlRuntime(
                 client,
