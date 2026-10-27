@@ -56,6 +56,13 @@ class FakeOctopusApi:
         # Test drivers: answer every request with HTTP 503, or refuse the key.
         self.unavailable = False
         self.refuse_key = False
+        # The devices query alone fails, as when Octopus rate-limits it.
+        self.refuse_devices = False
+        # IDs no longer on the account that Octopus still answers, with an
+        # empty plan rather than an error, as it does for a car enrolled again
+        # under a new ID. Plans per device; a device not here gets `dispatches`.
+        self.retired_devices: set[str] = set()
+        self.device_dispatches: dict[str, list[dict[str, str]]] = {}
         self.lock = threading.Lock()
         fake = self
 
@@ -114,6 +121,27 @@ class FakeOctopusApi:
         start = datetime.now(timezone.utc) + timedelta(seconds=start_in_s)
         self.set_dispatches([(start, start + timedelta(seconds=duration_s), kind)])
 
+    def plan_device_charge(
+        self, device: str, start_in_s: float, duration_s: float, kind: str = "SMART"
+    ) -> None:
+        start = datetime.now(timezone.utc) + timedelta(seconds=start_in_s)
+        end = start + timedelta(seconds=duration_s)
+        with self.lock:
+            self.device_dispatches[device] = [
+                {
+                    "start": start.isoformat().replace("+00:00", "Z"),
+                    "end": end.isoformat().replace("+00:00", "Z"),
+                    "type": kind,
+                }
+            ]
+
+    def reenrol(self, old: str, new: str) -> None:
+        """Replace device `old` with `new`, as deleting and adding the car
+        again in the Octopus app does."""
+        with self.lock:
+            self.devices = tuple(new if device == old else device for device in self.devices)
+            self.retired_devices.add(old)
+
     def expire_tokens(self) -> None:
         with self.lock:
             self.valid_tokens.clear()
@@ -153,10 +181,15 @@ class FakeOctopusApi:
                 return 200, {"data": {"viewer": {"accounts": accounts}}}
             if "flexPlannedDispatches" in query:
                 match = re.search(r'deviceId: "([^"]*)"', query)
+                if match and match.group(1) in self.retired_devices:
+                    return 200, {"data": {"flexPlannedDispatches": []}}
                 if not match or match.group(1) not in self.devices:
                     return 200, self._error("KT-CT-4340", "Device not found.")
-                return 200, {"data": {"flexPlannedDispatches": list(self.dispatches)}}
+                plan = self.device_dispatches.get(match.group(1), self.dispatches)
+                return 200, {"data": {"flexPlannedDispatches": list(plan)}}
             if "devices(" in query:
+                if self.refuse_devices:
+                    return 200, self._error("KT-CT-1199", "Too many requests.", "devices")
                 devices = [
                     {
                         "id": device,

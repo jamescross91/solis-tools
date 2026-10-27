@@ -724,6 +724,7 @@ class OctopusChargeWindowTests(unittest.TestCase):
         wanted: int,
         *extra: str,
         commands: Sequence[str] = (),
+        saved_devices: Sequence[str] | None = None,
     ) -> list[dict]:
         validation = Path(directory) / "export-validation.json"
         validation.write_text(
@@ -744,7 +745,11 @@ class OctopusChargeWindowTests(unittest.TestCase):
             encoding="utf-8",
         )
         credentials = Path(directory) / "octopus.json"
-        OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", octopus.devices[0]).save(credentials)
+        OctopusCredentials(
+            FAKE_API_KEY,
+            "A-1234ABCD",
+            list(octopus.devices[:1] if saved_devices is None else saved_devices),
+        ).save(credentials)
         return stream_samples(
             "--host",
             "127.0.0.1",
@@ -800,6 +805,31 @@ class OctopusChargeWindowTests(unittest.TestCase):
                 for event in latest_events(samples)
             )
         )
+
+    def test_a_car_enrolled_again_under_a_new_device_is_followed(self):
+        """Deleting and re-adding the car in the Octopus app gives it a new
+        device ID, and Octopus answers the old one with an empty plan. The
+        poller must find the new device on its own and save it."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                FakeInverter(self._bank()) as inverter,
+                FakeOctopusApi(devices=("car-old",)) as octopus,
+            ):
+                octopus.reenrol("car-old", "car-new")
+                octopus.plan_device_charge("car-new", 2 * 3600, 3600)
+                samples = self._run(
+                    inverter, octopus, directory, wanted=3, saved_devices=["car-old"]
+                )
+            saved = OctopusCredentials.load(Path(directory) / "octopus.json")
+
+        schedule = latest_octopus_schedule(samples)
+        self.assertEqual(len(schedule["planned_windows"]), 1)
+        self.assertEqual(len(schedule["dispatches"]), 1)
+        self.assertIsNone(schedule["last_error"])
+        self.assertEqual(saved.device_ids, ["car-new"])
+        self.assertEqual(saved.api_key, FAKE_API_KEY)
 
     def test_a_later_charge_is_reported_without_tightening_the_band(self):
         import tempfile

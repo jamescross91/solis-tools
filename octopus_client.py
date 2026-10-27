@@ -82,18 +82,27 @@ class OctopusCredentials:
     It can read the account and change Intelligent Octopus preferences, so it
     is stored at 0600 in the private state directory, like the Hypervolt
     refresh token, and never logged or streamed.
+
+    `device_ids` is a cache of the account's enrolled devices, not a choice:
+    every refresh lists the devices again and replaces it (see
+    `OctopusClient.planned_dispatches`). `device_id` is the first of them,
+    kept for readers of the file that predate the list.
     """
 
     api_key: str
     account_number: str | None = None
-    device_id: str | None = None
+    device_ids: list[str] = field(default_factory=list)
+
+    @property
+    def device_id(self) -> str | None:
+        return self.device_ids[0] if self.device_ids else None
 
     def validate(self) -> None:
         _check(self.api_key, _API_KEY_PATTERN, "Octopus API key")
         if self.account_number is not None:
             _check(self.account_number, _ACCOUNT_PATTERN, "Octopus account number")
-        if self.device_id is not None:
-            _check(self.device_id, _DEVICE_PATTERN, "Octopus device ID")
+        for device in self.device_ids:
+            _check(device, _DEVICE_PATTERN, "Octopus device ID")
 
     @classmethod
     def load(cls, path: Path) -> OctopusCredentials:
@@ -111,10 +120,13 @@ class OctopusCredentials:
             raise OctopusAuthError(f"Octopus credentials file at {path} is corrupt: {exc}") from exc
         if not isinstance(value, dict) or not value.get("api_key"):
             raise OctopusAuthError(f"Octopus credentials file at {path} has no api_key")
+        devices = value.get("device_ids")
+        if not isinstance(devices, list):
+            devices = [value["device_id"]] if value.get("device_id") else []
         credentials = cls(
             api_key=str(value["api_key"]),
             account_number=str(value["account_number"]) if value.get("account_number") else None,
-            device_id=str(value["device_id"]) if value.get("device_id") else None,
+            device_ids=[str(device) for device in devices if device],
         )
         credentials.validate()
         return credentials
@@ -127,6 +139,7 @@ class OctopusCredentials:
                 "api_key": self.api_key,
                 "account_number": self.account_number,
                 "device_id": self.device_id,
+                "device_ids": self.device_ids,
             },
             indent=2,
         )
@@ -283,9 +296,13 @@ class OctopusClient:
         host: str = _API_HOST,
         port: int = 443,
         use_tls: bool = True,
+        on_devices_changed: Callable[[OctopusCredentials], None] | None = None,
     ):
         credentials.validate()
         self.credentials = credentials
+        # Called, on the refreshing thread, when the account's device list
+        # differs from the cached one, so the caller can save it.
+        self.on_devices_changed = on_devices_changed
         self.timeout = timeout
         self.host = host
         self.port = port
@@ -437,43 +454,73 @@ class OctopusClient:
         self.credentials.account_number = _check(numbers[0], _ACCOUNT_PATTERN, "account number")
         return self.credentials.account_number
 
-    def discover_device_id(self) -> str:
+    def discover_devices(self) -> list[str]:
         with self._session():
-            return self._discover_device_id()
+            return self._discover_devices()
 
-    def _discover_device_id(self) -> str:
-        account = self.credentials.account_number or self.discover_account_number()
+    def _discover_devices(self) -> list[str]:
+        return self._update_devices(self._list_devices())
+
+    def _list_devices(self) -> list[str]:
+        account = self.credentials.account_number or self._discover_account_number()
         data = self._query(
             f"query {{ devices(accountNumber: {json.dumps(account)}) "
             "{ id provider deviceType __typename } }"
         )
-        devices = [
-            device
+        return [
+            _check(device["id"], _DEVICE_PATTERN, "device ID")
             for device in data.get("devices") or []
             if isinstance(device, dict) and isinstance(device.get("id"), str)
         ]
+
+    def _update_devices(self, devices: list[str]) -> list[str]:
+        """Save the account's devices as Octopus lists them now in the
+        credentials, reporting them through `on_devices_changed` if they
+        differ from the cached list.
+
+        Octopus gives a car a new device ID when it is enrolled again and
+        answers the old ID with an empty plan rather than an error, so a
+        cached ID can't be trusted to still mean the car.
+        """
+        account = self.credentials.account_number
         if not devices:
-            raise OctopusAuthError(
+            # Not an auth error: a car being re-enrolled is briefly listed
+            # nowhere, and the monitor keeps the last good plan meanwhile.
+            raise OctopusError(
                 f"account {account} has no Intelligent Octopus device; "
                 "is the car or charger enrolled?"
             )
-        if len(devices) > 1:
-            listed = ", ".join(
-                f"{device['id']} ({device.get('provider') or device.get('__typename')})"
-                for device in devices
-            )
-            raise OctopusAuthError(
-                f"account {account} has {len(devices)} devices ({listed}); choose one with --device"
-            )
-        self.credentials.device_id = _check(devices[0]["id"], _DEVICE_PATTERN, "device ID")
-        return self.credentials.device_id
+        if devices != self.credentials.device_ids:
+            self.credentials.device_ids = devices
+            if self.on_devices_changed is not None:
+                self.on_devices_changed(self.credentials)
+        return devices
 
     def planned_dispatches(self) -> list[ChargeWindow]:
-        with self._session():
-            return self._planned_dispatches()
+        """Every enrolled device's plan together: a dispatch for any of them
+        bills the whole house off-peak.
 
-    def _planned_dispatches(self) -> list[ChargeWindow]:
-        device = self.credentials.device_id or self.discover_device_id()
+        The device list is read again every time. If that one query fails for
+        a transient reason, the cached list is used rather than failing the
+        refresh; a refused key still fails it.
+        """
+        with self._session():
+            try:
+                listed = self._list_devices()
+            except OctopusAuthError:
+                raise
+            except OctopusError:
+                if not self.credentials.device_ids:
+                    raise
+                devices = self.credentials.device_ids
+            else:
+                devices = self._update_devices(listed)
+            windows: list[ChargeWindow] = []
+            for device in devices:
+                windows.extend(self._planned_dispatches(device))
+            return windows
+
+    def _planned_dispatches(self, device: str) -> list[ChargeWindow]:
         data = self._query(
             f"query {{ flexPlannedDispatches(deviceId: {json.dumps(device)}) "
             "{ start end type } }"

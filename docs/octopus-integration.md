@@ -51,10 +51,18 @@ Octopus Energy integration uses:
 - `obtainKrakenToken(input: {APIKey})` exchanges the account's API key for a JWT,
   reused until five minutes before its `exp` claim and renewed once if a query is
   rejected.
-- `viewer { accounts { number } }` and `devices(accountNumber)` find the account
-  and the enrolled device, once, in `octopus-login`.
-- `flexPlannedDispatches(deviceId)` returns the plan: `start`, `end` and `type`
-  for each dispatch. `plannedDispatches`, the older query, was withdrawn.
+- `viewer { accounts { number } }` finds the account, once, in `octopus-login`.
+- `devices(accountNumber)` lists the enrolled devices on every refresh, not
+  only at sign-in. Octopus gives a car a new device ID when it is enrolled
+  again (deleted and re-added in the Octopus app, for one) and answers the old
+  ID with an empty plan rather than an error, so a saved ID can't be trusted.
+  The list is saved back to the credentials file when it changes. If this one
+  query fails, the saved list is used for that refresh; an account with no
+  device keeps the last plan and reports the error.
+- `flexPlannedDispatches(deviceId)` returns the plan for each listed device:
+  `start`, `end` and `type` for each dispatch, combined across devices because
+  a dispatch for any of them bills the whole house off-peak.
+  `plannedDispatches`, the older query, was withdrawn.
 
 Octopus is read and never written. This client has no operation that starts,
 stops, bumps or reschedules a charge.
@@ -118,16 +126,17 @@ charging report when `--hypervolt-enable` is on.
 
 A personal API key is the only long-lived credential Octopus issues; the
 refresh token `obtainKrakenToken` can return expires within days. So the key is
-what is stored, with the account number and device ID, at 0600 permissions in
+what is stored, with the account number and the cached device IDs
+(`device_ids`, and `device_id`, the first, for older readers), at 0600 permissions in
 `--octopus-credentials` (default `octopus.json` in the state directory). It is
 never logged, streamed or passed on a command line.
 
 `octopus_login.py` (installed as `octopus-login`) reads the key with
 `getpass`, which also accepts it on a piped stdin, checks it against Octopus,
-discovers the account and device, reads the plan once to prove the whole path
-works, and only then writes the file. With more than one account or device it
-lists them and asks for `--account` or `--device` (the optional fields in the
-app's form). Re-running it replaces the file, which is how to recover from a
+discovers the account and its devices, reads the plan once to prove the whole
+path works, and only then writes the file. With more than one account it lists
+them and asks for `--account`. Every device is read, so `--device` (the
+optional field in the app's form) only checks that a device is on the account. Re-running it replaces the file, which is how to recover from a
 regenerated key.
 
 ## Stream and menu bar
@@ -144,8 +153,8 @@ diagnostics: when the next slot is, the band it narrows from and to, when the
 lead-in starts, and when the band reverts. During a slot it shows the band
 being held, what it replaces and when it returns. The band values come from
 `octopus_schedule` itself, so the card can describe a charge before it starts. Its settings have an enable toggle, a credentials path and a
-sign-in form: an API-key field, optional account-number and device-ID fields
-for accounts with more than one, and a link to the Octopus API-access page.
+sign-in form: an API-key field, an optional account-number field for an API
+key with more than one account, an optional device-ID field, and a link to the Octopus API-access page.
 `OctopusLoginRunner.swift` runs `octopus-login` as a subprocess with the key
 on its stdin, exactly as `HypervoltLoginRunner.swift` does for Hypervolt, and
 reports the command's own success or `error: ` line. The key field is cleared

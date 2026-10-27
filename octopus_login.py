@@ -11,11 +11,14 @@ that form shows, so keep their prefixes. The API key is on the
 Octopus dashboard under Personal details, API access. It is read from a prompt
 (never a command-line argument, so it stays out of shell history and process
 listings), checked against Octopus, and saved with the account number and
-Intelligent Octopus device ID at owner-only permissions. `solis-poll
---octopus-enable` reads that file and never asks for the key.
+the account's Intelligent Octopus devices at owner-only permissions.
+`solis-poll --octopus-enable` reads that file and never asks for the key.
 
-With one account and one enrolled device, both are found automatically. With
-more than one, the error lists them; re-run with --account or --device.
+With one account, it is found automatically; with more than one, the error
+lists them; re-run with --account. Every enrolled device is read, and
+solis-poll lists them again on each refresh, so a car enrolled again under a
+new device ID needs no new sign-in. --device only checks that a device is on
+the account.
 Re-running replaces the file, which is how to recover from a regenerated key.
 """
 
@@ -52,7 +55,9 @@ def main() -> int:
         help="file path to write the API key to (the key itself is typed at the prompt)",
     )
     parser.add_argument("--account", help="account number, such as A-1234ABCD")
-    parser.add_argument("--device", help="Intelligent Octopus device ID")
+    parser.add_argument(
+        "--device", help="Intelligent Octopus device ID that must be on the account (optional)"
+    )
     # Hidden, like hypervolt-login's: tests point these at fake_octopus.py.
     parser.add_argument("--host", default="api.octopus.energy", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=443, help=argparse.SUPPRESS)
@@ -63,9 +68,11 @@ def main() -> int:
     if not api_key:
         print("error: an API key is required", file=sys.stderr)
         return 2
-    credentials = OctopusCredentials(api_key, args.account, args.device)
+    credentials = OctopusCredentials(api_key, args.account)
     try:
         credentials.validate()
+        if args.device is not None:
+            OctopusCredentials(api_key, device_ids=[args.device]).validate()
     except OctopusError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -76,8 +83,14 @@ def main() -> int:
         )
         if credentials.account_number is None:
             client.discover_account_number()
-        if credentials.device_id is None:
-            client.discover_device_id()
+        devices = client.discover_devices()
+        if args.device is not None and args.device not in devices:
+            print(
+                f"error: device {args.device} is not on account {credentials.account_number} "
+                f"(it has {', '.join(devices)})",
+                file=sys.stderr,
+            )
+            return 1
         planned = client.planned_dispatches()
     except OctopusError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -85,9 +98,9 @@ def main() -> int:
     credentials.save(args.credentials)
     print(
         f"Saved Octopus credentials for account {credentials.account_number}, "
-        f"device {credentials.device_id}, to {args.credentials}"
+        f"device(s) {', '.join(credentials.device_ids)}, to {args.credentials}"
     )
-    print(f"Octopus currently has {len(planned)} planned charge slot(s) for this device.")
+    print(f"Octopus currently has {len(planned)} planned charge slot(s) for the account.")
     return 0
 
 

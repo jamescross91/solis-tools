@@ -3,6 +3,25 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.1
+
+Follows the car when Octopus gives it a new device ID. Upgrade wherever
+`solis-poll` runs with `--octopus-enable` (on a Wattlark hub, the hub's
+solis-tools pin). The credentials file gains `device_ids`; `device_id` is kept,
+so older readers still work. Nothing on the inverter changes.
+
+### Fixed
+
+- `solis-poll` follows the car when Octopus enrols it again under a new device
+  ID, as deleting and re-adding it in the Octopus app does. It saved one device
+  ID at sign-in, and Octopus answers an old ID with an empty plan rather than an
+  error, so the Octopus schedule (the stream's `octopus_schedule`, the menu
+  bar's card and the voltage band) quietly showed no charge. It now lists the
+  account's devices on every refresh, reads every device's plan, and saves the
+  list back to the credentials file (`device_ids`, with `device_id` still the
+  first). `octopus-login` saves every device on an account with several
+  instead of asking for `--device`.
+
 ## 0.9.0
 
 Keeps `solis-poll` running when Hypervolt or Octopus fails, streams Octopus's

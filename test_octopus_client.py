@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from fake_octopus import FAKE_API_KEY, FakeOctopusApi
 from octopus_client import (
@@ -27,7 +29,7 @@ LOGIN = str(Path(__file__).with_name("octopus_login.py"))
 NOW = datetime(2026, 9, 27, 22, 0, tzinfo=timezone.utc)
 
 
-def client_for(fake: FakeOctopusApi, **credentials: str) -> OctopusClient:
+def client_for(fake: FakeOctopusApi, **credentials: Any) -> OctopusClient:
     return OctopusClient(
         OctopusCredentials(credentials.pop("api_key", FAKE_API_KEY), **credentials),
         host="127.0.0.1",
@@ -44,10 +46,29 @@ class CredentialsTests(unittest.TestCase):
     def test_saved_credentials_are_owner_only_and_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state" / "octopus.json"
-            OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", "device-1").save(path)
+            OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", ["device-1"]).save(path)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             loaded = OctopusCredentials.load(path)
-        self.assertEqual(loaded, OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", "device-1"))
+        self.assertEqual(loaded, OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", ["device-1"]))
+
+    def test_a_file_from_before_the_device_list_is_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "octopus.json"
+            path.write_text(
+                json.dumps(
+                    {"api_key": FAKE_API_KEY, "account_number": "A-1234ABCD", "device_id": "car-1"}
+                )
+            )
+            self.assertEqual(OctopusCredentials.load(path).device_ids, ["car-1"])
+
+    def test_the_first_device_is_saved_for_readers_of_the_older_file(self):
+        """The Wattlark hub shows `device_id` from this file."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "octopus.json"
+            OctopusCredentials(FAKE_API_KEY, "A-1234ABCD", ["car-1", "charger-2"]).save(path)
+            saved = json.loads(path.read_text())
+        self.assertEqual(saved["device_id"], "car-1")
+        self.assertEqual(saved["device_ids"], ["car-1", "charger-2"])
 
     def test_a_missing_file_names_the_command_that_writes_it(self):
         with self.assertRaisesRegex(OctopusAuthError, "octopus-login"):
@@ -59,7 +80,7 @@ class CredentialsTests(unittest.TestCase):
         for credentials in (
             OctopusCredentials('sk_live_abc" } evil'),
             OctopusCredentials(FAKE_API_KEY, account_number='A-1") { x'),
-            OctopusCredentials(FAKE_API_KEY, device_id="dev ice"),
+            OctopusCredentials(FAKE_API_KEY, device_ids=["dev ice"]),
         ):
             with self.subTest(credentials=credentials), self.assertRaises(OctopusAuthError):
                 credentials.validate()
@@ -80,16 +101,17 @@ class ClientTests(unittest.TestCase):
 
     def test_one_token_serves_repeated_refreshes(self):
         with FakeOctopusApi() as fake:
-            client = client_for(fake, device_id=fake.devices[0])
+            client = client_for(fake, device_ids=[fake.devices[0]])
             for _ in range(3):
                 client.planned_dispatches()
             self.assertEqual(fake.token_requests, 1)
 
     def test_a_token_renewal_and_its_query_share_one_connection(self):
         with FakeOctopusApi() as fake:
-            client = client_for(fake, device_id=fake.devices[0])
+            client = client_for(fake, device_ids=[fake.devices[0]])
             client.planned_dispatches()
-            self.assertEqual(len(fake.queries), 2)
+            # The token, the account, its devices and the device's plan.
+            self.assertEqual(len(fake.queries), 4)
             self.assertEqual(fake.connections, 1)
             client.planned_dispatches()
             # A new refresh opens afresh rather than reuse a connection the
@@ -98,21 +120,70 @@ class ClientTests(unittest.TestCase):
 
     def test_a_revoked_token_is_renewed_once_and_the_query_retried(self):
         with FakeOctopusApi() as fake:
-            client = client_for(fake, device_id=fake.devices[0])
+            client = client_for(fake, device_ids=[fake.devices[0]])
             client.planned_dispatches()
             fake.expire_tokens()
             client.planned_dispatches()
             self.assertEqual(fake.token_requests, 2)
 
+    def test_a_car_enrolled_again_is_followed_to_its_new_device(self):
+        """Octopus answers the old ID with an empty plan, not an error, so the
+        client must not keep asking about it."""
+        changed: list[list[str]] = []
+        with FakeOctopusApi(devices=("car-old",)) as fake:
+            client = client_for(fake, account_number="A-1234ABCD", device_ids=["car-old"])
+            client.on_devices_changed = lambda credentials: changed.append(
+                list(credentials.device_ids)
+            )
+            fake.reenrol("car-old", "car-new")
+            fake.plan_device_charge("car-new", 600, 3600)
+            windows = client.planned_dispatches()
+            self.assertEqual(len(windows), 1)
+            self.assertEqual(client.credentials.device_ids, ["car-new"])
+            self.assertEqual(changed, [["car-new"]])
+            self.assertFalse(any('"car-old"' in query for query in fake.queries))
+            # Unchanged devices are not reported again.
+            client.planned_dispatches()
+            self.assertEqual(changed, [["car-new"]])
+
+    def test_a_device_added_to_the_account_is_read_too(self):
+        with FakeOctopusApi(devices=("car-1",)) as fake:
+            client = client_for(fake, device_ids=["car-1"])
+            fake.plan_device_charge("car-1", 600, 1800)
+            self.assertEqual(len(client.planned_dispatches()), 1)
+            fake.devices = ("car-1", "charger-2")
+            fake.plan_device_charge("charger-2", 7200, 1800, "BOOST")
+            windows = client.planned_dispatches()
+        self.assertEqual(client.credentials.device_ids, ["car-1", "charger-2"])
+        self.assertEqual(sorted(window.kind for window in windows), ["BOOST", "SMART"])
+
+    def test_a_failed_device_listing_falls_back_to_the_cached_devices(self):
+        with FakeOctopusApi() as fake:
+            fake.plan_charge(600, 1800)
+            client = client_for(fake, device_ids=[fake.devices[0]])
+            fake.refuse_devices = True
+            self.assertEqual(len(client.planned_dispatches()), 1)
+            self.assertEqual(client.credentials.device_ids, [fake.devices[0]])
+
+    def test_a_failed_device_listing_with_nothing_cached_fails_the_refresh(self):
+        with FakeOctopusApi() as fake:
+            fake.refuse_devices = True
+            with self.assertRaisesRegex(OctopusError, "Too many requests"):
+                client_for(fake).planned_dispatches()
+
+    def test_an_account_with_no_devices_is_a_transient_error_not_an_auth_one(self):
+        """A car being enrolled again is briefly on no device; the monitor
+        must keep the last plan rather than treat it as a configuration fault."""
+        with FakeOctopusApi(devices=()) as fake:
+            with self.assertRaises(OctopusError) as raised:
+                client_for(fake, device_ids=["car-1"]).planned_dispatches()
+        self.assertNotIsInstance(raised.exception, OctopusAuthError)
+        self.assertIn("no Intelligent Octopus device", str(raised.exception))
+
     def test_a_refused_key_is_an_auth_error(self):
         with FakeOctopusApi() as fake:
             fake.refuse_key = True
             with self.assertRaisesRegex(OctopusAuthError, "KT-CT-1139"):
-                client_for(fake).planned_dispatches()
-
-    def test_several_devices_must_be_chosen_explicitly(self):
-        with FakeOctopusApi(devices=("car-1", "car-2")) as fake:
-            with self.assertRaisesRegex(OctopusAuthError, "--device"):
                 client_for(fake).planned_dispatches()
 
     def test_a_dispatch_without_a_utc_offset_is_rejected(self):
@@ -288,23 +359,30 @@ class LoginTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(OctopusCredentials.load(path).device_id, fake.devices[0])
 
-    def test_several_devices_are_listed_then_one_is_chosen(self):
-        """The menu-bar form shows the stderr line and offers the device field;
-        filling it in passes --device and succeeds."""
+    def test_every_device_on_the_account_is_saved(self):
         with (
             tempfile.TemporaryDirectory() as directory,
             FakeOctopusApi(devices=("car-1", "charger-2")) as fake,
         ):
             path = Path(directory) / "octopus.json"
-            listed = self.run_login(fake, path, FAKE_API_KEY)
-            self.assertEqual(listed.returncode, 1)
-            self.assertIn("car-1", listed.stderr)
-            self.assertIn("charger-2", listed.stderr)
-            self.assertFalse(path.exists())
+            result = self.run_login(fake, path, FAKE_API_KEY)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("car-1, charger-2", result.stdout)
+            self.assertEqual(OctopusCredentials.load(path).device_ids, ["car-1", "charger-2"])
 
+    def test_a_device_that_is_not_on_the_account_is_refused(self):
+        """The menu-bar form still offers a device field, which passes --device."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            FakeOctopusApi(devices=("car-1", "charger-2")) as fake,
+        ):
+            path = Path(directory) / "octopus.json"
             chosen = self.run_login(fake, path, FAKE_API_KEY, "--device", "charger-2")
             self.assertEqual(chosen.returncode, 0, chosen.stderr)
-            self.assertEqual(OctopusCredentials.load(path).device_id, "charger-2")
+            missing = self.run_login(fake, path, FAKE_API_KEY, "--device", "car-9")
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn("car-9 is not on account A-1234ABCD", missing.stderr)
+            self.assertIn("car-1, charger-2", missing.stderr)
 
     def test_output_matches_what_the_menu_bar_parses(self):
         """OctopusLoginRunner.swift keys on these exact prefixes."""
