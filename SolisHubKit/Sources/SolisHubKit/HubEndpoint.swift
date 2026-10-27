@@ -17,10 +17,15 @@ public enum HubEndpointKind: String, Sendable, Equatable, Hashable {
 public struct HubEndpoint: Sendable, Equatable, Hashable, Identifiable {
     public let kind: HubEndpointKind
     public let baseURL: URL
+    /// Found by Bonjour rather than given by the person: anything on the
+    /// network can advertise that, so the hub there must prove it holds the
+    /// token (HubIdentity) before the token is sent to it.
+    public let requiresProof: Bool
 
-    public init(kind: HubEndpointKind, baseURL: URL) {
+    public init(kind: HubEndpointKind, baseURL: URL, requiresProof: Bool = false) {
         self.kind = kind
         self.baseURL = baseURL
+        self.requiresProof = requiresProof
     }
 
     public var id: String { "\(kind.rawValue) \(baseURL.absoluteString)" }
@@ -83,6 +88,16 @@ public enum HubURLInput {
         return components.url
     }
 
+    /// One address, either kind: an https:// or wss:// address is the remote
+    /// one, anything else is read as a LAN address. Nil when it is neither.
+    public static func classify(_ text: String) -> HubEndpoint? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.hasPrefix("https://") || trimmed.hasPrefix("wss://") {
+            return remote(text).map { HubEndpoint(kind: .remote, baseURL: $0) }
+        }
+        return lan(text).map { HubEndpoint(kind: .lan, baseURL: $0) }
+    }
+
     /// A remote address, always TLS: a plain-text token over the internet is
     /// never what anyone wants, so "http://" and "ws://" are refused.
     public static func remote(_ text: String) -> URL? {
@@ -139,17 +154,29 @@ public struct DiscoveredHub: Sendable, Equatable, Hashable, Identifiable {
 public struct HubConnectionSettings: Sendable, Equatable {
     public var lanURL: URL?
     public var remoteURL: URL?
-    /// The hub the person chose from the discovered list, so a neighbour's
-    /// hub, or a second one, is never connected to by accident.
+    /// The hub whose Bonjour advertisement to use on the LAN: chosen from the
+    /// discovered list, or learned from the hub itself on a connection. Only a
+    /// hub that proves it holds the token is ever sent it.
     public var preferredHubID: String?
+    /// The address the hub says to use away from home (its `public_url`),
+    /// tried after any remote URL the person gave.
+    public var learnedRemoteURL: URL?
 
-    public init(lanURL: URL? = nil, remoteURL: URL? = nil, preferredHubID: String? = nil) {
+    public init(
+        lanURL: URL? = nil,
+        remoteURL: URL? = nil,
+        preferredHubID: String? = nil,
+        learnedRemoteURL: URL? = nil
+    ) {
         self.lanURL = lanURL
         self.remoteURL = remoteURL
         self.preferredHubID = preferredHubID
+        self.learnedRemoteURL = learnedRemoteURL
     }
 
-    public var isEmpty: Bool { lanURL == nil && remoteURL == nil && preferredHubID == nil }
+    public var isEmpty: Bool {
+        lanURL == nil && remoteURL == nil && preferredHubID == nil && learnedRemoteURL == nil
+    }
 }
 
 /// The order endpoints are tried in. Pure, so the rules are testable without
@@ -170,17 +197,17 @@ public enum HubEndpointSelector {
             }
         }
 
-        // Discovered hubs are used only once the person has chosen one. The
-        // bearer token goes to a LAN address in clear text, and any host on
-        // the network can advertise the service, so a lone discovered hub is
-        // offered in the UI but never connected to unprompted.
+        // A discovered hub is used only when it is the one this client knows,
+        // chosen in the UI or learned from the hub on an earlier connection,
+        // and even then any host on the network could advertise its ID, so
+        // these endpoints must prove they hold the token before it is sent.
         if let preferred = settings.preferredHubID {
             let eligible = discovered
                 .filter { $0.hubID == preferred }
                 .sorted { $0.name < $1.name }
             for hub in eligible {
                 if let url = hub.url {
-                    add(HubEndpoint(kind: .lan, baseURL: url))
+                    add(HubEndpoint(kind: .lan, baseURL: url, requiresProof: true))
                 }
             }
         }
@@ -189,6 +216,9 @@ public enum HubEndpointSelector {
         }
         if let remote = settings.remoteURL {
             add(HubEndpoint(kind: .remote, baseURL: remote))
+        }
+        if let learned = settings.learnedRemoteURL {
+            add(HubEndpoint(kind: .remote, baseURL: learned))
         }
         return result
     }

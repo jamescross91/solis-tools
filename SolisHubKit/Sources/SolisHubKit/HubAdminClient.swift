@@ -213,6 +213,10 @@ public struct HubAdminClient: Sendable {
                 timeout: configuration.connectTimeout(for: endpoint.kind)
             )
             do {
+                try await HubIdentity.verifyIfNeeded(
+                    endpoint, auth: auth, transport: transport,
+                    timeout: configuration.connectTimeout(for: endpoint.kind)
+                )
                 let state = try await probe.settings()
                 return (HubAdminClient(endpoint: endpoint, auth: auth, transport: transport), state)
             } catch let error as HubAdminError {
