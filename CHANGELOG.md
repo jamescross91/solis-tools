@@ -3,7 +3,13 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.10.0
+
+Under a Wattlark hub, the hub becomes the only thing that reads Octopus, and
+Hub mode says when the hub's Octopus or Hypervolt is off or failing. Upgrade
+the menu bar for the warnings; a hub takes the poller change with its
+solis-tools pin. Without a hub nothing changes, and nothing on the inverter
+changes.
 
 ### Added
 
