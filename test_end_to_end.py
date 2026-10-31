@@ -831,6 +831,43 @@ class OctopusChargeWindowTests(unittest.TestCase):
         self.assertEqual(saved.device_ids, ["car-new"])
         self.assertEqual(saved.api_key, FAKE_API_KEY)
 
+    def test_under_a_hub_the_plan_comes_from_its_file_and_octopus_is_never_asked(self):
+        """The hub is the one thing that reads Octopus: with three readers of
+        one account, Octopus refused requests as too many."""
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "octopus-plan.json"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": now.isoformat(),
+                        "planned": [
+                            {
+                                "start": (now + timedelta(seconds=60)).isoformat(),
+                                "end": (now + timedelta(hours=1)).isoformat(),
+                                "kind": "SMART",
+                            }
+                        ],
+                        "error": None,
+                    }
+                )
+            )
+            with FakeInverter(self._bank()) as inverter, FakeOctopusApi() as octopus:
+                samples = self._run(
+                    inverter, octopus, directory, 3, "--octopus-plan-file", str(plan)
+                )
+                asked = list(octopus.queries)
+
+        self.assertEqual(asked, [])
+        control = samples[-1]["voltage_control"]
+        self.assertTrue(control["ev_voltage_limits_active"])
+        schedule = latest_octopus_schedule(samples)
+        self.assertEqual(len(schedule["dispatches"]), 1)
+        self.assertIsNone(schedule["last_error"])
+
     def test_a_later_charge_is_reported_without_tightening_the_band(self):
         import tempfile
 

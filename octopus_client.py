@@ -545,6 +545,74 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# How long a plan the hub wrote stays current. The hub reads Octopus every
+# three minutes and retries a failure after one, so a quarter of an hour
+# without a fresh read means the hub's own read is failing.
+HUB_PLAN_MAX_AGE_S = 15 * 60.0
+# Reading a local file is cheap: follow the hub's plan within seconds.
+HUB_PLAN_INTERVAL_S = 15.0
+
+
+class HubPlanFile:
+    """Octopus's charge plan as the Wattlark hub read it, from the file the
+    hub writes, in place of an OctopusClient.
+
+    Under a hub, the hub is the one thing that talks to Octopus. With the hub,
+    this poller and an app each reading the same account, Octopus began
+    refusing requests as "Too many requests". The monitor treats a missing,
+    unreadable or stale file exactly as it treats Octopus failing: the last
+    plan is kept and the error reported.
+
+    The file: ``{"fetched_at": ISO time of the hub's last good read,
+    "planned": [{"start", "end", "kind"}], "error": str | null}``.
+    """
+
+    timeout = 1.0
+
+    def __init__(
+        self,
+        path: Path,
+        max_age_s: float = HUB_PLAN_MAX_AGE_S,
+        clock: Callable[[], datetime] = _utc_now,
+    ):
+        self.path = path
+        self.max_age_s = max_age_s
+        self.clock = clock
+
+    def planned_dispatches(self) -> list[ChargeWindow]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise OctopusError("the hub has not written Octopus's charge plan yet") from None
+        except (OSError, ValueError) as exc:
+            raise OctopusError(f"cannot read the hub's Octopus charge plan: {exc}") from None
+        if not isinstance(data, dict):
+            raise OctopusProtocolError("the hub's Octopus charge plan is not an object")
+        error = data.get("error") if isinstance(data.get("error"), str) else None
+        if data.get("fetched_at") is None:
+            raise OctopusError(error or "the hub has not read Octopus's charge plan yet")
+        fetched = _parse_time(data.get("fetched_at"))
+        age_s = (self.clock() - fetched).total_seconds()
+        if age_s > self.max_age_s:
+            reason = f": {error}" if error else ""
+            raise OctopusError(
+                f"the hub's last good read of Octopus is {age_s / 60:.0f} minutes old{reason}"
+            )
+        planned = data.get("planned")
+        if not isinstance(planned, list):
+            raise OctopusProtocolError("the hub's Octopus charge plan has no planned list")
+        windows = []
+        for item in planned:
+            if not isinstance(item, dict):
+                raise OctopusProtocolError("a planned dispatch is not an object")
+            start, end = _parse_time(item.get("start")), _parse_time(item.get("end"))
+            if end <= start:
+                raise OctopusProtocolError("a planned dispatch ends before it starts")
+            kind = item.get("kind")
+            windows.append(ChargeWindow(start, end, kind if isinstance(kind, str) else "SMART"))
+        return windows
+
+
 @dataclass
 class OctopusScheduleMonitor:
     """Refresh the plan on a background thread and publish immutable snapshots.
@@ -560,7 +628,7 @@ class OctopusScheduleMonitor:
       dispatch once it is running while the car is still charging.
     """
 
-    client: OctopusClient
+    client: OctopusClient | HubPlanFile
     interval_s: float = 180.0
     lead_time_s: float = 300.0
     clock: Callable[[], datetime] = _utc_now

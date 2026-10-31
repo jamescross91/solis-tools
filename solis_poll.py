@@ -34,7 +34,9 @@ from hypervolt_client import (
     HypervoltError,
 )
 from octopus_client import (
+    HUB_PLAN_INTERVAL_S,
     ChargeWindow,
+    HubPlanFile,
     OctopusClient,
     OctopusCredentials,
     OctopusError,
@@ -2909,6 +2911,14 @@ def build_parser(
         help="seconds between Octopus schedule refreshes (default: 180, minimum 60)",
     )
     parser.add_argument("--octopus-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--octopus-plan-file",
+        type=Path,
+        help=(
+            "read Octopus's charge plan from this file, written by the Wattlark hub, instead of "
+            "asking Octopus (the hub is then the only thing that talks to Octopus)"
+        ),
+    )
     # Hidden, like the Hypervolt overrides: end-to-end tests point these at
     # fake_octopus.py.
     parser.add_argument("--octopus-host", default="api.octopus.energy", help=argparse.SUPPRESS)
@@ -3164,7 +3174,17 @@ def main() -> int:
                         hypervolt_actuator.note_connection_error(str(exc))
                         hypervolt_reconnect_attempt = 1
                         hypervolt_reconnect_not_before = time.monotonic() + _next_backoff_delay_s(0)
-            if args.octopus_enable:
+            if args.octopus_enable and args.octopus_plan_file is not None:
+                # The hub reads Octopus and writes the plan; nothing here
+                # talks to Octopus or needs its key.
+                octopus_monitor = OctopusScheduleMonitor(
+                    HubPlanFile(args.octopus_plan_file),
+                    interval_s=HUB_PLAN_INTERVAL_S,
+                    lead_time_s=configuration.octopus_lead_time_s,
+                )
+                octopus_monitor.refresh()
+                octopus_monitor.start()
+            elif args.octopus_enable:
                 # Like Hypervolt, optional: a failure is reported in the
                 # schedule's error and retried, and never stops the readings.
                 octopus_credentials_path = args.octopus_credentials or state_dir / "octopus.json"

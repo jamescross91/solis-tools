@@ -16,6 +16,7 @@ from typing import Any
 from fake_octopus import FAKE_API_KEY, FakeOctopusApi
 from octopus_client import (
     ChargeWindow,
+    HubPlanFile,
     OctopusAuthError,
     OctopusClient,
     OctopusCredentials,
@@ -326,6 +327,72 @@ class MonitorTests(unittest.TestCase):
                 monitor.stop()
         schedule = monitor.snapshot()
         self.assertIsNotNone(schedule.active_window(datetime.now(timezone.utc), 0))
+
+
+class HubPlanFileTests(unittest.TestCase):
+    """Under the Wattlark hub the plan comes from a file the hub writes, and
+    this side never talks to Octopus."""
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.path = Path(self._directory.name) / "octopus-plan.json"
+        self.now = [NOW]
+        self.source = HubPlanFile(self.path, clock=lambda: self.now[0])
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def write(self, fetched_min: float | None, planned: list[ChargeWindow], error=None) -> None:
+        fetched = None if fetched_min is None else NOW + timedelta(minutes=fetched_min)
+        self.path.write_text(
+            json.dumps(
+                {
+                    "fetched_at": fetched.isoformat() if fetched else None,
+                    "planned": [
+                        {"start": w.start.isoformat(), "end": w.end.isoformat(), "kind": w.kind}
+                        for w in planned
+                    ],
+                    "error": error,
+                }
+            )
+        )
+
+    def test_the_hubs_plan_is_read_as_sent(self):
+        self.write(-2, [window(30, 60), window(60, 90, "BOOST")])
+        self.assertEqual(
+            self.source.planned_dispatches(), [window(30, 60), window(60, 90, "BOOST")]
+        )
+
+    def test_no_file_yet_is_a_transient_error(self):
+        with self.assertRaisesRegex(OctopusError, "not written"):
+            self.source.planned_dispatches()
+
+    def test_a_stale_plan_fails_with_the_hubs_own_error(self):
+        self.write(-16, [window(30, 60)], error="Octopus refused the request (HTTP 429)")
+        with self.assertRaisesRegex(OctopusError, "16 minutes old: Octopus refused"):
+            self.source.planned_dispatches()
+
+    def test_a_hub_that_never_read_octopus_says_why(self):
+        self.write(None, [], error="switched off")
+        with self.assertRaisesRegex(OctopusError, "switched off"):
+            self.source.planned_dispatches()
+
+    def test_a_damaged_file_is_a_protocol_error(self):
+        self.path.write_text("[1, 2]")
+        with self.assertRaises(OctopusError):
+            self.source.planned_dispatches()
+        self.path.write_text("{not json")
+        with self.assertRaisesRegex(OctopusError, "cannot read"):
+            self.source.planned_dispatches()
+
+    def test_the_monitor_keeps_the_last_plan_when_the_file_goes_stale(self):
+        monitor = OctopusScheduleMonitor(self.source, lead_time_s=300, clock=lambda: self.now[0])
+        self.write(-1, [window(30, 90)])
+        monitor.refresh()
+        self.now[0] = NOW + timedelta(minutes=20)
+        schedule = monitor.refresh()
+        self.assertEqual(schedule.windows, (window(30, 90),))
+        self.assertIn("minutes old", schedule.last_error or "")
 
 
 class LoginTests(unittest.TestCase):

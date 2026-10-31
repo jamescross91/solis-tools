@@ -3,6 +3,18 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `solis-poll --octopus-plan-file PATH` reads Intelligent Octopus's charge
+  plan from a file a Wattlark hub writes, instead of asking Octopus. Under a
+  hub, the hub is then the only thing that talks to Octopus: with the hub,
+  the poller and an app each reading one account, Octopus refused requests as
+  "Too many requests". A missing, damaged or stale file (over 15 minutes)
+  counts as a failed refresh, so the last plan is kept and the band never
+  relaxes early. See docs/octopus-integration.md.
+
 ## 0.9.1
 
 Follows the car when Octopus gives it a new device ID. Upgrade wherever

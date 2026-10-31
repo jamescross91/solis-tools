@@ -103,6 +103,21 @@ few as it can:
   form reads the credentials file when it opens or its path changes, not on
   every redraw.
 
+## Under a Wattlark hub: the hub's plan file
+
+A Wattlark hub reads Octopus itself, for prices and for every device's plan.
+With the hub, this poller and an app all reading the same account, Octopus
+began refusing requests as "Too many requests". So under a hub, the hub is
+the only thing that talks to Octopus: it writes the plan to a file and starts
+the poller with `--octopus-plan-file PATH`. The poller then never asks Octopus
+and never needs the API key, and it reads the file every 15 seconds.
+
+The file is `{"fetched_at": …, "planned": [{"start", "end", "kind"}],
+"error": …}`, with `fetched_at` the hub's last good read. A missing or damaged
+file, or a `fetched_at` over 15 minutes old, counts as a failed refresh: the
+rules below apply unchanged, and the hub's own error is passed on in
+`last_error`.
+
 ## When the plan is wrong or unavailable
 
 Every rule below can only keep the band narrow for longer, never relax it
