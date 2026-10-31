@@ -58,7 +58,7 @@ from voltage_control import (
 )
 
 MIN_PYTHON = (3, 10)
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 # Bumped whenever a stream field is renamed, removed or changes meaning; the
 # menu-bar app refuses a version it does not know. Two sends configuration
 # once per run and recent_events only when they change.
