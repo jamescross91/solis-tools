@@ -67,6 +67,158 @@ public struct HubPollerStatus: Decodable, Sendable, Equatable {
     }
 }
 
+/// What the hub says about one of its data sources.
+public enum HubSourceState: Equatable, Sendable {
+    case ok
+    /// Signed in but switched off in the hub's settings (for Hypervolt, also
+    /// while voltage control is off).
+    case off
+    /// Nothing new for longer than the hub allows: an hour for Octopus, 30
+    /// minutes for the charger.
+    case failing
+    case notSignedIn
+    /// A state a newer hub added; kept so it can be shown.
+    case unknown(String)
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "ok": self = .ok
+        case "off": self = .off
+        case "failing": self = .failing
+        case "not_signed_in": self = .notSignedIn
+        default: self = .unknown(rawValue)
+        }
+    }
+}
+
+public struct HubSourceStatus: Decodable, Sendable, Equatable {
+    /// The raw state, so one this build does not know still decodes.
+    public let state: String
+    public let detail: String?
+    /// ISO 8601, or nil when the source has never worked on this hub run.
+    public let lastOk: String?
+
+    public init(state: String, detail: String? = nil, lastOk: String? = nil) {
+        self.state = state
+        self.detail = detail
+        self.lastOk = lastOk
+    }
+
+    public var kind: HubSourceState { HubSourceState(rawValue: state) }
+
+    public var lastOkDate: Date? { lastOk.flatMap(StreamDecoder.date(from:)) }
+}
+
+/// A source the dashboard should warn about, worded for the person reading it.
+public struct HubSourceWarning: Sendable, Equatable, Identifiable {
+    /// The hub's name for the source, such as "octopus".
+    public let source: String
+    public let message: String
+    /// The hub's own explanation, when it gave one.
+    public let detail: String?
+
+    public var id: String { source }
+}
+
+/// The hub's data sources by name. The hub reported none of this until
+/// Octopus and Hypervolt sat switched off in its saved settings for a week
+/// with nothing on screen to say so; this is what lets a client say so.
+public struct HubSources: Decodable, Sendable, Equatable {
+    /// Every source the hub reported, including names this build does not know.
+    public let all: [String: HubSourceStatus]
+
+    public init(_ all: [String: HubSourceStatus]) {
+        self.all = all
+    }
+
+    public var octopus: HubSourceStatus? { all["octopus"] }
+    public var hypervolt: HubSourceStatus? { all["hypervolt"] }
+
+    private struct Name: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+
+        init(stringValue: String) {
+            self.stringValue = stringValue
+        }
+
+        init?(intValue: Int) {
+            return nil
+        }
+    }
+
+    // Lenient on purpose: this rides on hello, and a source a newer hub
+    // describes differently must not cost the client its handshake. An entry
+    // that does not decode is left out rather than failing the message.
+    public init(from decoder: Decoder) throws {
+        var all: [String: HubSourceStatus] = [:]
+        if let container = try? decoder.container(keyedBy: Name.self) {
+            for key in container.allKeys {
+                if let status = try? container.decode(HubSourceStatus.self, forKey: key) {
+                    all[Self.snakeCased(key.stringValue)] = status
+                }
+            }
+        }
+        self.all = all
+    }
+
+    /// The shared decoder's convertFromSnakeCase rewrites dictionary keys as
+    /// well as field names, so "heat_pump" arrives as "heatPump". The hub's
+    /// names are lower snake_case, which makes this an exact inverse.
+    private static func snakeCased(_ key: String) -> String {
+        var result = ""
+        for character in key {
+            if character.isUppercase {
+                result += "_" + character.lowercased()
+            } else {
+                result.append(character)
+            }
+        }
+        return result
+    }
+
+    /// Sources that are off or failing, Octopus then Hypervolt then any
+    /// others by name. A state this build does not know is not warned
+    /// about: it may well be healthy.
+    public var warnings: [HubSourceWarning] {
+        let known = ["octopus", "hypervolt"]
+        let names = known.filter { all[$0] != nil }
+            + all.keys.filter { !known.contains($0) }.sorted()
+        return names.compactMap { name in
+            guard let status = all[name], let message = Self.message(for: name, kind: status.kind) else {
+                return nil
+            }
+            let detail = status.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return HubSourceWarning(
+                source: name, message: message, detail: detail?.isEmpty == false ? detail : nil
+            )
+        }
+    }
+
+    private static func message(for name: String, kind: HubSourceState) -> String? {
+        switch (name, kind) {
+        case ("octopus", .off):
+            return "Octopus is switched off in the hub's settings: no prices or charge plan"
+        case ("octopus", .failing):
+            return "Nothing new from Octopus for over an hour"
+        case ("hypervolt", .off):
+            return "Hypervolt is switched off in the hub's settings: no car readings"
+        case ("hypervolt", .failing):
+            return "No car readings from Hypervolt for over 30 minutes"
+        case (_, .off):
+            return "\(displayName(name)) is switched off in the hub's settings"
+        case (_, .failing):
+            return "Nothing new from \(displayName(name)) recently"
+        default:
+            return nil
+        }
+    }
+
+    private static func displayName(_ name: String) -> String {
+        name.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
 public struct HubHello: Decodable, Sendable, Equatable {
     public let hubProtocolVersion: Int
     public let hubVersion: String
@@ -76,12 +228,20 @@ public struct HubHello: Decodable, Sendable, Equatable {
     /// public address, or is older than this field.
     public let publicUrl: String?
     public let poller: HubPollerStatus?
+    /// Nil from a hub older than source reporting.
+    public let sources: HubSources?
 }
 
 public struct HubSnapshot: Decodable, Sendable {
     /// The merged envelope, or nil before the poller's first sample.
     public let envelope: StreamEnvelope?
     public let poller: HubPollerStatus?
+    /// Nil from a hub older than source reporting.
+    public let sources: HubSources?
+}
+
+private struct HubSourcesBody: Decodable {
+    let sources: HubSources?
 }
 
 public struct HubErrorMessage: Decodable, Sendable, Equatable {
@@ -103,6 +263,8 @@ public enum HubServerMessage: Sendable {
     case snapshot(HubSnapshot)
     case sample(StreamEnvelope)
     case pollerStatus(HubPollerStatus)
+    /// Sent whenever one of the hub's sources changes state.
+    case sources(HubSources)
     case pong(nonce: String?)
     case error(HubErrorMessage)
     case unknown(type: String)
@@ -164,6 +326,9 @@ public enum HubServerMessage: Sendable {
             return .sample(sample.envelope)
         case "poller_status":
             return .pollerStatus(try body(HubPollerStatus.self, from: data, using: decoder))
+        case "sources":
+            let sources = try body(HubSourcesBody.self, from: data, using: decoder).sources
+            return .sources(sources ?? HubSources([:]))
         case "pong":
             return .pong(nonce: try body(PongBody.self, from: data, using: decoder).nonce)
         case "error":

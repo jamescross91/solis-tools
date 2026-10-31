@@ -95,7 +95,7 @@ final class StreamStateMergerTests: XCTestCase {
         XCTAssertNotNil(feed.envelope?.voltageControl?.octopusSchedule)
 
         let fresh = try envelope(extra: ", \"octopus_schedule\": null")
-        feed.apply(.snapshot(HubSnapshot(envelope: fresh, poller: nil)))
+        feed.apply(.snapshot(HubSnapshot(envelope: fresh, poller: nil, sources: nil)))
         XCTAssertNil(feed.envelope?.voltageControl?.octopusSchedule)
         XCTAssertNil(feed.envelope?.voltageControl?.configuration)
         XCTAssertEqual(feed.envelope?.voltageControl?.recentEvents?.count, 0)
@@ -112,6 +112,14 @@ final class StreamStateMergerTests: XCTestCase {
         feed.apply(.sample(try envelope(polls: 2)))
         XCTAssertEqual(feed.envelope?.health.successfulPolls, 2)
         XCTAssertEqual(feed.envelope?.voltageControl?.recentEvents?.count, 1)
+
+        XCTAssertNil(feed.sources)
+        feed.apply(.sources(HubSources(["octopus": HubSourceStatus(state: "off")])))
+        XCTAssertEqual(feed.sources?.octopus?.kind, .off)
+        // A snapshot from an older hub says nothing about sources, so the
+        // last word stands.
+        feed.apply(.snapshot(HubSnapshot(envelope: nil, poller: nil, sources: nil)))
+        XCTAssertEqual(feed.sources?.octopus?.kind, .off)
 
         feed.apply(.disconnected(.timedOut))
         XCTAssertFalse(feed.isConnected)

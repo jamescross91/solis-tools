@@ -107,19 +107,31 @@ enum Fixtures {
          "last_exit_code":null,"next_attempt_at":null}
         """
 
+    /// Octopus switched off in the hub's settings and Hypervolt quiet, as
+    /// the hub reported them in October 2026.
+    static let sources = """
+        {"octopus": {"state": "off", "detail": null, "last_ok": "2026-10-19T08:00:00+01:00"},
+         "hypervolt": {"state": "failing", "detail": "Charger socket closed", "last_ok": null}}
+        """
+
+    /// `sources` is left out of the message when nil, as an older hub does.
     static func hello(
-        protocolVersion: Int = 1, schema: Int = 2, hubID: String = "hub-1"
+        protocolVersion: Int = 1, schema: Int = 2, hubID: String = "hub-1", sources: String? = nil
     ) -> String {
         """
         {"type":"hello","hub_protocol_version":\(protocolVersion),"hub_version":"0.5.4",
-         "stream_schema_version":\(schema),"hub_id":"\(hubID)","poller":\(poller)}
+         "stream_schema_version":\(schema),"hub_id":"\(hubID)","poller":\(poller)\(sourcesField(sources))}
         """
     }
 
-    static func snapshot(envelope: String?) -> String {
+    static func snapshot(envelope: String?, sources: String? = nil) -> String {
         """
-        {"type":"snapshot","envelope":\(envelope ?? "null"),"poller":\(poller)}
+        {"type":"snapshot","envelope":\(envelope ?? "null"),"poller":\(poller)\(sourcesField(sources))}
         """
+    }
+
+    private static func sourcesField(_ sources: String?) -> String {
+        sources.map { ",\"sources\":\($0)" } ?? ""
     }
 
     static func sample(envelope: String) -> String {

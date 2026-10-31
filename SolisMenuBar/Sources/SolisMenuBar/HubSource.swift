@@ -126,6 +126,7 @@ final class HubSource: TelemetrySource {
         case let .hello(hello):
             link.hubVersion = hello.hubVersion
             link.hubID = hello.hubId
+            link.sources = hello.sources
             learn(from: hello)
             continuation.yield(.hubLink(link))
             if let poller = hello.poller {
@@ -134,6 +135,10 @@ final class HubSource: TelemetrySource {
         case let .snapshot(snapshot):
             if let poller = snapshot.poller {
                 apply(poller)
+            }
+            if let sources = snapshot.sources, sources != link.sources {
+                link.sources = sources
+                continuation.yield(.hubLink(link))
             }
             if let envelope = snapshot.envelope {
                 // Authoritative: drop whatever was carried from an earlier run
@@ -147,6 +152,9 @@ final class HubSource: TelemetrySource {
             continuation.yield(.envelope(envelope))
         case let .pollerStatus(status):
             apply(status)
+        case let .sources(sources):
+            link.sources = sources
+            continuation.yield(.hubLink(link))
         case let .disconnected(reason):
             link.isConnected = false
             link.disconnectReason = reason.summary

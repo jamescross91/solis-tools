@@ -21,6 +21,8 @@ struct HubLinkInfo: Equatable, Sendable {
     var hubVersion: String?
     var hubID: String?
     var disconnectReason: String?
+    /// The hub's Octopus and Hypervolt, or nil from a hub too old to say.
+    var sources: HubSources?
 }
 
 enum TelemetryEvent: Sendable {

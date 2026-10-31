@@ -14,6 +14,18 @@ versioning](https://semver.org/spec/v2.0.0.html).
   "Too many requests". A missing, damaged or stale file (over 15 minutes)
   counts as a failed refresh, so the last plan is kept and the band never
   relaxes early. See docs/octopus-integration.md.
+- The menu bar's Hub mode warns when the hub's Octopus or Hypervolt is
+  switched off in its settings, or has sent nothing new for over an hour
+  (Octopus) or 30 minutes (Hypervolt), with the hub's own explanation when it
+  gives one. Both were once switched off in a hub's saved settings for a week
+  with nothing on screen to say so. It needs a Wattlark hub that reports its
+  sources; with an older hub nothing changes.
+- SolisHubKit decodes the hub's source health (`HubSources`, on `HubHello`,
+  `HubSnapshot` and `HubStatus`, and the new `sources` message as
+  `HubServerMessage.sources` and `HubEvent.sources`), keeps the latest in
+  `HubFeedState.sources`, and reads `GET /v1/octopus/dispatches` with
+  `HubHistoryClient.octopusDispatches()`. `HubEvent` gains a case, so an
+  exhaustive `switch` over it needs one too.
 
 ## 0.9.1
 
