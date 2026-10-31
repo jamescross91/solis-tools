@@ -62,6 +62,8 @@ public struct HubFeedState: Sendable {
     public private(set) var envelope: StreamEnvelope?
     public private(set) var poller: HubPollerStatus?
     public private(set) var hello: HubHello?
+    /// Nil until a hub that reports its sources has said so.
+    public private(set) var sources: HubSources?
     public private(set) var endpoint: HubEndpoint?
     public private(set) var isConnected = false
     public private(set) var lastDisconnect: HubDisconnectReason?
@@ -78,8 +80,10 @@ public struct HubFeedState: Sendable {
         case let .hello(hello):
             self.hello = hello
             poller = hello.poller ?? poller
+            sources = hello.sources ?? sources
         case let .snapshot(snapshot):
             poller = snapshot.poller ?? poller
+            sources = snapshot.sources ?? sources
             if let received = snapshot.envelope {
                 // A snapshot is the hub's complete merged state, so what this
                 // client carried from an earlier run must not fill its gaps: a
@@ -95,6 +99,8 @@ public struct HubFeedState: Sendable {
             envelope = merger.merge(received)
         case let .pollerStatus(status):
             poller = status
+        case let .sources(sources):
+            self.sources = sources
         case let .disconnected(reason):
             isConnected = false
             lastDisconnect = reason

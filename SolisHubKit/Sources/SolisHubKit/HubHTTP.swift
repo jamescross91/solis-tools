@@ -132,6 +132,8 @@ public struct HubStatus: Decodable, Sendable, Equatable {
     public let clients: Int
     public let envelopeAgeS: Double?
     public let publicUrl: String?
+    /// Nil from a hub older than source reporting.
+    public let sources: HubSources?
 }
 
 /// GET /v1/status: cheap, authenticated, and independent of the WebSocket,

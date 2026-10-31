@@ -146,6 +146,52 @@ final class HubHistoryClientTests: XCTestCase {
         XCTAssertNotNil(rows.first?.date)
     }
 
+    func testOctopusDispatchesDecode() async throws {
+        let body = """
+            {"fetched_at": "2026-10-31T09:00:00Z", "devices": 1,
+             "planned": [{"start": "2026-10-31T23:30:00Z", "end": "2026-11-01T05:30:00Z", "kind": "SMART"}],
+             "completed": [{"start": "2026-10-31T01:00:00Z", "end": "2026-10-31T02:00:00Z", "kind": "BOOST"}],
+             "error": null}
+            """
+        let transport = RecordingHTTPTransport(body: body)
+        let client = HubHistoryClient(endpoint: endpoint, auth: auth, transport: transport)
+        let fetched = try await client.octopusDispatches()
+        let dispatches = try XCTUnwrap(fetched)
+        XCTAssertNotNil(dispatches.fetchedDate)
+        XCTAssertEqual(dispatches.devices, 1)
+        XCTAssertEqual(dispatches.planned.first?.kind, "SMART")
+        XCTAssertNotNil(dispatches.planned.first?.startDate)
+        XCTAssertNotNil(dispatches.planned.first?.endDate)
+        XCTAssertEqual(dispatches.completed.first?.kind, "BOOST")
+        XCTAssertNil(dispatches.error)
+
+        let request = try XCTUnwrap(transport.recorded.first)
+        XCTAssertEqual(request.url?.path, "/v1/octopus/dispatches")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+    }
+
+    /// Before the first read, and after a failed one, most fields are empty.
+    func testOctopusDispatchesBeforeTheFirstReadDecode() async throws {
+        let body = """
+            {"fetched_at": null, "devices": 0, "planned": [], "completed": [], "error": "HTTP 503"}
+            """
+        let client = HubHistoryClient(
+            endpoint: endpoint, auth: auth, transport: RecordingHTTPTransport(body: body)
+        )
+        let fetched = try await client.octopusDispatches()
+        let dispatches = try XCTUnwrap(fetched)
+        XCTAssertNil(dispatches.fetchedAt)
+        XCTAssertEqual(dispatches.error, "HTTP 503")
+    }
+
+    func testOctopusDispatchesAreNilWhenOctopusIsNotActive() async throws {
+        let client = HubHistoryClient(
+            endpoint: endpoint, auth: auth, transport: RecordingHTTPTransport(body: "null")
+        )
+        let dispatches = try await client.octopusDispatches()
+        XCTAssertNil(dispatches)
+    }
+
     func testAnErrorStatusIsSurfacedAsSuch() async {
         let client = HubHistoryClient(
             endpoint: endpoint, auth: auth, transport: RecordingHTTPTransport(status: 401, body: "")
@@ -171,6 +217,19 @@ final class HubHistoryClientTests: XCTestCase {
         XCTAssertEqual(result.status.hubVersion, "0.5.4")
         XCTAssertEqual(result.status.poller.kind, .running)
         XCTAssertEqual(result.status.clients, 2)
+        XCTAssertNil(result.status.sources)
+    }
+
+    func testStatusCarriesTheSources() async throws {
+        let body = """
+            {"hub_version": "0.6.0", "hub_protocol_version": 1, "hub_id": "hub-1",
+             "poller": \(Fixtures.poller), "clients": 1, "envelope_age_s": null,
+             "sources": \(Fixtures.sources)}
+            """
+        let client = HubStatusClient(endpoint: endpoint, auth: auth, transport: RecordingHTTPTransport(body: body))
+        let status = try await client.status()
+        XCTAssertEqual(status.sources?.octopus?.kind, .off)
+        XCTAssertEqual(status.sources?.hypervolt?.kind, .failing)
     }
 
     func testTheConnectionTestExplainsEachFailure() async {

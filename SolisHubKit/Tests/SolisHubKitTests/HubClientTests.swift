@@ -489,13 +489,14 @@ final class HubClientTests: XCTestCase {
                 + "\"last_exit_code\":1,\"next_attempt_at\":null}",
             "this is not json",
             "{\"type\":\"pong\",\"nonce\":\"1\"}",
+            "{\"type\":\"sources\",\"sources\":\(Fixtures.sources)}",
         ]
         let socket = FakeSocket(frames: frames, endsAfterFrames: false)
         let client = HubClient(endpoints: [lan], auth: auth, transport: ScriptedTransport([.socket(socket)]))
         let log = EventLog(client)
         await client.start()
         let seen = await log.wait { event in
-            if case .pollerStatus = event { return true }
+            if case .sources = event { return true }
             return false
         }
         await client.stop()
@@ -504,17 +505,20 @@ final class HubClientTests: XCTestCase {
         var sawEmptySnapshot = false
         var polls: Int?
         var state: String?
+        var octopus: HubSourceState?
         for event in log.events {
             switch event {
             case let .snapshot(snapshot): sawEmptySnapshot = snapshot.envelope == nil
             case let .sample(envelope): polls = envelope.health.successfulPolls
             case let .pollerStatus(status): state = status.state
+            case let .sources(sources): octopus = sources.octopus?.kind
             default: break
             }
         }
         XCTAssertTrue(sawEmptySnapshot)
         XCTAssertEqual(polls, 4)
         XCTAssertEqual(state, "backoff")
+        XCTAssertEqual(octopus, .off)
     }
 
     func testAnIncompatibleHubIsReportedAndNotHammered() async throws {

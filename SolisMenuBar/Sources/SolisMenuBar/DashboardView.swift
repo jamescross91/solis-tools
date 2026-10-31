@@ -75,6 +75,7 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     hubDetectedBanners
                     hubStatusBanner
+                    hubSourceWarnings
                     if showingSettings || needsSetup {
                         settings
                     } else if let sample = monitor.latest {
@@ -241,6 +242,36 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                 }
             }
+            .padding(10)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+        }
+    }
+
+    /// Hub mode: a source the hub has switched off or stopped hearing from.
+    /// Octopus and Hypervolt were once off in the hub's saved settings for a
+    /// week and nothing here said so. Only while connected: a disconnected
+    /// hub's last word on its sources may no longer be true.
+    @ViewBuilder
+    private var hubSourceWarnings: some View {
+        let link: HubLinkInfo? = monitor.hubLink
+        let warnings: [HubSourceWarning] = link?.sources?.warnings ?? []
+        if isHubMode, link?.isConnected == true, !showingSettings, !warnings.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(warnings) { warning in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(warning.message, systemImage: "exclamationmark.triangle")
+                            .font(.caption.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let detail = warning.detail {
+                            Text(detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
         }

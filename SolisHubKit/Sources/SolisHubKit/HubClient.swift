@@ -11,6 +11,9 @@ public enum HubEvent: Sendable {
     /// sometimes are still absent; see StreamStateMerger.
     case sample(StreamEnvelope)
     case pollerStatus(HubPollerStatus)
+    /// The hub's data sources changed state. The first picture arrives with
+    /// `hello` and `snapshot`; this carries the changes after it.
+    case sources(HubSources)
     case disconnected(HubDisconnectReason)
 }
 
@@ -461,6 +464,8 @@ public actor HubClient {
             continuation.yield(.sample(envelope))
         case let .pollerStatus(status):
             continuation.yield(.pollerStatus(status))
+        case let .sources(sources):
+            continuation.yield(.sources(sources))
         case let .error(error):
             // A policy close follows; the reason is reported with it.
             lastServerError = error

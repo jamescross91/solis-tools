@@ -101,7 +101,31 @@ public struct HubControlEventRow: Decodable, Sendable, Equatable {
     public var date: Date? { StreamDecoder.date(from: timestamp) }
 }
 
-/// Typed calls for the hub's two history endpoints. Responses may be gzip;
+/// One Octopus dispatch as the hub last read it. Times are ISO 8601.
+public struct HubOctopusDispatch: Decodable, Sendable, Equatable {
+    public let start: String
+    public let end: String
+    /// "SMART", "BOOST" or whatever Octopus names next; kept as sent.
+    public let kind: String
+
+    public var startDate: Date? { StreamDecoder.date(from: start) }
+    public var endDate: Date? { StreamDecoder.date(from: end) }
+}
+
+/// The hub's last read of Octopus's planned and completed dispatches.
+public struct HubOctopusDispatches: Decodable, Sendable, Equatable {
+    /// Nil before the hub's first successful read.
+    public let fetchedAt: String?
+    public let devices: Int
+    public let planned: [HubOctopusDispatch]
+    public let completed: [HubOctopusDispatch]
+    /// Why the last read failed, or nil.
+    public let error: String?
+
+    public var fetchedDate: Date? { fetchedAt.flatMap(StreamDecoder.date(from:)) }
+}
+
+/// Typed calls for the hub's history endpoints and its Octopus dispatches. Responses may be gzip;
 /// URLSession undoes that before this sees the body.
 public struct HubHistoryClient: Sendable {
     private let core: HubRESTCore
@@ -140,6 +164,12 @@ public struct HubHistoryClient: Sendable {
             "/v1/history/control", query: controlQuery(kind: "events", since: since),
             as: [HubControlEventRow].self
         )
+    }
+
+    /// Octopus's dispatches as the hub last read them, or nil when Octopus
+    /// is not active on the hub (the hub answers JSON `null`).
+    public func octopusDispatches() async throws -> HubOctopusDispatches? {
+        try await core.get("/v1/octopus/dispatches", as: HubOctopusDispatches?.self)
     }
 
     private func controlQuery(kind: String, since: Date?) -> [(name: String, value: String)] {

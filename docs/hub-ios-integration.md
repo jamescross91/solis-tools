@@ -56,15 +56,34 @@ through Cloudflare, so nothing else is relaxed.
 | --- | --- |
 | `StreamEnvelope`, `StreamDecoder` and the contract types | The same models the menu bar decodes |
 | `HubServerMessage`, `HubHello`, `HubSnapshot`, `HubPollerStatus` | Every protocol message, decoded with the same snake_case strategy |
+| `HubSources`, `HubSourceStatus`, `HubSourceWarning` | Whether the hub's Octopus and Hypervolt work, and the warning to show when one is off or failing |
 | `StreamStateMerger`, `HubFeedState` | Carry forward `configuration`, `recent_events` and `octopus_schedule` exactly as the menu bar does, so every consumer sees identical semantics |
 | `HubClient` | Connection, bearer and Cloudflare headers, application-level ping and liveness, reconnect with jittered backoff from 1 s to 30 s, attention, and an `AsyncStream<HubEvent>` |
 | `HubEndpointResolver`, `HubEndpointSelector` | Bonjour discovery, LAN first with a 2 s timeout then the remote URL, re-evaluated when the network path changes |
-| `HubHistoryClient`, `HubStatusClient`, `HubConnectionTester` | Typed calls for the history endpoints and `/v1/status`, and a "Test connection" helper that reports which endpoint answered |
+| `HubHistoryClient`, `HubStatusClient`, `HubConnectionTester` | Typed calls for the history endpoints, `/v1/octopus/dispatches` and `/v1/status`, and a "Test connection" helper that reports which endpoint answered |
 | `HubCredentials` | Keychain storage, with an `accessGroup` parameter so a widget can share the credentials later |
 
 `HubEvent` is `connected(endpoint)`, `hello`, `snapshot`, `sample`,
-`pollerStatus` or `disconnected(reason)`. The client reports `incompatible` and
-backs off if the hub's protocol or stream schema is one it does not know.
+`pollerStatus`, `sources` or `disconnected(reason)`. The client reports
+`incompatible` and backs off if the hub's protocol or stream schema is one it
+does not know.
+
+## Source health
+
+A hub reports whether its data sources work: `sources` on `hello`, `snapshot`
+and `GET /v1/status`, and a `sources` message whenever one changes state. Each
+of `octopus` and `hypervolt` has a `state` (`ok`, `off`, `failing` or
+`not_signed_in`), a `detail` and a `last_ok` time. `off` means signed in but
+switched off in the hub's settings; `failing` means nothing new from Octopus
+for an hour or from the charger for 30 minutes. `HubFeedState.sources` keeps
+the latest, and `HubSources.warnings` words the off and failing ones for a
+banner, as the menu bar shows them. A hub older than this sends no `sources`,
+so the field is nil. A state or source a newer hub adds still decodes: the raw
+`state` is kept and `kind` is `.unknown(state)`, which is not warned about.
+
+`HubHistoryClient.octopusDispatches()` reads the hub's last view of Octopus's
+planned and completed dispatches, and returns nil when Octopus is not active on
+the hub.
 
 ## A minimal SwiftUI example
 
