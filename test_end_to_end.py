@@ -720,6 +720,23 @@ class HypervoltPriorityTests(unittest.TestCase):
         self.assertTrue(hypervolt_applied, "expected the EV current to be raised")
         self.assertGreater(hypervolt_applied[0]["max_current"], 16000)
 
+    def test_ev_priority_raises_a_trimmed_car_while_the_battery_charges(self):
+        """Seen live: after a switch from battery to EV priority the car stayed
+        at the 9 A battery priority had trimmed it to."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank = self._bank(voltage_raw=2400)
+            bank[33263], bank[33264] = 0xFFFF, 0xC950  # -14.0 kW: at the ceiling
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.max_current_ma = 9000
+                hypervolt.set_charging(True, true_milli_amps=9000)
+                self._run("ev", inverter, hypervolt, directory)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertTrue(hypervolt_applied, "expected the EV current to be raised")
+        self.assertGreater(hypervolt_applied[0]["max_current"], 9000)
+
     def test_the_stream_carries_the_live_charging_rate(self):
         import tempfile
 

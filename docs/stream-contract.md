@@ -101,6 +101,7 @@ optional, so an older read-only poller still decodes.
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |
 | `ev_priority` | `battery`, `ev` or `balanced`, or null when `--hypervolt-enable` is off; see `docs/hypervolt-integration.md` |
+| `live_settings` | Settings this poller takes on stdin without a restart; currently `["ev_priority"]`. Additive: an older poller omits it, and a consumer must then restart it to change them |
 | `ev_charging` | Whether the Hypervolt charger is confirmed charging, or null when the feature is off; a stale or unreachable cloud link reads as `false`, never guessed `true` |
 | `hypervolt_actuator` | EV charger current diagnostics, described below, or null when the feature is off |
 | `ev_voltage_limits_active` | Whether the EV charger's band governed the last sample: the car is confirmed charging or an Octopus charge window (with its lead-in) covers it |
@@ -179,8 +180,11 @@ consumer has written `attention off` to the poller's stdin and dynamic control
 has nothing to regulate or restore. The menu-bar app writes `attention on`
 when its popover opens and `attention off` when it closes. The poller waits on
 stdin rather than sleeping, so `attention on` is answered with a poll at once.
-Lines other than `attention on` and `attention off` are ignored; a closed
-stdin means attention is assumed for the rest of the run.
+A Wattlark hub also writes `ev-priority battery`, `ev-priority ev` or
+`ev-priority balanced` to change `--ev-priority` on the running poller, when
+the stream lists `ev_priority` in `voltage_control.live_settings`. The change
+is applied before the next poll and logged as an event. Other lines are
+ignored; a closed stdin means attention is assumed for the rest of the run.
 
 ## Changing it
 

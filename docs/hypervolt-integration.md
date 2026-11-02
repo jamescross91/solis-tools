@@ -115,7 +115,7 @@ The controller's change to the ceiling is therefore always applied in full.
 | Priority | Behaviour |
 | --- | --- |
 | `battery` (default) | The car is the flexible share. A cut lowers the ceiling and the car's current together, so the battery keeps charging at the same rate. A restore raises the ceiling alone while the battery is charging from the grid, and the car only gets headroom the battery leaves (see below). |
-| `ev` | The battery is the flexible share. A cut lowers the ceiling and the inverter throttles the battery; the car is only cut once the battery's measured charging power is used up. |
+| `ev` | The battery is the flexible share. A cut lowers the ceiling and the inverter throttles the battery; the car is only cut once the battery's measured charging power is used up. Between actions a trimmed car steps back up to its maximum while the voltage is clear, even with the battery charging. |
 | `balanced` | The change to the car's share is half of the ceiling change, with any amount one side cannot absorb spilling over to the other. |
 
 An earlier version treated the ceiling as a battery-only limit next to the car.
@@ -163,6 +163,14 @@ previous change has settled, and logs each step:
   stay under it, so the car steps down by `--reduction-step-w`, no lower than
   its minimum. With more than a step plus 300 W of headroom the battery has
   all it wants, and the car steps up while the voltage is clear.
+- Under `ev` priority the car steps up to its maximum while the voltage is
+  clear, whatever the battery is doing. Nothing did this before, so a car that
+  battery priority had trimmed stayed trimmed after a switch to `ev`.
+
+A Wattlark hub changes `--ev-priority` on the running poller by writing
+`ev-priority <value>` to its stdin (see `docs/stream-contract.md`). It used to
+restart the poller, and the data logger then refused new connections for
+minutes.
 
 `VoltageControlRuntime._allocate_ev_priority` is the only place amps and
 watts meet: it reads the controller's decision in watts, takes the car's new

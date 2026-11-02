@@ -44,6 +44,7 @@ from octopus_client import (
     OctopusScheduleMonitor,
 )
 from voltage_control import (
+    EV_PRIORITIES,
     ControlAction,
     ControlDecision,
     ControllerJournal,
@@ -69,6 +70,10 @@ HISTORY_READ_LIMIT = 16 << 20
 # Under battery priority, grid import this close to the Solis ceiling means
 # the inverter is charging the battery less to stay under it.
 EV_PINNED_MARGIN_W = 300
+# After an unclean shutdown the import ceiling is held at the old baseline
+# until telemetry has been fresh for this long; it used to be held for the
+# whole run, so the ceiling could never rise above the baseline again.
+CONSERVATIVE_HOLD_S = 120.0
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 # Inclusive raw zero-based address ranges, ordered and non-overlapping.
@@ -1278,6 +1283,9 @@ class VoltageControlRuntime:
         self.active_mode: str | None = None
         self.last_meter_monotonic: float | None = None
         self.last_external_check_monotonic = 0.0
+        # (actuator, configured maximum, earliest lift) while a conservative
+        # post-crash ceiling is in force.
+        self.conservative_holds: list[tuple[_LimitActuator, int, float]] = []
         self.events_revision = 0
         self.streamed_events_revision: int | None = None
 
@@ -1322,6 +1330,52 @@ class VoltageControlRuntime:
             self.window_recheck_at = changes_at.timestamp() if changes_at else math.inf
             self.octopus_revision += 1
         return self.window_active
+
+    def telemetry_fresh(self) -> bool:
+        return self._fresh()
+
+    def note_meter_reading(self, reading: Reading) -> None:
+        """Record a meter reading taken outside the control loop, so shutdown
+        can judge freshness on it without making a control decision."""
+        if reading.meter_voltage_v is None or reading.meter_sample_monotonic is None:
+            return
+        self.last_meter_monotonic = reading.meter_sample_monotonic
+
+    def set_ev_priority(self, priority: str) -> bool:
+        """Change --ev-priority on the running poller; True if it changed.
+
+        A Wattlark hub used to restart the poller for this, and the data
+        logger then refused new connections for minutes, so a change took
+        about five minutes to land and left the restart unclean.
+        """
+        if priority not in EV_PRIORITIES or priority == self.configuration.ev_priority:
+            return False
+        self.configuration = replace(self.configuration, ev_priority=priority)
+        self.configuration_payload = configuration_dict(self.configuration)
+        self._event(
+            self.controller.decision, None, None, None, f"EV priority changed to {priority}"
+        )
+        return True
+
+    def _lift_conservative_holds(self, now: float) -> None:
+        if not self.conservative_holds or not self._fresh():
+            return
+        remaining = []
+        for actuator, configured_maximum_w, lift_at in self.conservative_holds:
+            if now < lift_at:
+                remaining.append((actuator, configured_maximum_w, lift_at))
+                continue
+            actuator.maximum_w = configured_maximum_w
+            self._event(
+                self.controller.decision,
+                None,
+                None,
+                None,
+                f"conservative limit after unclean shutdown lifted after {CONSERVATIVE_HOLD_S:g} s",
+            )
+        self.conservative_holds = remaining
+        if not remaining and self.recovery_note:
+            self.recovery_note = f"{self.recovery_note}; lifted"
 
     def _fresh(self) -> bool:
         return (
@@ -1385,6 +1439,9 @@ class VoltageControlRuntime:
                 actuator.baseline_raw = old_baseline
                 actuator.last_commanded_raw = current
                 if self._active_now(reading, mode):
+                    self.conservative_holds.append(
+                        (actuator, actuator.maximum_w, now + CONSERVATIVE_HOLD_S)
+                    )
                     actuator.maximum_w = min(actuator.maximum_w, old_baseline * 100)
                     notes.append(f"resumed conservative {mode} limit after unclean shutdown")
                 else:
@@ -1482,6 +1539,7 @@ class VoltageControlRuntime:
             else max(0.0, time.time() - sampled_at)
         )
         self.last_meter_monotonic = time.monotonic() - age
+        self._lift_conservative_holds(now)
         if age > self.configuration.stale_age_s:
             return self.controller.communication_unavailable()
         if reading.meter_voltage_v is None:
@@ -1774,7 +1832,10 @@ class VoltageControlRuntime:
         battery. The car steps down while import sits within
         EV_PINNED_MARGIN_W of the ceiling, and up only while there is a
         clear step of headroom left, which means the battery has all it
-        wants.
+        wants. Under EV priority the car steps up to its maximum while the
+        voltage is clear, and the battery gets what is left under the ceiling;
+        nothing did this before, so a car battery priority had trimmed stayed
+        trimmed after a switch to EV priority.
         """
         assert self.hypervolt_actuator is not None
         c = self.configuration
@@ -1814,6 +1875,14 @@ class VoltageControlRuntime:
                 reason = "the battery is charging below the import ceiling"
             else:
                 return decision
+        elif c.ev_priority == "ev":
+            # The car takes what it can; the inverter charges the battery
+            # with whatever is left under the ceiling.
+            if ev_ma >= self.hypervolt_actuator.maximum_ma or not voltage_clear:
+                return decision
+            step_ma = round(c.increase_step_w / sample.raw_voltage_v * 1000)
+            target_ma = min(self.hypervolt_actuator.maximum_ma, ev_ma + step_ma)
+            reason = "EV priority"
         else:
             return decision
         try:
@@ -1896,6 +1965,8 @@ class VoltageControlRuntime:
                 "daily_summary": self.summary or None,
                 "recovery_note": self.recovery_note,
                 "ev_priority": self.configuration.ev_priority if self.hypervolt_actuator else None,
+                # What a consumer may change on stdin without a restart.
+                "live_settings": ["ev_priority"],
                 "ev_charging": (
                     self.hypervolt_actuator.client.state.is_charging(
                         now, self.configuration.ev_stale_age_s
@@ -2689,10 +2760,15 @@ class AttentionChannel:
     sleeping between polls, so an opened popover is answered with a poll at
     once rather than at the end of an idle interval. Without a readable stdin,
     or once it closes, attention is assumed and the cadence never slows.
+
+    A Wattlark hub also writes ``ev-priority battery|ev|balanced`` to change
+    --ev-priority without restarting the poller; the request waits in
+    `ev_priority_request` until the main loop applies it.
     """
 
     def __init__(self, stream: IO[str] | None):
         self.attention = True
+        self.ev_priority_request: str | None = None
         self.descriptor: int | None = None
         self.pending = b""
         if stream is not None:
@@ -2726,7 +2802,7 @@ class AttentionChannel:
             time.sleep(remaining)
 
     def _consume(self, chunk: bytes) -> bool:
-        """Apply complete lines; True when the attention state changed."""
+        """Apply complete lines; True when something needs acting on now."""
         self.pending += chunk
         changed = False
         while b"\n" in self.pending:
@@ -2736,6 +2812,9 @@ class AttentionChannel:
                 attention = words[1] == "on"
                 changed = changed or attention != self.attention
                 self.attention = attention
+            elif len(words) == 2 and words[0] == "ev-priority" and words[1] in EV_PRIORITIES:
+                self.ev_priority_request = words[1]
+                changed = True
         if len(self.pending) > 4096:
             self.pending = b""
         return changed
@@ -3404,6 +3483,10 @@ def main() -> int:
                     {"interval_s": interval, "idle": idle},
                 )
                 attention.wait(interval)
+                if attention.ev_priority_request is not None:
+                    if voltage_runtime:
+                        voltage_runtime.set_ev_priority(attention.ev_priority_request)
+                    attention.ev_priority_request = None
                 continue
             output = render(
                 last_reading, device, health, args, palette, last_error, history, started_at
@@ -3427,6 +3510,21 @@ def main() -> int:
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), signal.SIG_IGN)
         try:
+            if (
+                voltage_runtime
+                and voltage_runtime.initialised
+                and slow_metrics is not None
+                and not voltage_runtime.telemetry_fresh()
+            ):
+                # A poll here takes 3 to 11 s, longer than the 4 s freshness
+                # the baseline restore needs, so a shutdown usually found its
+                # last reading stale, left the reduced ceiling and was unclean.
+                try:
+                    voltage_runtime.note_meter_reading(
+                        client.poll_fast(slow_metrics, args.pv, meter_voltage_enabled=True)
+                    )
+                except Exception as exc:
+                    print(f"voltage control shutdown: no fresh reading: {exc}", file=sys.stderr)
             if voltage_runtime:
                 for message in voltage_runtime.shutdown():
                     print(f"voltage control shutdown: {message}", file=sys.stderr)

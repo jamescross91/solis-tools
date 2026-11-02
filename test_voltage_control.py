@@ -1144,6 +1144,74 @@ class ActuatorAndPersistenceTests(unittest.TestCase):
             self.assertIn("resumed conservative import", runtime.recovery_note or "")
             runtime.shutdown()
 
+    def test_the_conservative_limit_is_lifted_once_the_hold_has_passed(self):
+        """Seen live: every restart was unclean, and the ceiling stayed at the
+        16.5 kW baseline for the whole run although 23 kW was allowed."""
+        with tempfile.TemporaryDirectory() as directory:
+            journal_path = Path(directory) / "journal.json"
+            ControllerJournal(journal_path).start("old", 140, 50, 90, 50, "old")
+            client = FakeClient()
+            client.raw = 90
+            configuration = DynamicVoltageConfiguration(enabled=True)
+            runtime = VoltageControlRuntime(  # type: ignore[arg-type]
+                client, configuration, 5, journal_path, None, 30
+            )
+            configured_maximum_w = runtime.import_actuator.maximum_w
+            with patch("solis_poll.CONSERVATIVE_HOLD_S", 60.0):
+                started = time.monotonic()
+                runtime.update(reading(-2, "Charging"), started, time.time())
+                self.assertEqual(runtime.import_actuator.maximum_w, 14_000)
+                runtime.update(reading(-2, "Charging"), started + 30, time.time())
+                self.assertEqual(runtime.import_actuator.maximum_w, 14_000)
+                runtime.update(reading(-2, "Charging"), started + 61, time.time())
+            self.assertEqual(runtime.import_actuator.maximum_w, configured_maximum_w)
+            self.assertIn("lifted", runtime.recovery_note or "")
+            runtime.shutdown()
+
+    def test_a_reading_taken_at_shutdown_makes_telemetry_fresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient()
+            client.raw = 140
+            runtime = VoltageControlRuntime(  # type: ignore[arg-type]
+                client,
+                DynamicVoltageConfiguration(enabled=True),
+                5,
+                Path(directory) / "journal.json",
+                None,
+                30,
+            )
+            runtime.update(reading(-2, "Charging"), time.monotonic(), time.time())
+            self.assertTrue(runtime.telemetry_fresh())
+            # A poll cycle on a slow logger outlasts the 4 s freshness window.
+            assert runtime.last_meter_monotonic is not None
+            runtime.last_meter_monotonic -= 10
+            self.assertFalse(runtime.telemetry_fresh())
+            runtime.note_meter_reading(
+                replace(reading(-2, "Charging"), meter_sample_monotonic=time.monotonic())
+            )
+            self.assertTrue(runtime.telemetry_fresh())
+            runtime.shutdown()
+
+    def test_ev_priority_changes_on_the_running_poller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient()
+            client.raw = 140
+            runtime = VoltageControlRuntime(  # type: ignore[arg-type]
+                client,
+                DynamicVoltageConfiguration(enabled=True, ev_priority="battery"),
+                5,
+                Path(directory) / "journal.json",
+                None,
+                30,
+            )
+            self.assertTrue(runtime.set_ev_priority("ev"))
+            self.assertEqual(runtime.configuration.ev_priority, "ev")
+            self.assertEqual(runtime.configuration_payload["ev_priority"], "ev")
+            self.assertFalse(runtime.set_ev_priority("ev"))
+            self.assertFalse(runtime.set_ev_priority("nonsense"))
+            self.assertEqual(runtime.configuration.ev_priority, "ev")
+            runtime.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

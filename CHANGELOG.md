@@ -5,6 +5,13 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- `ev-priority battery|ev|balanced` on stdin changes `--ev-priority` on the
+  running poller, and `voltage_control.live_settings` says it can. A Wattlark
+  hub used to restart the poller for this, and the data logger then refused
+  new connections for minutes, so a change took about five minutes to land.
+
 ### Fixed
 
 - The charger no longer goes quiet for good after a network blip. The
@@ -23,6 +30,17 @@ versioning](https://semver.org/spec/v2.0.0.html).
   32 A while the battery fell from 9.4 kW to 3.3 kW. Increases now go to the
   ceiling alone. While grid import sits at the ceiling the car is trimmed a
   step at a time, and it is raised only when the battery leaves headroom.
+- `--ev-priority ev` raises a trimmed car back to its maximum while the
+  battery charges; nothing did, so a car trimmed under battery priority stayed
+  trimmed after a switch to `ev`.
+- The import ceiling is no longer held at the old baseline for a whole run
+  after an unclean shutdown; the hold now ends after two minutes. On one site
+  every restart was unclean, so the ceiling never rose above 16.5 kW although
+  23 kW was allowed.
+- Shutdown takes one more meter reading when the last is older than the 4 s
+  freshness window. A slow data logger takes 3 to 11 s per poll, so most
+  shutdowns found their reading stale, left the reduced ceiling in place and
+  were recorded as unclean.
 
 ## 0.10.0
 
