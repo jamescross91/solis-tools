@@ -171,6 +171,16 @@ class DecoderTests(unittest.TestCase):
         channel.wait(0.05)
         self.assertGreaterEqual(time.monotonic() - started, 0.05)
 
+        # A hub changes --ev-priority without a restart; rubbish is ignored.
+        os.write(writer, b"ev-priority sideways\n")
+        channel.wait(0.05)
+        self.assertIsNone(channel.ev_priority_request)
+        os.write(writer, b"ev-priority ev\n")
+        started = time.monotonic()
+        channel.wait(5)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(channel.ev_priority_request, "ev")
+
         # EOF means the consumer has gone; keep the last state and just sleep.
         os.close(writer)
         started = time.monotonic()

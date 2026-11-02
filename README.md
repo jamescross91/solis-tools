@@ -237,7 +237,8 @@ never discard an unresolved recovery record merely to enable control.
 
 Every write first durably records a pending command. Lost replies are reconciled
 against the old and intended values before another write is allowed. After an
-unclean restart during charging, the recovered baseline caps further increases.
+unclean restart during charging, the recovered baseline caps further increases
+for two minutes; after that the configured maximum applies again.
 Each import-control session starts with a demand ceiling from its first measured
 grid peak plus the configured headroom. The ceiling follows genuine measured
 demand down and back up, but discounts the observed response to its own recent
@@ -271,8 +272,10 @@ the new restoration baseline, with a fresh settle period; optimisation then
 continues from that value. A final read immediately before every normal write
 prevents a just-made manual change being overwritten between periodic checks.
 Voltage age is measured from the start of the meter request using a monotonic
-clock. Shutdown with stale or recovering telemetry leaves the current limit and
-unclean journal intact for later fresh recovery rather than raising power.
+clock. Shutdown takes one more meter reading if the last is older than the 4 s
+freshness window, since a slow data logger can take longer than that per poll.
+Shutdown with stale or recovering telemetry even then leaves the current limit
+and unclean journal intact for later fresh recovery rather than raising power.
 
 Stopping the menu-bar poller is asynchronous and keeps draining its output. If
 it has not exited after 15 seconds, the app reports pending restoration and
