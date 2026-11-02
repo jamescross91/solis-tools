@@ -27,16 +27,21 @@ The protocol itself is:
 - **Control**: a WebSocket at `/ws/charger/{id}/sync`, request/response
   shaped like JSON-RPC. It carries `max_current` in milliamps (6000–32000)
   and a `release` command to stop drawing current without disconnecting.
-- **Telemetry**: a second, separate WebSocket at
-  `/ws/charger/{id}/session/in-progress`. This one is push-only — the server
-  sends state whenever it changes, there is nothing to request. It carries
-  `charging`, `true_milli_amps` and `watt_hours`.
+- **Telemetry**: pushed on the same sync socket as `get.session`
+  notifications, every few seconds while the car charges, with nothing to
+  request. They carry `charging`, `true_milli_amps` and `watt_hours`.
+  Hypervolt used to send these on a second WebSocket at
+  `/ws/charger/{id}/session/in-progress`; it now answers that with 404, and
+  the client no longer opens it.
+- **Keepalive**: the client pings the sync socket every 30 seconds and
+  treats 90 seconds with no frame at all, a pong included, as a lost
+  connection, which the poller reconnects. A network blip once left the
+  socket looking open for 36 hours with nothing arriving.
 
 The same fields arrive in three envelopes, and the client reads all of them:
 a `result` list answering `sync.snapshot`, a server-initiated notification
-with the fields in `params` (a dict or a list of dicts) when the charger's
-settings change, and the session socket's bare objects with the fields at the
-top level. Reading only the first once left a real charger's charging flag and
+with the fields in `params` (a dict or a list of dicts), and bare objects with
+the fields at the top level. Reading only the first once left a real charger's charging flag and
 measured current unknown. A value of the wrong type is ignored rather than
 stored.
 
@@ -51,10 +56,10 @@ server-to-client text frames, ping/pong, a clean close — and nothing more.
 
 | Module | Role |
 | --- | --- |
-| `hypervolt_client.py` | The cloud transport. Auth, the two WebSockets, `HypervoltState`, `HypervoltClient`. Knows nothing about voltage control. |
+| `hypervolt_client.py` | The cloud transport. Auth, the sync WebSocket, `HypervoltState`, `HypervoltClient`. Knows nothing about voltage control. |
 | `voltage_control.py` | Stays transport-independent. Holds the EV configuration fields, the tightened voltage bounds, and `allocate_import_step`, the pure function that decides how much of a change in import headroom falls on the battery versus the car. Knows nothing about WebSockets. |
 | `solis_poll.py` | The integration layer: `HypervoltCurrentActuator` (mirrors the existing `ImportLimitActuator`/`ExportLimitActuator` pattern), the CLI flags, the independent Hypervolt poll/reconnect loop, and the wiring that calls `allocate_import_step` with live values and turns its output into a command. |
-| `fake_hypervolt.py` | A stdlib test double serving the token endpoint, the discovery endpoint and both WebSockets on one port, in the same spirit as `fake_inverter.py`. |
+| `fake_hypervolt.py` | A stdlib test double serving the token endpoint, the discovery endpoint and the sync WebSocket on one port, in the same spirit as `fake_inverter.py`. |
 | `hypervolt_login.py` | A one-time interactive script that performs the password grant and writes a refresh-token credentials file. Installed as the `hypervolt-login` command; not imported by anything else. |
 
 This split exists so the delicate, already-tested Solis-only controller

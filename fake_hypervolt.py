@@ -74,10 +74,10 @@ def _read_ws_frame(reader: _BufferedSocket) -> tuple[int, bytes] | None:
     return opcode, payload
 
 
-def _send_ws_frame(connection: socket.socket, text: str) -> None:
-    """Send one unmasked server-to-client text frame."""
+def _send_ws_frame(connection: socket.socket, text: str, opcode: int = 0x1) -> None:
+    """Send one unmasked server-to-client frame, text unless told otherwise."""
     payload = text.encode("utf-8")
-    header = bytearray([0x81])
+    header = bytearray([0x80 | opcode])
     length = len(payload)
     if length < 126:
         header.append(length)
@@ -91,7 +91,11 @@ def _send_ws_frame(connection: socket.socket, text: str) -> None:
 
 
 class FakeHypervoltCloud:
-    """Serves the token endpoint, charger discovery, and the two websockets."""
+    """Serves the token endpoint, charger discovery, and the sync websocket.
+
+    Any other websocket path is refused with 404, as Hypervolt now refuses
+    the session socket it retired; live session state is pushed on the sync
+    socket as `get.session` notifications instead."""
 
     def __init__(self, charger_id: str = "deadbeefcafebabe", port: int = 0):
         self.charger_id = charger_id
@@ -102,14 +106,13 @@ class FakeHypervoltCloud:
         self.true_milli_amps = 0
         self.watt_hours = 0
         self.refuse_tokens = False
-        # Answer the session socket with 404, as Hypervolt has while still
-        # accepting the sync socket.
-        self.refuse_session = False
+        # Stop sending anything, pongs included, without closing: the
+        # connection a network blip leaves looking open.
+        self.silent = False
         self.token_requests: list[dict[str, str]] = []
         self.applied: list[dict[str, object]] = []
         self._lock = threading.Lock()
         self._sync_conns: list[socket.socket] = []
-        self._session_conns: list[socket.socket] = []
         self.stopped = False
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -140,9 +143,8 @@ class FakeHypervoltCloud:
     def drop_all_connections(self) -> None:
         """Simulate a network blip: close every open websocket."""
         with self._lock:
-            connections = self._sync_conns + self._session_conns
+            connections = self._sync_conns
             self._sync_conns = []
-            self._session_conns = []
         for connection in connections:
             try:
                 connection.close()
@@ -152,7 +154,7 @@ class FakeHypervoltCloud:
     def set_charging(
         self, charging: bool, *, true_milli_amps: int = 0, watt_hours: int = 0
     ) -> None:
-        """Drive the session socket, as if a car started or stopped charging."""
+        """Push session state, as if a car started or stopped charging."""
         with self._lock:
             self.charging = charging
             self.true_milli_amps = true_milli_amps
@@ -174,7 +176,7 @@ class FakeHypervoltCloud:
             return
         method, path, headers, body = request
         if headers.get("Upgrade", "").lower() == "websocket":
-            if self.refuse_session and not path.endswith("/sync"):
+            if not path.endswith("/sync"):
                 connection.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                 connection.close()
                 return
@@ -279,29 +281,8 @@ class FakeHypervoltCloud:
                 f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
             ).encode("ascii")
         )
-        is_sync = path.endswith("/sync")
-        pool = self._sync_conns if is_sync else self._session_conns
         with self._lock:
-            pool.append(connection)
-            initial_session_state = (
-                None
-                if is_sync
-                else {
-                    "charging": self.charging,
-                    "true_milli_amps": self.true_milli_amps,
-                    "watt_hours": self.watt_hours,
-                }
-            )
-        if initial_session_state is not None:
-            # A newly connected session socket must see the current state
-            # without waiting for the next change, the same way the sync
-            # socket answers sync.snapshot; unlike the sync socket, the
-            # session socket is push-only, so this is sent unprompted, as the
-            # same flat object the real service pushes on every change.
-            try:
-                _send_ws_frame(connection, json.dumps(initial_session_state))
-            except OSError:
-                pass
+            self._sync_conns.append(connection)
         try:
             reader = _BufferedSocket(connection)
             while not self.stopped:
@@ -311,26 +292,32 @@ class FakeHypervoltCloud:
                 opcode, payload = frame
                 if opcode == 0x8:
                     return
-                if opcode == 0x1:
-                    self._handle_ws_message(connection, is_sync, payload.decode("utf-8", "replace"))
+                if self.silent:
+                    continue
+                if opcode == 0x9:
+                    _send_ws_frame(connection, payload.decode("latin-1"), opcode=0xA)
+                elif opcode == 0x1:
+                    self._handle_ws_message(connection, payload.decode("utf-8", "replace"))
         except OSError:
             pass
         finally:
             with self._lock:
-                if connection in pool:
-                    pool.remove(connection)
+                if connection in self._sync_conns:
+                    self._sync_conns.remove(connection)
             try:
                 connection.close()
             except OSError:
                 pass
 
-    def _handle_ws_message(self, connection: socket.socket, is_sync: bool, text: str) -> None:
+    def _handle_ws_message(self, connection: socket.socket, text: str) -> None:
         try:
             message = json.loads(text)
         except json.JSONDecodeError:
             return
         method = message.get("method")
-        if method == "login" or not is_sync:
+        if method == "login":
+            # Hypervolt pushes the live session straight after login.
+            _send_ws_frame(connection, self._session_message())
             return
         if method == "sync.snapshot":
             _send_ws_frame(
@@ -361,7 +348,7 @@ class FakeHypervoltCloud:
 
     def _broadcast_sync_state(self) -> None:
         with self._lock:
-            connections = list(self._sync_conns)
+            connections = [] if self.silent else list(self._sync_conns)
             # A server-initiated change arrives as a JSON-RPC notification
             # with the fields in `params`, not as a `result` reply.
             message = json.dumps(
@@ -377,19 +364,26 @@ class FakeHypervoltCloud:
             except OSError:
                 pass
 
-    def _broadcast_session_state(self) -> None:
+    def _session_message(self) -> str:
         with self._lock:
-            connections = list(self._session_conns)
-            # The session socket sends bare objects, with no JSON-RPC envelope.
-            message = json.dumps(
+            return json.dumps(
                 {
-                    "charging": self.charging,
-                    "session": 1,
-                    "milli_amps": self.max_current_ma,
-                    "true_milli_amps": self.true_milli_amps,
-                    "watt_hours": self.watt_hours,
+                    "jsonrpc": "2.0",
+                    "method": "get.session",
+                    "params": {
+                        "charging": self.charging,
+                        "session": 1,
+                        "true_milli_amps": self.true_milli_amps,
+                        "watt_hours": self.watt_hours,
+                        "ev_power": 0,
+                    },
                 }
             )
+
+    def _broadcast_session_state(self) -> None:
+        message = self._session_message()
+        with self._lock:
+            connections = [] if self.silent else list(self._sync_conns)
         for connection in connections:
             try:
                 _send_ws_frame(connection, message)

@@ -534,23 +534,22 @@ class HypervoltPriorityTests(unittest.TestCase):
             wanted=5,
         )
 
-    def test_a_refused_session_socket_leaves_the_readings_and_the_charger_cap(self):
-        """Hypervolt refused the session socket (404) while accepting the sync
-        socket, and the poller exited over and over, taking the inverter
-        readings down with it."""
+    def test_session_telemetry_streams_from_the_sync_socket_alone(self):
+        """Hypervolt answers the old session socket with 404; the charger's
+        live current must still reach the stream, from the sync socket."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             with FakeInverter(self._bank()) as inverter, FakeHypervoltCloud() as hypervolt:
-                hypervolt.refuse_session = True
+                hypervolt.set_charging(True, true_milli_amps=16000, watt_hours=500)
                 samples = self._run("battery", inverter, hypervolt, directory)
 
         self.assertGreaterEqual(len(samples), 5)
         self.assertIsNotNone(samples[-1]["reading"])
         charger = samples[-1]["voltage_control"]["hypervolt_actuator"]
         self.assertTrue(charger["connected"])
-        self.assertIn("404", charger["session_error"])
-        self.assertIsNone(charger["measured_current_a"])
+        self.assertIsNone(charger["session_error"])
+        self.assertEqual(charger["measured_current_a"], 16.0)
 
     def test_a_charger_that_cannot_be_reached_at_startup_does_not_stop_the_run(self):
         import tempfile

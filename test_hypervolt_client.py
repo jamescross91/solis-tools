@@ -83,31 +83,66 @@ class ClientLifecycleTests(unittest.TestCase):
             finally:
                 client.close()
 
-    def test_a_refused_session_socket_keeps_the_charger_and_is_retried(self):
+    def test_session_state_arrives_on_the_sync_socket(self):
+        """Hypervolt retired the separate session socket (it answers 404) and
+        pushes live charging state on the sync socket as `get.session`."""
         with FakeHypervoltCloud() as fake:
-            fake.refuse_session = True
             client = make_client(fake)
             client.connect()
             try:
-                self.assertTrue(client.state.connected)
-                self.assertIn("404", client.state.session_error or "")
-                self.assertNotIn("could not reach", client.state.session_error or "")
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline and client.state.max_current_ma is None:
-                    client.poll()
-                    time.sleep(0.01)
-                self.assertEqual(client.state.max_current_ma, 32000)
-                self.assertIsNone(client.state.charging)
-
-                fake.refuse_session = False
-                fake.set_charging(True, true_milli_amps=16000)
-                client._session_retry_at = 0.0  # as if the retry interval had passed
+                fake.set_charging(True, true_milli_amps=14800, watt_hours=378)
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline and client.state.charging is not True:
                     client.poll()
                     time.sleep(0.01)
-                self.assertIsNone(client.state.session_error)
                 self.assertTrue(client.state.charging)
+                self.assertEqual(client.state.true_milli_amps, 14800)
+                self.assertEqual(client.state.watt_hours, 378)
+                self.assertIsNone(client.state.session_error)
+            finally:
+                client.close()
+
+    def test_a_connection_gone_silent_is_reported_lost_and_reconnects(self):
+        """A network blip left the sync socket looking open for 36 hours with
+        nothing arriving, so the charger showed no readings and was never
+        reconnected."""
+        with FakeHypervoltCloud() as fake:
+            client = make_client(fake)
+            client.keepalive_ping_s = 0.05
+            client.silent_limit_s = 0.3
+            client.connect()
+            try:
+                fake.silent = True
+                deadline = time.monotonic() + 3
+                with self.assertRaisesRegex(HypervoltProtocolError, "sent nothing"):
+                    while time.monotonic() < deadline:
+                        client.poll()
+                        time.sleep(0.01)
+                self.assertFalse(client.state.connected)
+
+                fake.silent = False
+                client.connect()
+                fake.set_charging(True, true_milli_amps=16000)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and client.state.charging is not True:
+                    client.poll()
+                    time.sleep(0.01)
+                self.assertTrue(client.state.charging)
+            finally:
+                client.close()
+
+    def test_pings_keep_a_quiet_but_live_connection(self):
+        with FakeHypervoltCloud() as fake:
+            client = make_client(fake)
+            client.keepalive_ping_s = 0.05
+            client.silent_limit_s = 0.3
+            client.connect()
+            try:
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    client.poll()
+                    time.sleep(0.01)
+                self.assertTrue(client.state.connected)
             finally:
                 client.close()
 

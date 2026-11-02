@@ -911,7 +911,7 @@ class HypervoltCurrentActuator:
 
     def diagnostics(self, now: float, voltage_v: float | None) -> dict[str, Any]:
         # The commanded current is only a cap; what the car actually draws is
-        # the session socket's measured current. Both are streamed so the
+        # the charger's measured session current. Both are streamed so the
         # dashboard can show the charging rate rather than the limit.
         state = self.client.state
         measured_a = state.true_milli_amps / 1000 if state.true_milli_amps is not None else None
@@ -922,8 +922,8 @@ class HypervoltCurrentActuator:
             "maximum_current_a": self.maximum_ma / 1000,
             "total_write_count": self.total_write_count,
             "last_error": self.last_error,
-            # Why live charging state is unavailable (Hypervolt refused the
-            # session socket), or null while it streams. Additive.
+            # Always null since Hypervolt retired the session socket; kept so
+            # existing consumers still find the field.
             "session_error": state.session_error,
             "measured_current_a": measured_a,
             "charging_power_kw": (
