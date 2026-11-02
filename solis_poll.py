@@ -66,6 +66,9 @@ STREAM_SCHEMA_VERSION = 2
 HISTORY_SECONDS = 6 * 60 * 60
 HISTORY_READ_CHUNK = 1 << 20
 HISTORY_READ_LIMIT = 16 << 20
+# Under battery priority, grid import this close to the Solis ceiling means
+# the inverter is charging the battery less to stay under it.
+EV_PINNED_MARGIN_W = 300
 STARTUP_ATTEMPTS = 5
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 # Inclusive raw zero-based address ranges, ordered and non-overlapping.
@@ -1533,6 +1536,16 @@ class VoltageControlRuntime:
             if export_baseline_raw is None
             else export_baseline_raw * self.export_actuator.resolution_w,
         )
+        # Under battery priority a restore belongs to a grid-charging
+        # battery, never the car. Handing it to the car first, before the
+        # ceiling write that could be suppressed, raised the car by a step on
+        # every cycle while the ceiling stayed put: live, the car climbed from
+        # 16 A to 32 A and the battery fell from 9.4 kW to 3.3 kW.
+        battery_takes_restore = (
+            decision.action == ControlAction.INCREASING
+            and self.configuration.ev_priority == "battery"
+            and reading.battery_status == "Charging"
+        )
         if (
             self.hypervolt_actuator is not None
             and ev_charging
@@ -1540,13 +1553,14 @@ class VoltageControlRuntime:
             and decision.desired_limit_w is not None
             and decision.action
             in (ControlAction.REDUCING, ControlAction.EMERGENCY, ControlAction.INCREASING)
+            and not battery_takes_restore
         ):
             battery_charge_w = (
                 round(reading.battery_kw * 1_000) if reading.battery_status == "Charging" else 0
             )
             decision = self._allocate_ev_priority(decision, sample, now, battery_charge_w)
         elif self.hypervolt_actuator is not None and ev_charging:
-            decision = self._restore_ev_current(decision, sample, now)
+            decision = self._balance_ev_current(decision, sample, now)
         regulating_states = {
             VoltageControlState.IMPORT_REGULATING,
             VoltageControlState.EXPORT_REGULATING,
@@ -1743,16 +1757,24 @@ class VoltageControlRuntime:
             reason=f"{decision.reason}; EV current adjusted towards {new_ev_w / 1_000:.2f} kW",
         )
 
-    def _restore_ev_current(
+    def _balance_ev_current(
         self, decision: ControlDecision, sample: GridTelemetrySample, now: float
     ) -> ControlDecision:
-        """Step a trimmed car back towards its maximum while nothing competes
-        for the supply: the battery is not charging from the grid and the
-        voltage is clear of the import target.
+        """Move the car's current a step between voltage-control actions.
 
-        The controller only restores through the Solis import ceiling, which
-        stops at measured demand, so a car trimmed earlier stayed trimmed for
-        the rest of its session once the battery stopped charging.
+        With the battery not charging from the grid nothing competes for the
+        supply, so a trimmed car steps back towards its maximum while the
+        voltage is clear of the import target; the controller only restores
+        through the Solis ceiling, which stops at measured demand, so a car
+        trimmed earlier used to stay trimmed for the rest of its session.
+
+        Under battery priority with the battery charging from the grid, the
+        inverter keeps the site under the ceiling by charging the battery
+        less, so whatever the car draws at a pinned ceiling comes out of the
+        battery. The car steps down while import sits within
+        EV_PINNED_MARGIN_W of the ceiling, and up only while there is a
+        clear step of headroom left, which means the battery has all it
+        wants.
         """
         assert self.hypervolt_actuator is not None
         c = self.configuration
@@ -1760,18 +1782,40 @@ class VoltageControlRuntime:
         filtered = decision.filtered_voltage_v
         if (
             ev_ma is None
-            or ev_ma >= self.hypervolt_actuator.maximum_ma
             or filtered is None
             or decision.emergency
             or decision.action in (ControlAction.REDUCING, ControlAction.SUSPENDED)
-            or sample.battery_status == "Charging"
             or sample.age_s > c.fresh_age_s
             or now < self.controller.settle_until
-            or filtered <= self.controller.voltage_bounds_v[0] + c.safety_margin_v + c.deadband_v
         ):
             return decision
-        step_ma = round(c.increase_step_w / sample.raw_voltage_v * 1000)
-        target_ma = min(self.hypervolt_actuator.maximum_ma, ev_ma + step_ma)
+        voltage_clear = (
+            filtered > self.controller.voltage_bounds_v[0] + c.safety_margin_v + c.deadband_v
+        )
+        if sample.battery_status != "Charging":
+            if ev_ma >= self.hypervolt_actuator.maximum_ma or not voltage_clear:
+                return decision
+            step_ma = round(c.increase_step_w / sample.raw_voltage_v * 1000)
+            target_ma = min(self.hypervolt_actuator.maximum_ma, ev_ma + step_ma)
+            reason = "the battery is not charging from the grid"
+        elif c.ev_priority == "battery":
+            headroom_w = self.import_actuator.commanded_w - max(0.0, -sample.grid_kw * 1_000)
+            if headroom_w < EV_PINNED_MARGIN_W and ev_ma > self.hypervolt_actuator.minimum_ma:
+                step_ma = round(c.reduction_step_w / sample.raw_voltage_v * 1000)
+                target_ma = max(self.hypervolt_actuator.minimum_ma, ev_ma - step_ma)
+                reason = "the import ceiling is holding the battery back"
+            elif (
+                headroom_w > c.increase_step_w + EV_PINNED_MARGIN_W
+                and ev_ma < self.hypervolt_actuator.maximum_ma
+                and voltage_clear
+            ):
+                step_ma = round(c.increase_step_w / sample.raw_voltage_v * 1000)
+                target_ma = min(self.hypervolt_actuator.maximum_ma, ev_ma + step_ma)
+                reason = "the battery is charging below the import ceiling"
+            else:
+                return decision
+        else:
+            return decision
         try:
             written, _ = self.hypervolt_actuator.command_ma(target_ma, now)
         except HypervoltError:
@@ -1780,10 +1824,8 @@ class VoltageControlRuntime:
             return decision
         battery_w = self.import_actuator.commanded_w
         self.controller.command_applied("import", battery_w, battery_w, sample.raw_voltage_v, now)
-        message = (
-            f"EV current restored towards {target_ma / 1000:g} A; "
-            "the battery is not charging from the grid"
-        )
+        verb = "trimmed" if target_ma < ev_ma else "restored"
+        message = f"EV current {verb} towards {target_ma / 1000:g} A; {reason}"
         self._event(decision, sample.grid_kw, None, None, message)
         return replace(decision, reason=f"{decision.reason}; {message}")
 

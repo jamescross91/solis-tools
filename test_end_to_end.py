@@ -685,6 +685,41 @@ class HypervoltPriorityTests(unittest.TestCase):
         self.assertTrue(hypervolt_applied, "expected the EV current to be raised")
         self.assertGreater(hypervolt_applied[0]["max_current"], 16000)
 
+    def test_battery_priority_trims_the_car_while_the_ceiling_holds_the_battery_back(self):
+        """Seen live: import pinned at the 16.5 kW ceiling while the car drew
+        32 A, so the inverter charged the battery at 3.3 kW instead of 9.4."""
+        import tempfile
+
+        bank = self._bank(voltage_raw=2400)
+        bank[33263], bank[33264] = 0xFFFF, 0xC950  # -14.0 kW: at the ceiling
+        with tempfile.TemporaryDirectory() as directory:
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.set_charging(True, true_milli_amps=32000)
+                samples = self._run("battery", inverter, hypervolt, directory)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertTrue(samples[-1]["voltage_control"]["ev_charging"])
+        self.assertTrue(hypervolt_applied, "expected the EV current to be cut")
+        self.assertLess(hypervolt_applied[0]["max_current"], 32000)
+        self.assertTrue(
+            all(applied["max_current"] < 32000 for applied in hypervolt_applied),
+            "the car must never be raised while the battery is held back",
+        )
+
+    def test_battery_priority_gives_the_car_headroom_the_battery_leaves(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank = self._bank(voltage_raw=2400)  # charging, 2 kW import, 14 kW ceiling
+            with FakeInverter(bank) as inverter, FakeHypervoltCloud() as hypervolt:
+                hypervolt.max_current_ma = 16000
+                hypervolt.set_charging(True, true_milli_amps=16000)
+                self._run("battery", inverter, hypervolt, directory)
+                hypervolt_applied = list(hypervolt.applied)
+
+        self.assertTrue(hypervolt_applied, "expected the EV current to be raised")
+        self.assertGreater(hypervolt_applied[0]["max_current"], 16000)
+
     def test_the_stream_carries_the_live_charging_rate(self):
         import tempfile
 

@@ -114,7 +114,7 @@ The controller's change to the ceiling is therefore always applied in full.
 
 | Priority | Behaviour |
 | --- | --- |
-| `battery` (default) | The car is the flexible share. A cut lowers the ceiling and the car's current together, so the battery keeps charging at the same rate; a restore raises both. |
+| `battery` (default) | The car is the flexible share. A cut lowers the ceiling and the car's current together, so the battery keeps charging at the same rate. A restore raises the ceiling alone while the battery is charging from the grid, and the car only gets headroom the battery leaves (see below). |
 | `ev` | The battery is the flexible share. A cut lowers the ceiling and the inverter throttles the battery; the car is only cut once the battery's measured charging power is used up. |
 | `balanced` | The change to the car's share is half of the ceiling change, with any amount one side cannot absorb spilling over to the other. |
 
@@ -127,9 +127,12 @@ until it sat at its minimum under an unused ceiling.
 ceiling change (`delta_w`, negative to cut, positive to restore) between the
 battery's share, its measured charging power, and the car's, within each
 side's bounds. It is symmetric: one function handles cuts and restores for
-every priority, because a scheme that cuts the EV first but restores the
-battery first would leave the car starved of current it should have gotten
-back.
+every priority. Under `battery` priority with the battery charging from the
+grid, though, a restore never reaches it: it goes to the ceiling, and so to
+the battery. Handing it to the car first, before the ceiling write that can
+be suppressed, raised the car a step on every cycle while the ceiling stayed
+put. On a live site the car climbed from 16 A to 32 A and the battery fell
+from 9.4 kW to 3.3 kW.
 
 Priority only settles a contest between two loads charging from the grid.
 While the battery is idle or discharging there is nothing to protect, so:
@@ -146,12 +149,20 @@ response to voltage, and never touches the car under any priority. Before
 this, battery priority handed both kinds of reduction to the car, trimming it
 while the battery was discharging.
 
-Because the controller only restores through the Solis ceiling, which stops at
-measured demand, a car trimmed earlier would stay trimmed for the rest of its
-session. `VoltageControlRuntime._restore_ev_current` steps it back by
-`--increase-step-w` per write-rate interval while the battery is not
-grid charging, telemetry is fresh, the previous change has settled and the
-filtered voltage is clear of the import target, and logs each step.
+Between voltage-control actions `VoltageControlRuntime._balance_ev_current`
+moves the car one step per write-rate interval, once telemetry is fresh and the
+previous change has settled, and logs each step:
+
+- With the battery not grid charging, a car trimmed earlier steps back up by
+  `--increase-step-w` while the filtered voltage is clear of the import
+  target. The controller only restores through the Solis ceiling, which stops
+  at measured demand, so without this a trimmed car stayed trimmed for the
+  rest of its session.
+- Under `battery` priority with the battery grid charging, grid import within
+  300 W of the ceiling means the inverter is charging the battery less to
+  stay under it, so the car steps down by `--reduction-step-w`, no lower than
+  its minimum. With more than a step plus 300 W of headroom the battery has
+  all it wants, and the car steps up while the voltage is clear.
 
 `VoltageControlRuntime._allocate_ev_priority` is the only place amps and
 watts meet: it reads the controller's decision in watts, takes the car's new

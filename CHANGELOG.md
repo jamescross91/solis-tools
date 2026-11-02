@@ -16,6 +16,13 @@ versioning](https://semver.org/spec/v2.0.0.html).
   Hypervolt now sends them. The poller no longer asks every 5 minutes for the
   session socket Hypervolt retired, and `hypervolt_actuator.session_error` is
   always null.
+- `--ev-priority battery` now favours the battery while it charges from the
+  grid. Each increase in import allowance used to go to the car before the
+  inverter's ceiling moved; when that ceiling write was suppressed, the car
+  still rose a step on every cycle. On one site the car climbed from 16 A to
+  32 A while the battery fell from 9.4 kW to 3.3 kW. Increases now go to the
+  ceiling alone. While grid import sits at the ceiling the car is trimmed a
+  step at a time, and it is raised only when the battery leaves headroom.
 
 ## 0.10.0
 
