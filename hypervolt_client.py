@@ -50,8 +50,13 @@ _TOKEN_PATH = "/realms/retail-customers/protocol/openid-connect/token"
 _API_HOST = "api.hypervolt.co.uk"
 _USER_AGENT = "solis-tools-hypervolt-client/1"
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-# How long to wait before asking again for a session socket Hypervolt refused.
-SESSION_RETRY_S = 300.0
+# A sync socket that has sent nothing for this long is treated as lost and
+# reconnected. A connection broken by a network blip can stay "established"
+# here for days with nothing arriving, and the charger looked stuck: no
+# readings, and commands sent into the void. KEEPALIVE_PING_S makes sure
+# Hypervolt always has something to answer, even with the car unplugged.
+KEEPALIVE_PING_S = 30.0
+SILENT_LIMIT_S = 90.0
 
 
 class HypervoltError(ConnectionError):
@@ -137,8 +142,8 @@ class HypervoltState:
     true_milli_amps: int | None = None
     watt_hours: int | None = None
     updated_monotonic: float | None = None
-    # Why the session socket (live charging state and current draw) is not
-    # open, or None while it is. The charger is still controllable without it.
+    # Always None. It said why Hypervolt refused the separate session
+    # socket, which it has since retired; kept so the stream field stays.
     session_error: str | None = None
 
     def is_charging(self, now: float, stale_age_s: float) -> bool:
@@ -180,6 +185,8 @@ class _WebSocket:
         self.sock.settimeout(connect_timeout_s)
         self.host = host
         self._buffer = b""
+        # When any frame (a pong included) last arrived, for the keepalive.
+        self.last_frame_monotonic = time.monotonic()
 
     def handshake(self, path: str, headers: dict[str, str]) -> None:
         key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
@@ -240,6 +247,9 @@ class _WebSocket:
     def send_text(self, text: str) -> None:
         self._send_frame(0x1, text.encode("utf-8"))
 
+    def ping(self) -> None:
+        self._send_frame(0x9, b"")
+
     def _send_frame(self, opcode: int, payload: bytes) -> None:
         header = bytearray([0x80 | opcode])
         length = len(payload)
@@ -287,6 +297,7 @@ class _WebSocket:
         elif length == 127:
             length = struct.unpack(">Q", self._read_exact(8))[0]
         payload = self._read_exact(length) if length else b""
+        self.last_frame_monotonic = time.monotonic()
         if not fin:
             raise HypervoltProtocolError("a fragmented Hypervolt websocket message arrived")
         if opcode == 0x8:
@@ -339,8 +350,9 @@ class HypervoltClient:
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
         self._sync_ws: _WebSocket | None = None
-        self._session_ws: _WebSocket | None = None
-        self._session_retry_at = 0.0
+        self._last_ping_at = 0.0
+        self.keepalive_ping_s = KEEPALIVE_PING_S
+        self.silent_limit_s = SILENT_LIMIT_S
 
     def _http_connection(self, host: str, port: int) -> http.client.HTTPConnection:
         if self.use_tls:
@@ -447,32 +459,9 @@ class HypervoltClient:
         except OSError as exc:
             self.close()
             raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
-        # Only the session socket reports live charging state and actual
-        # current draw; the sync socket's snapshot never includes them.
-        self._open_session()
+        self._last_ping_at = time.monotonic()
         self.state.connected = True
         self.state.charger_id = self.charger_id
-
-    def _open_session(self) -> None:
-        """Open the session socket, or note why not and retry later.
-
-        Hypervolt has refused it (HTTP 404) while the sync socket worked, which
-        used to fail the whole connection and, at startup, the poller with
-        it. Without it the charger can still be capped; charging just reads
-        as unknown, which `is_charging` already treats as not charging.
-        """
-        try:
-            ws = self._open(f"/ws/charger/{self.charger_id}/session/in-progress")
-            self._login(ws)
-        except HypervoltProtocolError as exc:
-            self._session_ws = None
-            self.state.session_error = str(exc)
-            self.state.charging = None
-            self.state.true_milli_amps = None
-            self._session_retry_at = time.monotonic() + SESSION_RETRY_S
-            return
-        self._session_ws = ws
-        self.state.session_error = None
 
     def _open(self, path: str) -> _WebSocket:
         # A socket error is the charger's cloud being unreachable, and must
@@ -507,11 +496,9 @@ class HypervoltClient:
             raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
 
     def close(self) -> None:
-        for ws in (self._sync_ws, self._session_ws):
-            if ws is not None:
-                ws.close()
+        if self._sync_ws is not None:
+            self._sync_ws.close()
         self._sync_ws = None
-        self._session_ws = None
         self.state.connected = False
 
     # --- wire helpers -----------------------------------------------------
@@ -569,26 +556,40 @@ class HypervoltClient:
             self.state.updated_monotonic = time.monotonic()
 
     def poll(self) -> HypervoltState:
-        """Drain whatever has arrived on either socket and return the state.
+        """Drain whatever has arrived and return the state.
 
-        Never blocks: each call reads only frames that are already pending.
+        Never blocks: it reads only frames that are already pending. Live
+        charging state and current draw arrive here too, as `get.session`
+        pushes; Hypervolt retired the separate session socket that used to
+        carry them. Raises HypervoltProtocolError once the socket has gone
+        quiet for `silent_limit_s`, so the caller reconnects.
         """
-        if self._sync_ws is None:
+        ws = self._sync_ws
+        if ws is None:
             raise HypervoltError("poll() called before connect()")
-        if self._session_ws is None and time.monotonic() >= self._session_retry_at:
-            self._open_session()
-        for ws in (self._sync_ws, self._session_ws):
-            if ws is None:
-                continue
-            while True:
-                try:
-                    text = ws.poll_recv(0.0)
-                except HypervoltProtocolError:
-                    self.close()
-                    raise
-                if text is None:
-                    break
-                self._apply_message(text)
+        while True:
+            try:
+                text = ws.poll_recv(0.0)
+            except HypervoltProtocolError:
+                self.close()
+                raise
+            if text is None:
+                break
+            self._apply_message(text)
+        now = time.monotonic()
+        silent_s = now - ws.last_frame_monotonic
+        if silent_s > self.silent_limit_s:
+            self.close()
+            raise HypervoltProtocolError(
+                f"Hypervolt sent nothing for {silent_s:.0f} s; reconnecting"
+            )
+        if now - self._last_ping_at >= self.keepalive_ping_s:
+            self._last_ping_at = now
+            try:
+                ws.ping()
+            except OSError as exc:
+                self.close()
+                raise HypervoltProtocolError(f"Hypervolt websocket connection lost: {exc}") from exc
         return self.state
 
     # --- control ------------------------------------------------------------

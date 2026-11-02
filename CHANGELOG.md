@@ -3,6 +3,20 @@
 Notable user-visible changes. This project follows [semantic
 versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- The charger no longer goes quiet for good after a network blip. The
+  Hypervolt connection could stay "open" with nothing arriving, so the
+  charger showed no readings and current commands went nowhere until the
+  poller restarted; on one Pi that lasted 36 hours. The poller now pings
+  Hypervolt every 30 seconds and reconnects after 90 seconds of silence.
+- Live charging state and current draw come from the sync socket, where
+  Hypervolt now sends them. The poller no longer asks every 5 minutes for the
+  session socket Hypervolt retired, and `hypervolt_actuator.session_error` is
+  always null.
+
 ## 0.10.0
 
 Under a Wattlark hub, the hub becomes the only thing that reads Octopus, and
