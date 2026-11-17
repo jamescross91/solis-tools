@@ -418,20 +418,33 @@ class ControllerTests(unittest.TestCase):
         decision = self.activated_decision(controller, 14_000, 230)
         self.assertEqual(decision.desired_limit_w, 14_000)
 
-    def test_import_allowance_cannot_rise_above_initial_demand_plus_headroom(self):
+    def test_import_allowance_rises_while_import_is_pinned_at_it(self):
+        """Seen live: import sat at a 10 kW ceiling, the voltage was 11 V clear
+        of the target, and the ceiling was trimmed rather than raised because
+        demand the controller had released was discounted to nothing."""
         controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
         initial = sample(0, voltage=220, grid_kw=-12)
         controller.evaluate(initial, 10_000, 5_000)
         increase = controller.evaluate(initial, 10_000, 5_000)
         self.assertEqual(increase.desired_limit_w, 10_200)
 
-        # Demand following the released allowance must not ratchet the session
-        # ceiling beyond the 14 kW established from the initial 12 kW peak.
         controller.command_applied("import", 10_000, 14_000, 220, 0, -12)
-        at_ceiling = controller.evaluate(sample(10, voltage=220, grid_kw=-14), 14_000, 5_000)
-        self.assertEqual(at_ceiling.action, ControlAction.HOLDING)
-        self.assertEqual(at_ceiling.desired_limit_w, 14_000)
-        self.assertIn("2 kW demand headroom", at_ceiling.reason)
+        controller.evaluate(sample(10, voltage=220, grid_kw=-14), 14_000, 5_000)
+        self.assertEqual(controller.import_controlled_demand_w, 0)
+        at_ceiling = controller.evaluate(sample(20, voltage=220, grid_kw=-14), 14_000, 5_000)
+        self.assertEqual(at_ceiling.action, ControlAction.INCREASING)
+        self.assertGreater(at_ceiling.desired_limit_w, 14_000)
+
+    def test_released_demand_below_the_ceiling_still_does_not_ratchet_it(self):
+        controller = self.controller(maximum_import_w=22_000, import_headroom_w=2_000)
+        initial = sample(0, voltage=220, grid_kw=-12)
+        controller.evaluate(initial, 14_000, 5_000)
+        controller.evaluate(initial, 14_000, 5_000)
+        controller.import_controlled_demand_w = 1_000
+        held = controller.evaluate(sample(10, voltage=220, grid_kw=-13), 14_000, 5_000)
+        self.assertEqual(controller.import_controlled_demand_w, 1_000)
+        self.assertEqual(held.action, ControlAction.HOLDING)
+        self.assertEqual(held.desired_limit_w, 14_000)
 
     def test_import_ceiling_uses_peak_during_activation_delay(self):
         controller = self.controller(
@@ -503,14 +516,15 @@ class ControllerTests(unittest.TestCase):
             import_headroom_w=2_000,
             settle_time_s=5,
         )
+        # Import well under the ceiling, so it is not being held down by it.
         initial = sample(0, voltage=220, grid_kw=-12)
-        controller.evaluate(initial, 10_000, 5_000)
-        controller.evaluate(initial, 10_000, 5_000)
-        controller.command_applied("import", 10_000, 10_200, 220, 0, -12)
+        controller.evaluate(initial, 13_000, 5_000)
+        controller.evaluate(initial, 13_000, 5_000)
+        controller.command_applied("import", 13_000, 13_200, 220, 0, -12)
 
-        controller.evaluate(sample(1, voltage=220, grid_kw=-12.2), 10_200, 5_000)
+        controller.evaluate(sample(1, voltage=220, grid_kw=-12.2), 13_200, 5_000)
         self.assertEqual(controller.import_demand_ceiling_w, 14_000)
-        controller.evaluate(sample(5, voltage=220, grid_kw=-12.2), 10_200, 5_000)
+        controller.evaluate(sample(5, voltage=220, grid_kw=-12.2), 13_200, 5_000)
         self.assertEqual(controller.import_controlled_demand_w, 200)
         self.assertEqual(controller.import_demand_ceiling_w, 14_000)
 

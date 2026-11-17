@@ -467,6 +467,9 @@ class DynamicVoltageController:
     """Discover the current safe power limit without assuming a fixed grid model."""
 
     import_ceiling_hysteresis_w = 500
+    # Import this close to the commanded ceiling is being held down by it: the
+    # inverter is charging the battery less, or discharging it, to stay under.
+    import_pinned_margin_w = 300
     import_demand_reduction_delay_s = 30.0
     export_ceiling_hysteresis_w = 500
     export_demand_reduction_delay_s = 30.0
@@ -776,6 +779,14 @@ class DynamicVoltageController:
         minimum_voltage_v, _ = self._voltage_bounds(sample)
         import_target_v = minimum_voltage_v + c.safety_margin_v
         measured_import_w = max(0, round(-sample.grid_kw * 1_000))
+        if measured_import_w >= current_w - self.import_pinned_margin_w:
+            # Demand is clipped by the ceiling, so none of the import is
+            # demand the controller merely released: the site wants at least
+            # this much and probably more. Discounting it here held the
+            # ceiling at 10 kW with the voltage 11 V clear of the target and
+            # the battery throttled to nothing, because the discount had
+            # grown to the whole of the headroom.
+            self.import_controlled_demand_w = 0
         measured_ceiling_w = max(
             c.minimum_import_w,
             min(

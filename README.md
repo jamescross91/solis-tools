@@ -243,6 +243,10 @@ Each import-control session starts with a demand ceiling from its first measured
 grid peak plus the configured headroom. The ceiling follows genuine measured
 demand down and back up, but discounts the observed response to its own recent
 commands so released charging demand cannot ratchet it towards the hard maximum.
+The discount does not apply while import sits within 300 W of the ceiling: the
+ceiling is then what holds demand down, so the voltage alone decides whether it
+rises. Discounting there once held a 10 kW ceiling, with the voltage 11 V clear
+of the target, while the inverter throttled the battery to nothing.
 Rises are accepted promptly; a 500 W change must persist for 30 seconds before
 the ceiling falls, preventing brief load dips from causing a large trim followed
 by a slow climb. Voltage-triggered safety reductions remain immediate. The
