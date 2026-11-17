@@ -96,7 +96,7 @@ optional, so an older read-only poller still decodes.
 | `estimated_voltage_sensitivity_v_per_kw` | Recent measured response estimate, or null |
 | `import_actuator`, `export_actuator` | Register diagnostics described below |
 | `export_write_validated` | Whether matching endpoint evidence permits export writes; UI may use this gate but must not infer it |
-| `import_demand_ceiling_w` | Current import-session demand ceiling; follows estimated external demand plus headroom after discounting settled controller-induced demand, and is re-anchored by a manual limit change, or null outside a session |
+| `import_demand_ceiling_w` | Current import-session demand ceiling; follows estimated external demand plus headroom after discounting settled controller-induced demand (not while import is within 300 W of the ceiling, when the ceiling is what holds demand down), and is re-anchored by a manual limit change, or null outside a session |
 | `recent_events` | Up to 20 recent events from the running process. **Present in the first sample and whenever the log has changed since the previous sample; absent otherwise.** Consumers keep the last list they received; the menu-bar app does this in `MonitorStore` |
 | `daily_summary` | Current local-day aggregates, refreshed approximately once a minute, or null |
 | `recovery_note` | Startup recovery explanation, or null |

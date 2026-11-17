@@ -14,6 +14,13 @@ versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The import ceiling rises again while import is pinned at it. Import the
+  controller had released by raising the ceiling was discounted from demand,
+  and over a charge that discount grew to the whole headroom, so the ceiling
+  was trimmed instead: on one site it sat at 10 kW with the voltage 11 V clear
+  of the target, while the inverter throttled the battery to nothing or
+  discharged it. With import within 300 W of the ceiling the discount is now
+  cleared and the voltage alone decides whether the ceiling rises.
 - The charger no longer goes quiet for good after a network blip. The
   Hypervolt connection could stay "open" with nothing arriving, so the
   charger showed no readings and current commands went nowhere until the
